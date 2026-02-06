@@ -1,9 +1,5 @@
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bond_Parser.py
-https://raw.githubusercontent.com/Habosjob/Vibe/main/bonds_parser.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
-https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_json_dumps/TQCB_page_1.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_json_dumps/TQDB_page_1.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_json_dumps/TQOB_page_1.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_json_dumps/boards_response.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_download_20260206_223124.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt

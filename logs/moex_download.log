@@ -1,0 +1,26 @@
+2026-02-06 22:37:25,497 - INFO - [setup_logging] - Инициализировано логирование. Файл: logs\moex_download.log (режим перезаписи)
+2026-02-06 22:37:25,497 - INFO - [main] - ============================================================
+2026-02-06 22:37:25,497 - INFO - [main] - НАЧАЛО РАБОТЫ СКРИПТА ЗАГРУЗКИ ДАННЫХ MOEX
+2026-02-06 22:37:25,497 - INFO - [main] - ============================================================
+2026-02-06 22:37:25,497 - INFO - [download_moex_data] - Начинаем загрузку данных
+2026-02-06 22:37:25,509 - DEBUG - [download_moex_data] - URL: https://iss.moex.com/iss/apps/infogrid/stock/rates.csv?sec_type=stock_ofz_bond,stock_cb_bond,stock_subfederal_bond,stock_municipal_bond,stock_corporate_bond,stock_exchange_bond&iss.dp=comma&iss.df=%25d.%25m.%25Y&iss.tf=%25H:%25M:%25S&iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru
+2026-02-06 22:37:26,544 - INFO - [download_moex_data] - УСПЕХ: Загружено 3891 строк, 1 столбцов.
+2026-02-06 22:37:26,546 - DEBUG - [download_moex_data] - Столбцы в данных:
+  - rates
+2026-02-06 22:37:26,548 - DEBUG - [download_moex_data] - Пример данных (первые 3 строки):
+             rates
+FULL_COVERED_LIMIT
+                 0
+                 0
+2026-02-06 22:37:26,555 - DEBUG - [download_moex_data] - Типы данных столбцов:
+rates    object
+2026-02-06 22:37:26,555 - INFO - [analyze_data_freshness] - Анализ свежести загруженных данных...
+2026-02-06 22:37:26,555 - WARNING - [analyze_data_freshness] - Столбцы, похожие на дату/время, не найдены. Автоанализ невозможен.
+2026-02-06 22:37:26,556 - INFO - [save_to_excel] - Сохранение данных в Excel: moex_bond_rates.xlsx
+2026-02-06 22:37:27,122 - INFO - [save_to_excel] - УСПЕХ: Файл 'moex_bond_rates.xlsx' сохранён. Размер: 24.72 KB.
+2026-02-06 22:37:27,124 - INFO - [main] - Основные этапы скрипта выполнены успешно.
+2026-02-06 22:37:27,124 - INFO - [main] - ============================================================
+2026-02-06 22:37:27,124 - INFO - [main] - ИТОГИ ВЫПОЛНЕНИЯ
+2026-02-06 22:37:27,124 - INFO - [main] - Общее время работы: 1.63 секунд
+2026-02-06 22:37:27,124 - INFO - [main] - Дата/время завершения: 2026-02-06 22:37:27
+2026-02-06 22:37:27,124 - INFO - [main] - ============================================================
