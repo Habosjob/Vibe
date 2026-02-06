@@ -4,23 +4,22 @@ import time
 import os
 from datetime import datetime
 import sys
+import requests
+from io import StringIO
 
 def setup_logging():
     """
     Настройка системы логирования.
-    Теперь используется один перезаписываемый файл лога.
+    Используется один перезаписываемый файл лога.
     """
-    # Создаем директорию для логов, если её нет
     log_dir = "logs"
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
         print(f"Создана директория для логов: {log_dir}")
 
-    # ФИКС: Используем фиксированное имя файла для перезаписываемого лога
     log_filename = os.path.join(log_dir, "moex_download.log")
     log_format = '%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s'
 
-    # Настройка логирования. mode='w' перезаписывает файл при каждом запуске.
     logging.basicConfig(
         level=logging.DEBUG,
         format=log_format,
@@ -36,40 +35,48 @@ def setup_logging():
 def download_moex_data(url, logger):
     """
     Загрузка данных с MOEX по URL.
-    ФИКС: Изменена кодировка с 'utf-8' на 'windows-1251' для корректного чтения.
+    Исправлено: Используется requests с заголовками для получения корректного CSV.
     """
     try:
         logger.info(f"Начинаем загрузку данных")
         logger.debug(f"URL: {url}")
 
-        # ФИКС: Изменена кодировка на 'windows-1251'
-        df = pd.read_csv(
-            url,
-            sep=';',
-            encoding='windows-1251',  # Основная правка для обработки данных MOEX
-            on_bad_lines='warn'
-        )
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Добавляем заголовки HTTP-запроса
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+        response = requests.get(url, headers=headers, timeout=30)
+        response.encoding = 'windows-1251'  # Устанавливаем кодировку ответа
+        logger.debug(f"HTTP статус ответа: {response.status_code}")
+
+        # Проверяем первые 500 символов для диагностики
+        sample_content = response.text[:500]
+        logger.debug(f"Начало полученного ответа (500 символов):\n---\n{sample_content}\n---")
+
+        # Используем StringIO для передачи текста в pandas
+        csv_data = StringIO(response.text)
+        df = pd.read_csv(csv_data, sep=';', on_bad_lines='warn')
 
         logger.info(f"УСПЕХ: Загружено {df.shape[0]} строк, {df.shape[1]} столбцов.")
         logger.debug("Столбцы в данных:\n" + "\n".join([f"  - {col}" for col in df.columns]))
 
-        if not df.empty:
-            # Выводим в лог срез данных для проверки
+        if not df.empty and df.shape[1] > 1:  # Проверяем, что столбцов больше одного
             sample_data = df.head(3).to_string(index=False)
             logger.debug(f"Пример данных (первые 3 строки):\n{sample_data}")
-            # Логируем типы данных для отладки
-            type_info = df.dtypes.to_string()
-            logger.debug(f"Типы данных столбцов:\n{type_info}")
+        elif df.shape[1] == 1:
+            # Если все еще одна колонка, логируем ошибку структуры
+            logger.error(f"ОШИБКА СТРУКТУРЫ: Данные содержат только 1 столбец '{df.columns[0]}'.")
+            logger.error("Это означает, что получен невалидный CSV. Проверьте URL и параметры запроса.")
+            return None
 
         return df
 
-    except UnicodeDecodeError as ude:
-        # Специальная обработка ошибки кодировки
-        logger.error(f"ОШИБКА КОДИРОВКИ: {ude}", exc_info=True)
-        logger.error("Попробуйте изменить кодировку в вызове pd.read_csv на 'cp1251' или 'utf-8-sig'.")
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"ОШИБКА СЕТЕВОГО ЗАПРОСА: {req_err}", exc_info=False)
         return None
     except Exception as e:
-        logger.error(f"ОШИБКА ПРИ ЗАГРУЗКЕ: {str(e)}", exc_info=True)
+        logger.error(f"ОБЩАЯ ОШИБКА ПРИ ЗАГРУЗКЕ: {str(e)}", exc_info=True)
         return None
 
 def save_to_excel(df, filename='moex_bond_rates.xlsx', logger=None):
@@ -83,7 +90,6 @@ def save_to_excel(df, filename='moex_bond_rates.xlsx', logger=None):
             workbook = writer.book
             worksheet = writer.sheets['BondRates']
 
-            # Автонастройка ширины столбцов
             for column in worksheet.columns:
                 max_length = 0
                 column_letter = column[0].column_letter
@@ -109,9 +115,12 @@ def save_to_excel(df, filename='moex_bond_rates.xlsx', logger=None):
 
 def analyze_data_freshness(df, logger):
     """Анализ свежести данных для проверки динамичности ссылки."""
+    if df is None or df.empty:
+        logger.warning("Анализ свежести пропущен: DataFrame пуст или не загружен.")
+        return
+
     logger.info("Анализ свежести загруженных данных...")
 
-    # Поиск столбцов, которые могут содержать дату/время
     possible_date_cols = []
     for col in df.columns:
         col_lower = col.lower()
@@ -120,13 +129,14 @@ def analyze_data_freshness(df, logger):
 
     if not possible_date_cols:
         logger.warning("Столбцы, похожие на дату/время, не найдены. Автоанализ невозможен.")
+        # Выведем все названия столбцов для ручной проверки
+        logger.info(f"Все доступные столбцы: {list(df.columns)}")
         return
 
     logger.info(f"Найдены потенциальные столбцы с датой: {possible_date_cols}")
 
     for col in possible_date_cols:
         try:
-            # Пробуем преобразовать столбец в datetime
             df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
             latest_date = df[col].max()
 
@@ -137,7 +147,7 @@ def analyze_data_freshness(df, logger):
             time_diff = datetime.now() - latest_date.replace(tzinfo=None)
 
             if time_diff.days == 0:
-                if time_diff.seconds < 300:  # 5 минут
+                if time_diff.seconds < 300:
                     logger.warning(f"  -> Данные очень свежие ({time_diff.seconds} сек). Ссылка ДИНАМИЧЕСКАЯ.")
                 else:
                     logger.info(f"  -> Данные за сегодня ({time_diff.seconds // 3600} ч. назад).")
@@ -153,30 +163,29 @@ def main():
     logger = setup_logging()
 
     logger.info("=" * 60)
-    logger.info("НАЧАЛО РАБОТЫ СКРИПТА ЗАГРУЗКИ ДАННЫХ MOEX")
+    logger.info("НАЧАЛО РАБОТЫ СКРИПТА ЗАГРУЗКИ ДАННЫХ MOEX (ИСПРАВЛЕННАЯ ВЕРСИЯ)")
     logger.info("=" * 60)
 
-    # Целевой URL
     target_url = "https://iss.moex.com/iss/apps/infogrid/stock/rates.csv?sec_type=stock_ofz_bond,stock_cb_bond,stock_subfederal_bond,stock_municipal_bond,stock_corporate_bond,stock_exchange_bond&iss.dp=comma&iss.df=%25d.%25m.%25Y&iss.tf=%25H:%25M:%25S&iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru"
 
-    # 1. Загрузка данных
     data_frame = download_moex_data(target_url, logger)
 
-    if data_frame is not None:
-        # 2. Анализ свежести данных
+    if data_frame is not None and not data_frame.empty:
         analyze_data_freshness(data_frame, logger)
-
-        # 3. Сохранение в Excel
         excel_saved = save_to_excel(data_frame, logger=logger)
 
         if excel_saved:
             logger.info("Основные этапы скрипта выполнены успешно.")
+            # Краткий вывод в консоль для быстрой проверки
+            print(f"\n[КРАТКИЙ ОТЧЕТ]")
+            print(f"Загружено: {data_frame.shape[0]} строк, {data_frame.shape[1]} столбцов.")
+            print(f"Столбцы: {', '.join(list(data_frame.columns)[:5])}{'...' if len(data_frame.columns) > 5 else ''}")
+            print(f"Сохранено в: moex_bond_rates.xlsx")
         else:
             logger.error("Не удалось сохранить данные в Excel.")
     else:
-        logger.critical("Загрузка данных не удалась. Дальнейшие этапы пропущены.")
+        logger.critical("Загрузка данных не удалась или получены пустые данные. Дальнейшие этапы пропущены.")
 
-    # Итоговая статистика
     total_time = time.time() - script_start
     logger.info("=" * 60)
     logger.info("ИТОГИ ВЫПОЛНЕНИЯ")

@@ -1,26 +1,26 @@
-2026-02-06 22:37:25,497 - INFO - [setup_logging] - Инициализировано логирование. Файл: logs\moex_download.log (режим перезаписи)
-2026-02-06 22:37:25,497 - INFO - [main] - ============================================================
-2026-02-06 22:37:25,497 - INFO - [main] - НАЧАЛО РАБОТЫ СКРИПТА ЗАГРУЗКИ ДАННЫХ MOEX
-2026-02-06 22:37:25,497 - INFO - [main] - ============================================================
-2026-02-06 22:37:25,497 - INFO - [download_moex_data] - Начинаем загрузку данных
-2026-02-06 22:37:25,509 - DEBUG - [download_moex_data] - URL: https://iss.moex.com/iss/apps/infogrid/stock/rates.csv?sec_type=stock_ofz_bond,stock_cb_bond,stock_subfederal_bond,stock_municipal_bond,stock_corporate_bond,stock_exchange_bond&iss.dp=comma&iss.df=%25d.%25m.%25Y&iss.tf=%25H:%25M:%25S&iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru
-2026-02-06 22:37:26,544 - INFO - [download_moex_data] - УСПЕХ: Загружено 3891 строк, 1 столбцов.
-2026-02-06 22:37:26,546 - DEBUG - [download_moex_data] - Столбцы в данных:
+2026-02-06 22:41:37,088 - INFO - [setup_logging] - Инициализировано логирование. Файл: logs\moex_download.log (режим перезаписи)
+2026-02-06 22:41:37,088 - INFO - [main] - ============================================================
+2026-02-06 22:41:37,088 - INFO - [main] - НАЧАЛО РАБОТЫ СКРИПТА ЗАГРУЗКИ ДАННЫХ MOEX (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+2026-02-06 22:41:37,088 - INFO - [main] - ============================================================
+2026-02-06 22:41:37,088 - INFO - [download_moex_data] - Начинаем загрузку данных
+2026-02-06 22:41:37,088 - DEBUG - [download_moex_data] - URL: https://iss.moex.com/iss/apps/infogrid/stock/rates.csv?sec_type=stock_ofz_bond,stock_cb_bond,stock_subfederal_bond,stock_municipal_bond,stock_corporate_bond,stock_exchange_bond&iss.dp=comma&iss.df=%25d.%25m.%25Y&iss.tf=%25H:%25M:%25S&iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru
+2026-02-06 22:41:37,088 - DEBUG - [_new_conn] - Starting new HTTPS connection (1): iss.moex.com:443
+2026-02-06 22:41:37,741 - DEBUG - [_make_request] - https://iss.moex.com:443 "GET /iss/apps/infogrid/stock/rates.csv?sec_type=stock_ofz_bond,stock_cb_bond,stock_subfederal_bond,stock_municipal_bond,stock_corporate_bond,stock_exchange_bond&iss.dp=comma&iss.df=%25d.%25m.%25Y&iss.tf=%25H:%25M:%25S&iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru HTTP/1.1" 200 1540124
+2026-02-06 22:41:37,995 - DEBUG - [download_moex_data] - HTTP статус ответа: 200
+2026-02-06 22:41:38,011 - DEBUG - [download_moex_data] - Начало полученного ответа (500 символов):
+---
+rates
+
+SECID;SHORTNAME;NAME;TYPENAME;ISIN;REGNUMBER;LISTLEVEL;FACEVALUE;FACEUNIT;ISSUESIZE;IS_COLLATERAL;IS_EXTERNAL;PRIMARY_BOARDID;PRIMARY_BOARD_TITLE;MATDATE;IS_RII;INCLUDEDBYMOEX;IS_QUALIFIED_INVESTORS;HIGH_RISK;EVENINGSESSION;MORNINGSESSION;WEEKENDSESSION;BOND_TYPE;BOND_SUBTYPE;SUSPENSION_LISTING;ZSPREAD;WAPRICE;YIELDATWAP;ISSUEDATE;REGISTRYCLOSEDATE;DIVIDENDVALUE;DIVIDENDYIELD;REGISTRYCLOSETYPE;EMITENTNAME;INN;LOTSIZE;PRICE;PRICE_RUB;RTL1;RTH1;RTL2;RTH2;RTL3;RTH3;DISCOUNT1;LIMIT1;DISCOUNT2
+---
+2026-02-06 22:41:38,153 - INFO - [download_moex_data] - УСПЕХ: Загружено 3891 строк, 1 столбцов.
+2026-02-06 22:41:38,153 - DEBUG - [download_moex_data] - Столбцы в данных:
   - rates
-2026-02-06 22:37:26,548 - DEBUG - [download_moex_data] - Пример данных (первые 3 строки):
-             rates
-FULL_COVERED_LIMIT
-                 0
-                 0
-2026-02-06 22:37:26,555 - DEBUG - [download_moex_data] - Типы данных столбцов:
-rates    object
-2026-02-06 22:37:26,555 - INFO - [analyze_data_freshness] - Анализ свежести загруженных данных...
-2026-02-06 22:37:26,555 - WARNING - [analyze_data_freshness] - Столбцы, похожие на дату/время, не найдены. Автоанализ невозможен.
-2026-02-06 22:37:26,556 - INFO - [save_to_excel] - Сохранение данных в Excel: moex_bond_rates.xlsx
-2026-02-06 22:37:27,122 - INFO - [save_to_excel] - УСПЕХ: Файл 'moex_bond_rates.xlsx' сохранён. Размер: 24.72 KB.
-2026-02-06 22:37:27,124 - INFO - [main] - Основные этапы скрипта выполнены успешно.
-2026-02-06 22:37:27,124 - INFO - [main] - ============================================================
-2026-02-06 22:37:27,124 - INFO - [main] - ИТОГИ ВЫПОЛНЕНИЯ
-2026-02-06 22:37:27,124 - INFO - [main] - Общее время работы: 1.63 секунд
-2026-02-06 22:37:27,124 - INFO - [main] - Дата/время завершения: 2026-02-06 22:37:27
-2026-02-06 22:37:27,124 - INFO - [main] - ============================================================
+2026-02-06 22:41:38,153 - ERROR - [download_moex_data] - ОШИБКА СТРУКТУРЫ: Данные содержат только 1 столбец 'rates'.
+2026-02-06 22:41:38,153 - ERROR - [download_moex_data] - Это означает, что получен невалидный CSV. Проверьте URL и параметры запроса.
+2026-02-06 22:41:38,158 - CRITICAL - [main] - Загрузка данных не удалась или получены пустые данные. Дальнейшие этапы пропущены.
+2026-02-06 22:41:38,158 - INFO - [main] - ============================================================
+2026-02-06 22:41:38,158 - INFO - [main] - ИТОГИ ВЫПОЛНЕНИЯ
+2026-02-06 22:41:38,158 - INFO - [main] - Общее время работы: 1.07 секунд
+2026-02-06 22:41:38,158 - INFO - [main] - Дата/время завершения: 2026-02-06 22:41:38
+2026-02-06 22:41:38,161 - INFO - [main] - ============================================================
