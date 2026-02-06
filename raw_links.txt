@@ -1,3 +1,5 @@
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bond_Parser.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/bonds_parser.log
+https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
