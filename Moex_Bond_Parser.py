@@ -1,6 +1,6 @@
 """
 MOEX Bonds Parser - Парсер облигаций Московской биржи
-Версия 6.0 - Стабильная и доработанная
+Версия 7.0 - с исправлением парсинга данных
 """
 
 import logging
@@ -9,7 +9,7 @@ import json
 import os
 import sys
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
@@ -37,7 +37,7 @@ class MOEXBondsParser:
 
         # Логирование начала работы
         logging.info("=" * 80)
-        logging.info("MOEX BONDS PARSER - ЗАПУСК (Версия 6.0)")
+        logging.info("MOEX BONDS PARSER - ЗАПУСК (Версия 7.0)")
         logging.info(f"Дата и время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logging.info(f"Файл Excel: {self.excel_path}")
         logging.info(f"Лог файл: {self.log_path}")
@@ -49,7 +49,7 @@ class MOEXBondsParser:
         session = requests.Session()
         retry = Retry(
             total=3,
-            backoff_factor=1.0,
+            backoff_factor=0.5,
             status_forcelist=[500, 502, 503, 504, 429],
             allowed_methods=['GET']
         )
@@ -102,7 +102,7 @@ class MOEXBondsParser:
             logging.info("=" * 80)
             logging.info("ЛОГ ФАЙЛ MOEX BONDS PARSER")
             logging.info(f"Создан: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            logging.info(f"Версия парсера: 6.0 (стабильная)")
+            logging.info(f"Версия парсера: 7.0 (с исправлением парсинга)")
             logging.info("=" * 80)
 
         except Exception as e:
@@ -121,7 +121,7 @@ class MOEXBondsParser:
         Returns:
             Ответ в виде словаря или None при ошибке
         """
-        logging.debug(f"Запрос: {operation} | URL: {url}")
+        logging.debug(f"Запрос: {operation} | URL: {url[:100]}...")
 
         try:
             response = self.session.get(url, params=params, timeout=30)
@@ -131,11 +131,14 @@ class MOEXBondsParser:
                 return None
             elif response.status_code != 200:
                 logging.error(f"Ошибка HTTP {response.status_code}: {url}")
+                logging.debug(f"Тело ответа: {response.text[:500]}")
                 return None
 
             # Пытаемся распарсить JSON
             try:
-                return response.json()
+                data = response.json()
+                logging.debug(f"Успешно получен JSON-ответ для {operation}")
+                return data
             except json.JSONDecodeError as e:
                 logging.error(f"Ошибка парсинга JSON: {str(e)}")
                 logging.debug(f"Ответ сервера (первые 500 символов): {response.text[:500]}")
@@ -240,45 +243,58 @@ class MOEXBondsParser:
                     'securities.columns': 'SECID,SHORTNAME,SECNAME,MATDATE,PREVLEGALCLOSEPRICE,ACCRUEDINT,COUPONPERIOD,COUPONPERCENT,ISIN,REGNUMBER,LOTVALUE,MINSTEP,PREVWAPRICE,CURRENCYID,FACEVALUE,ISSUESIZE,COUPONVALUE,NEXTCOUPON'
                 }
 
-                data = self._make_request(url, params, f"Получение облигаций с {board}")
+                data = self._make_request(url, params, f"Получение облигаций с {board} (start={start})")
 
                 if not data:
                     logging.warning(f"Нет данных от площадки {board}, прерывание.")
                     break
 
                 batch_found = False
-                # Обработка структуры ответа
+                batch_size = 0
+                # ИСПРАВЛЕНИЕ: Правильный парсинг структуры ответа MOEX
                 if isinstance(data, list) and len(data) > 1:
-                    # Ищем блок с данными облигаций
+                    # Проходим по всем элементам списка (блокам данных)
                     for item in data:
                         if isinstance(item, dict) and 'securities' in item:
-                            securities_data = item['securities']
-                            if 'data' in securities_data and 'columns' in securities_data:
-                                bonds_batch = securities_data['data']
-                                columns = securities_data['columns']
+                            securities_block = item['securities']
+                            # Проверяем наличие и структуру блока с данными
+                            if isinstance(securities_block, dict) and 'data' in securities_block:
+                                bonds_batch = securities_block['data']
+                                columns = securities_block.get('columns', [])
+                                batch_size = len(bonds_batch)
 
-                                # Обрабатываем облигации
-                                for bond_row in bonds_batch:
-                                    try:
-                                        bond_dict = dict(zip(columns, bond_row))
-                                        bond_dict['BOARDID'] = board
-                                        bonds.append(bond_dict)
-                                    except Exception as e:
-                                        logging.debug(f"Ошибка обработки строки облигации: {e}")
-                                        continue
+                                if batch_size > 0:
+                                    logging.debug(f"Найдено {batch_size} облигаций в пакете для {board}")
 
-                                batch_found = True
-                                # Проверяем, нужно ли продолжать пагинацию
-                                if len(bonds_batch) < limit:
-                                    fetch_more = False
-                                break  # Выходим из цикла for после нахождения данных
+                                    # Обрабатываем каждую облигацию в пакете
+                                    for bond_row in bonds_batch:
+                                        try:
+                                            # Создаем словарь "колонка -> значение"
+                                            bond_dict = {}
+                                            for idx, col_name in enumerate(columns):
+                                                if idx < len(bond_row):
+                                                    bond_dict[col_name] = bond_row[idx]
+                                                else:
+                                                    break
+                                            bond_dict['BOARDID'] = board
+                                            bonds.append(bond_dict)
+                                        except Exception as e:
+                                            logging.debug(f"Ошибка обработки строки облигации: {e}")
+                                            continue
+                                    batch_found = True
+                                break  # Выходим из цикла for после нахождения блока 'securities'
 
                 if not batch_found:
-                    logging.info(f"На площадке {board} больше нет данных.")
+                    logging.info(f"На площадке {board} не найден блок с данными облигаций.")
+                    fetch_more = False
+                elif batch_size < limit:
+                    # Если полученный пакет меньше лимита, это последняя страница
+                    logging.debug(f"Получен последний пакет с {board} (размер {batch_size} < лимита {limit})")
                     fetch_more = False
                 else:
-                    start += limit  # Увеличиваем offset для следующего запроса
-                    time.sleep(0.1)  # Задержка между запросами
+                    # Иначе переходим к следующей странице
+                    start += limit
+                    time.sleep(0.05)  # Небольшая задержка между запросами пагинации
 
             except Exception as e:
                 logging.error(f"Ошибка при загрузке данных с площадки {board}: {str(e)}")
@@ -305,7 +321,7 @@ class MOEXBondsParser:
             logging.debug(f"Пустой список secids для площадки {board}")
             return marketdata
 
-        # Разбиваем на чанки по 30 облигаций
+        # Разбиваем на чанки
         chunk_size = 30
         total_chunks = (len(secids) + chunk_size - 1) // chunk_size
         logging.info(f"Загрузка рыночных данных для {len(secids)} облигаций с площадки {board} (чанков: {total_chunks})...")
@@ -340,7 +356,7 @@ class MOEXBondsParser:
                                     except Exception as e:
                                         logging.debug(f"Ошибка обработки рыночных данных для строки: {e}")
                                         continue
-                time.sleep(0.2)
+                time.sleep(0.1)  # Короткая пауза
 
             except Exception as e:
                 logging.warning(f"Ошибка при обработке чанка {chunk_num}: {str(e)}")
@@ -368,7 +384,7 @@ class MOEXBondsParser:
                 return pd.DataFrame()
 
             all_bonds = []
-            stats = {'processed': 0, 'failed': 0}
+            stats = {'processed': 0, 'failed': 0, 'total_bonds': 0}
 
             # Собираем облигации со всех площадок
             for board in boards:
@@ -379,6 +395,7 @@ class MOEXBondsParser:
                     bonds = self.get_bonds_from_board(board)
 
                     if bonds:
+                        logging.debug(f"Получено {len(bonds)} облигаций с {board}. Запрос рыночных данных...")
                         # Получаем рыночные данные
                         secids = [bond.get('SECID') for bond in bonds if bond.get('SECID')]
                         marketdata = self.get_marketdata_for_bonds(board, secids)
@@ -393,21 +410,22 @@ class MOEXBondsParser:
 
                         all_bonds.extend(bonds)
                         stats['processed'] += 1
+                        stats['total_bonds'] += len(bonds)
                         board_time = time.time() - board_start
-                        logging.info(f"✓ {board}: {len(bonds)} облигаций, данные: {updated_count}/{len(bonds)}, время: {board_time:.2f} сек")
+                        logging.info(f"✓ {board}: {len(bonds)} облигаций, рыночные данные: {updated_count}/{len(bonds)}, время: {board_time:.2f} сек")
                     else:
-                        logging.warning(f"✗ {board}: не содержит облигаций")
+                        logging.warning(f"✗ {board}: не содержит облигаций (или не удалось их получить)")
                         stats['failed'] += 1
 
                 except Exception as e:
                     logging.error(f"✗ Ошибка обработки площадки {board}: {str(e)}")
                     stats['failed'] += 1
 
-                time.sleep(0.5)  # Задержка между площадками
+                time.sleep(0.3)  # Пауза между обработкой разных площадок
 
             # Создаем DataFrame
             if not all_bonds:
-                logging.error("Не удалось получить данные об облигациях")
+                logging.error("Не удалось получить данные об облигациях ни с одной площадки.")
                 return pd.DataFrame()
 
             df = pd.DataFrame(all_bonds)
@@ -438,8 +456,9 @@ class MOEXBondsParser:
             logging.info("=" * 60)
             logging.info("ПАРСИНГ ЗАВЕРШЕН")
             logging.info(f"Успешно обработано площадок: {stats['processed']}")
-            logging.info(f"Площадок с ошибками: {stats['failed']}")
-            logging.info(f"Уникальных облигаций: {len(df)}")
+            logging.info(f"Площадок с ошибками/пустых: {stats['failed']}")
+            logging.info(f"Всего загружено облигаций: {stats['total_bonds']}")
+            logging.info(f"Уникальных облигаций в итоге: {len(df)}")
             logging.info(f"Общее время выполнения: {total_time:.2f} сек")
             logging.info("=" * 60)
 
@@ -489,8 +508,8 @@ class MOEXBondsParser:
 
                 # Лист со статистикой
                 summary_data = {
-                    'Параметр': ['Всего облигаций', 'Дата выгрузки', 'Время выполнения скрипта'],
-                    'Значение': [len(df), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'См. лог файл']
+                    'Параметр': ['Всего облигаций', 'Дата выгрузки', 'Версия парсера'],
+                    'Значение': [len(df), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '7.0']
                 }
                 pd.DataFrame(summary_data).to_excel(writer, sheet_name='Сводка', index=False)
 
@@ -544,7 +563,7 @@ class MOEXBondsParser:
 def main():
     """Основная функция"""
     print("=" * 60)
-    print("MOEX BONDS PARSER v6.0")
+    print("MOEX BONDS PARSER v7.0")
     print("Парсер облигаций Московской биржи")
     print("=" * 60)
 
