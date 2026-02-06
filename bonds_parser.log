@@ -1,12 +1,120 @@
-2026-02-06 20:58:52,698 - INFO - ============================================================
-2026-02-06 20:58:52,698 - INFO - MOEX Bonds Parser �������
-2026-02-06 20:58:52,698 - INFO - ���� � �����: 2026-02-06 20:58:52
-2026-02-06 20:58:52,698 - INFO - ���� Excel ����� ��������: moex_bonds.xlsx
-2026-02-06 20:58:52,698 - INFO - ��� ����: bonds_parser.log
-2026-02-06 20:58:52,698 - INFO - ������ �������� ��������� MOEX...
-2026-02-06 20:58:52,698 - INFO - ��������� ������ �������� ��������...
-2026-02-06 20:58:53,107 - INFO - ������� 0 �������� �������� ��������
-2026-02-06 20:58:53,107 - ERROR - �� ������� �������� �������� ��������
-2026-02-06 20:58:53,121 - ERROR - �� ������� �������� ������ �� ����������
-2026-02-06 20:58:53,121 - INFO - ============================================================
-2026-02-06 20:58:53,122 - INFO - MOEX Bonds Parser �������� ������
+=== ЛОГ ФАЙЛ MOEX BONDS PARSER ===
+Создан: 2026-02-06 21:06:35
+================================================================================
+
+2026-02-06 21:06:35.719 [DEBUG   ] Логирование настроено: файл (DEBUG), консоль (INFO)
+2026-02-06 21:06:35.719 [INFO    ] ================================================================================
+2026-02-06 21:06:35.719 [INFO    ] MOEX BONDS PARSER - ЗАПУСК
+2026-02-06 21:06:35.719 [INFO    ] Дата и время: 2026-02-06 21:06:35
+2026-02-06 21:06:35.719 [INFO    ] Версия скрипта: 2.0 (с расширенным логированием)
+2026-02-06 21:06:35.732 [INFO    ] Файл Excel: moex_bonds.xlsx
+2026-02-06 21:06:35.732 [INFO    ] Лог файл: bonds_parser.log
+2026-02-06 21:06:35.732 [INFO    ] Базовый URL MOEX API: https://iss.moex.com/iss
+2026-02-06 21:06:35.732 [DEBUG   ] Инициализация парсера завершена
+2026-02-06 21:06:35.732 [INFO    ] ================================================================================
+2026-02-06 21:06:35.732 [INFO    ] ЗАПУСК ПАРСЕРА ОБЛИГАЦИЙ MOEX
+2026-02-06 21:06:35.733 [INFO    ] Идентификатор сессии: SESS_5733
+2026-02-06 21:06:35.734 [INFO    ] ================================================================================
+2026-02-06 21:06:35.734 [INFO    ] НАЧАЛО ПАРСИНГА ВСЕХ ОБЛИГАЦИЙ
+2026-02-06 21:06:35.735 [INFO    ] Время начала: 21:06:35
+2026-02-06 21:06:35.735 [INFO    ] Получение списка торговых площадок...
+2026-02-06 21:06:35.736 [DEBUG   ] [REQ_5736] Начало запроса: Получение торговых площадок
+2026-02-06 21:06:35.736 [DEBUG   ] [REQ_5736] URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards.json
+2026-02-06 21:06:35.736 [DEBUG   ] [REQ_5736] Параметры: {'iss.meta': 'off', 'iss.json': 'extended'}
+2026-02-06 21:06:35.744 [DEBUG   ] Starting new HTTPS connection (1): iss.moex.com:443
+2026-02-06 21:06:36.108 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards.json?iss.meta=off&iss.json=extended HTTP/1.1" 200 None
+2026-02-06 21:06:36.108 [DEBUG   ] [REQ_5736] Ответ получен за 0.372 сек
+2026-02-06 21:06:36.108 [DEBUG   ] [REQ_5736] HTTP статус: 200
+2026-02-06 21:06:36.108 [DEBUG   ] [REQ_5736] Размер ответа: 5024 байт
+2026-02-06 21:06:36.108 [DEBUG   ] [REQ_5736] JSON успешно распарсен
+2026-02-06 21:06:36.108 [DEBUG   ] [REQ_5736] Ответ является списком, длина: 2
+2026-02-06 21:06:36.108 [DEBUG   ] [REQ_5736] Общее время запроса: 0.372 сек
+2026-02-06 21:06:36.108 [DEBUG   ] Структура данных площадок: ['boards']
+2026-02-06 21:06:36.108 [ERROR   ] Ошибка при обработке данных площадок: list indices must be integers or slices, not str
+2026-02-06 21:06:36.108 [ERROR   ] Трассировка: Traceback (most recent call last):
+  File "C:\Users\user\Documents\Инвестиции\Vibe\Moex_Bond_Parser.py", line 211, in get_all_boards
+    boards = boards_data['boards']['data']
+             ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+TypeError: list indices must be integers or slices, not str
+
+2026-02-06 21:06:36.108 [INFO    ] Получено 4 площадок за 0.37 сек
+2026-02-06 21:06:36.108 [DEBUG   ] Список площадок: ['TQOB', 'TQCB', 'TQDB', 'TQBR']
+2026-02-06 21:06:36.108 [INFO    ] [1/4] Обработка площадки: TQOB
+2026-02-06 21:06:36.108 [INFO    ] Загрузка облигаций с площадки TQOB...
+2026-02-06 21:06:36.108 [DEBUG   ] Запрос облигаций с TQOB: start=0, limit=100
+2026-02-06 21:06:36.108 [DEBUG   ] [REQ_6108] Начало запроса: Получение облигаций с TQOB
+2026-02-06 21:06:36.108 [DEBUG   ] [REQ_6108] URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQOB/securities.json
+2026-02-06 21:06:36.108 [DEBUG   ] [REQ_6108] Параметры: {'iss.meta': 'off', 'iss.json': 'extended', 'limit': 100, 'start': 0, 'securities.columns': 'SECID,SHORTNAME,SECNAME,MATDATE,PREVLEGALCLOSEPRICE,ACCRUEDINT,COUPONPERIOD,COUPONPERCENT,ISIN,REGNUMBER,LOTVALUE,MINSTEP,PREVWAPRICE,CURRENCYID,FACEVALUE,ISSUESIZE,COUPONVALUE,NEXTCOUPON'}
+2026-02-06 21:06:36.151 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQOB/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
+2026-02-06 21:06:36.164 [DEBUG   ] [REQ_6108] Ответ получен за 0.056 сек
+2026-02-06 21:06:36.164 [DEBUG   ] [REQ_6108] HTTP статус: 200
+2026-02-06 21:06:36.164 [DEBUG   ] [REQ_6108] Размер ответа: 144515 байт
+2026-02-06 21:06:36.164 [DEBUG   ] [REQ_6108] JSON успешно распарсен
+2026-02-06 21:06:36.164 [DEBUG   ] [REQ_6108] Ответ является списком, длина: 2
+2026-02-06 21:06:36.164 [DEBUG   ] [REQ_6108] Общее время запроса: 0.056 сек
+2026-02-06 21:06:36.164 [WARNING ] Блок 'securities' не найден в ответе от площадки TQOB
+2026-02-06 21:06:36.168 [DEBUG   ] Элемент 0: тип=<class 'dict'>, содержимое={'charsetinfo': {'name': 'utf-8'}}
+2026-02-06 21:06:36.168 [DEBUG   ] Элемент 1: тип=<class 'dict'>, содержимое={'securities': [{'SECID': 'RU000A10DQA8', 'SHORTNAME': 'ОФЗ 33 CNY', 'SECNAME': 'ОФЗ-ПД 12156121V 01/06/33', 'MATDATE': '2033-06-01', 'PREVLEGALCLOSEPRICE': 104.2, 'ACCRUEDINT': 1328.186342, 'COUPONPE
+2026-02-06 21:06:36.168 [INFO    ] Загружено 0 облигаций с площадки TQOB
+2026-02-06 21:06:36.168 [WARNING ] ✗ Площадка TQOB: не содержит облигаций
+2026-02-06 21:06:36.672 [INFO    ] [2/4] Обработка площадки: TQCB
+2026-02-06 21:06:36.675 [INFO    ] Загрузка облигаций с площадки TQCB...
+2026-02-06 21:06:36.675 [DEBUG   ] Запрос облигаций с TQCB: start=0, limit=100
+2026-02-06 21:06:36.675 [DEBUG   ] [REQ_6675] Начало запроса: Получение облигаций с TQCB
+2026-02-06 21:06:36.675 [DEBUG   ] [REQ_6675] URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQCB/securities.json
+2026-02-06 21:06:36.675 [DEBUG   ] [REQ_6675] Параметры: {'iss.meta': 'off', 'iss.json': 'extended', 'limit': 100, 'start': 0, 'securities.columns': 'SECID,SHORTNAME,SECNAME,MATDATE,PREVLEGALCLOSEPRICE,ACCRUEDINT,COUPONPERIOD,COUPONPERCENT,ISIN,REGNUMBER,LOTVALUE,MINSTEP,PREVWAPRICE,CURRENCYID,FACEVALUE,ISSUESIZE,COUPONVALUE,NEXTCOUPON'}
+2026-02-06 21:06:36.729 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQCB/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
+2026-02-06 21:06:36.893 [DEBUG   ] [REQ_6675] Ответ получен за 0.218 сек
+2026-02-06 21:06:36.893 [DEBUG   ] [REQ_6675] HTTP статус: 200
+2026-02-06 21:06:36.893 [DEBUG   ] [REQ_6675] Размер ответа: 6102898 байт
+2026-02-06 21:06:36.962 [DEBUG   ] [REQ_6675] JSON успешно распарсен
+2026-02-06 21:06:36.962 [DEBUG   ] [REQ_6675] Ответ является списком, длина: 2
+2026-02-06 21:06:36.962 [DEBUG   ] [REQ_6675] Общее время запроса: 0.287 сек
+2026-02-06 21:06:36.962 [WARNING ] Блок 'securities' не найден в ответе от площадки TQCB
+2026-02-06 21:06:36.962 [DEBUG   ] Элемент 0: тип=<class 'dict'>, содержимое={'charsetinfo': {'name': 'utf-8'}}
+2026-02-06 21:06:37.062 [DEBUG   ] Элемент 1: тип=<class 'dict'>, содержимое={'securities': [{'SECID': 'BYM000001818', 'SHORTNAME': 'РесБел 331', 'SECNAME': 'РесБел 331 29.06.2027', 'MATDATE': '2027-06-29', 'PREVLEGALCLOSEPRICE': 101.6413, 'ACCRUEDINT': 671.667813, 'COUPONPERI
+2026-02-06 21:06:37.062 [INFO    ] Загружено 0 облигаций с площадки TQCB
+2026-02-06 21:06:37.069 [WARNING ] ✗ Площадка TQCB: не содержит облигаций
+2026-02-06 21:06:37.575 [INFO    ] [3/4] Обработка площадки: TQDB
+2026-02-06 21:06:37.576 [INFO    ] Загрузка облигаций с площадки TQDB...
+2026-02-06 21:06:37.576 [DEBUG   ] Запрос облигаций с TQDB: start=0, limit=100
+2026-02-06 21:06:37.576 [DEBUG   ] [REQ_7576] Начало запроса: Получение облигаций с TQDB
+2026-02-06 21:06:37.576 [DEBUG   ] [REQ_7576] URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQDB/securities.json
+2026-02-06 21:06:37.576 [DEBUG   ] [REQ_7576] Параметры: {'iss.meta': 'off', 'iss.json': 'extended', 'limit': 100, 'start': 0, 'securities.columns': 'SECID,SHORTNAME,SECNAME,MATDATE,PREVLEGALCLOSEPRICE,ACCRUEDINT,COUPONPERIOD,COUPONPERCENT,ISIN,REGNUMBER,LOTVALUE,MINSTEP,PREVWAPRICE,CURRENCYID,FACEVALUE,ISSUESIZE,COUPONVALUE,NEXTCOUPON'}
+2026-02-06 21:06:37.600 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQDB/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
+2026-02-06 21:06:37.600 [DEBUG   ] [REQ_7576] Ответ получен за 0.024 сек
+2026-02-06 21:06:37.600 [DEBUG   ] [REQ_7576] HTTP статус: 200
+2026-02-06 21:06:37.600 [DEBUG   ] [REQ_7576] Размер ответа: 238 байт
+2026-02-06 21:06:37.600 [DEBUG   ] [REQ_7576] JSON успешно распарсен
+2026-02-06 21:06:37.600 [DEBUG   ] [REQ_7576] Ответ является списком, длина: 2
+2026-02-06 21:06:37.600 [DEBUG   ] [REQ_7576] Общее время запроса: 0.024 сек
+2026-02-06 21:06:37.600 [WARNING ] Блок 'securities' не найден в ответе от площадки TQDB
+2026-02-06 21:06:37.607 [DEBUG   ] Элемент 0: тип=<class 'dict'>, содержимое={'charsetinfo': {'name': 'utf-8'}}
+2026-02-06 21:06:37.607 [DEBUG   ] Элемент 1: тип=<class 'dict'>, содержимое={'securities': [], 'marketdata': [], 'dataversion': [{'data_version': 8715, 'seqnum': 20260206210635, 'trade_date': '2026-02-06', 'trade_session_date': '2026-02-06'}], 'marketdata_yields': []}
+2026-02-06 21:06:37.607 [INFO    ] Загружено 0 облигаций с площадки TQDB
+2026-02-06 21:06:37.607 [WARNING ] ✗ Площадка TQDB: не содержит облигаций
+2026-02-06 21:06:38.109 [INFO    ] [4/4] Обработка площадки: TQBR
+2026-02-06 21:06:38.109 [INFO    ] Загрузка облигаций с площадки TQBR...
+2026-02-06 21:06:38.111 [DEBUG   ] Запрос облигаций с TQBR: start=0, limit=100
+2026-02-06 21:06:38.111 [DEBUG   ] [REQ_8111] Начало запроса: Получение облигаций с TQBR
+2026-02-06 21:06:38.111 [DEBUG   ] [REQ_8111] URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQBR/securities.json
+2026-02-06 21:06:38.111 [DEBUG   ] [REQ_8111] Параметры: {'iss.meta': 'off', 'iss.json': 'extended', 'limit': 100, 'start': 0, 'securities.columns': 'SECID,SHORTNAME,SECNAME,MATDATE,PREVLEGALCLOSEPRICE,ACCRUEDINT,COUPONPERIOD,COUPONPERCENT,ISIN,REGNUMBER,LOTVALUE,MINSTEP,PREVWAPRICE,CURRENCYID,FACEVALUE,ISSUESIZE,COUPONVALUE,NEXTCOUPON'}
+2026-02-06 21:06:38.141 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQBR/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
+2026-02-06 21:06:38.141 [DEBUG   ] [REQ_8111] Ответ получен за 0.030 сек
+2026-02-06 21:06:38.141 [DEBUG   ] [REQ_8111] HTTP статус: 200
+2026-02-06 21:06:38.141 [DEBUG   ] [REQ_8111] Размер ответа: 238 байт
+2026-02-06 21:06:38.141 [DEBUG   ] [REQ_8111] JSON успешно распарсен
+2026-02-06 21:06:38.141 [DEBUG   ] [REQ_8111] Ответ является списком, длина: 2
+2026-02-06 21:06:38.141 [DEBUG   ] [REQ_8111] Общее время запроса: 0.030 сек
+2026-02-06 21:06:38.141 [WARNING ] Блок 'securities' не найден в ответе от площадки TQBR
+2026-02-06 21:06:38.141 [DEBUG   ] Элемент 0: тип=<class 'dict'>, содержимое={'charsetinfo': {'name': 'utf-8'}}
+2026-02-06 21:06:38.141 [DEBUG   ] Элемент 1: тип=<class 'dict'>, содержимое={'securities': [], 'marketdata': [], 'dataversion': [{'data_version': 8715, 'seqnum': 20260206210635, 'trade_date': '2026-02-06', 'trade_session_date': '2026-02-06'}], 'marketdata_yields': []}
+2026-02-06 21:06:38.141 [INFO    ] Загружено 0 облигаций с площадки TQBR
+2026-02-06 21:06:38.141 [WARNING ] ✗ Площадка TQBR: не содержит облигаций
+2026-02-06 21:06:38.644 [ERROR   ] Не удалось получить данные об облигациях
+2026-02-06 21:06:38.648 [ERROR   ] ✗ Не удалось получить данные об облигациях
+2026-02-06 21:06:38.648 [DEBUG   ] HTTP сессия закрыта
+2026-02-06 21:06:38.648 [INFO    ] Общее время работы скрипта: 2.92 сек
+2026-02-06 21:06:38.648 [INFO    ] ================================================================================
+2026-02-06 21:06:38.648 [INFO    ] РАБОТА ПАРСЕРА ЗАВЕРШЕНА
+2026-02-06 21:06:38.652 [INFO    ] ================================================================================
