@@ -1,35 +1,42 @@
-=== ЛОГ ФАЙЛ MOEX BONDS PARSER ===
-Создан: 2026-02-06 21:19:51
-Версия парсера: 5.0 (стабильная)
-================================================================================
-
-2026-02-06 21:19:51 [INFO    ] ================================================================================
-2026-02-06 21:19:51 [INFO    ] MOEX BONDS PARSER - ЗАПУСК (Версия 5.0)
-2026-02-06 21:19:51 [INFO    ] Дата и время: 2026-02-06 21:19:51
-2026-02-06 21:19:51 [INFO    ] Файл Excel: moex_bonds.xlsx
-2026-02-06 21:19:51 [INFO    ] Лог файл: bonds_parser.log
-2026-02-06 21:19:51 [INFO    ] Базовый URL MOEX API: https://iss.moex.com/iss
-2026-02-06 21:19:51 [INFO    ] Начало парсинга облигаций MOEX...
-2026-02-06 21:19:51 [INFO    ] Получение списка торговых площадок...
-2026-02-06 21:19:51 [DEBUG   ] Запрос: Получение торговых площадок
-2026-02-06 21:19:51 [DEBUG   ] Starting new HTTPS connection (1): iss.moex.com:443
-2026-02-06 21:19:52 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards.json?iss.meta=off&iss.json=extended&limit=100 HTTP/1.1" 200 None
-2026-02-06 21:19:52 [INFO    ] Найдено 3 торговых площадок
-2026-02-06 21:19:52 [INFO    ] Загрузка облигаций с площадки TQOB...
-2026-02-06 21:19:52 [DEBUG   ] Запрос: Получение облигаций с TQOB
-2026-02-06 21:19:52 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQOB/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
-2026-02-06 21:19:52 [ERROR   ] Ошибка при загрузке данных с площадки TQOB: cannot access local variable 'bonds_data' where it is not associated with a value
-2026-02-06 21:19:52 [INFO    ] Загружено 0 облигаций с площадки TQOB
-2026-02-06 21:19:52 [INFO    ] Загрузка облигаций с площадки TQCB...
-2026-02-06 21:19:52 [DEBUG   ] Запрос: Получение облигаций с TQCB
-2026-02-06 21:19:53 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQCB/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
-2026-02-06 21:19:53 [ERROR   ] Ошибка при загрузке данных с площадки TQCB: cannot access local variable 'bonds_data' where it is not associated with a value
-2026-02-06 21:19:53 [INFO    ] Загружено 0 облигаций с площадки TQCB
-2026-02-06 21:19:53 [INFO    ] Загрузка облигаций с площадки TQDB...
-2026-02-06 21:19:53 [DEBUG   ] Запрос: Получение облигаций с TQDB
-2026-02-06 21:19:53 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQDB/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
-2026-02-06 21:19:53 [ERROR   ] Ошибка при загрузке данных с площадки TQDB: cannot access local variable 'bonds_data' where it is not associated with a value
-2026-02-06 21:19:53 [INFO    ] Загружено 0 облигаций с площадки TQDB
-2026-02-06 21:19:54 [WARNING ] Не удалось получить данные об облигациях
-2026-02-06 21:19:54 [ERROR   ] Не удалось получить данные об облигациях
-2026-02-06 21:19:54 [INFO    ] Общее время работы скрипта: 2.39 секунд
+2026-02-06 21:33:48 [INFO    ] ================================================================================
+2026-02-06 21:33:48 [INFO    ] ЛОГ ФАЙЛ MOEX BONDS PARSER
+2026-02-06 21:33:48 [INFO    ] Создан: 2026-02-06 21:33:48
+2026-02-06 21:33:48 [INFO    ] Версия парсера: 6.0 (стабильная)
+2026-02-06 21:33:48 [INFO    ] ================================================================================
+2026-02-06 21:33:48 [INFO    ] ================================================================================
+2026-02-06 21:33:48 [INFO    ] MOEX BONDS PARSER - ЗАПУСК (Версия 6.0)
+2026-02-06 21:33:48 [INFO    ] Дата и время: 2026-02-06 21:33:48
+2026-02-06 21:33:48 [INFO    ] Файл Excel: moex_bonds.xlsx
+2026-02-06 21:33:48 [INFO    ] Лог файл: bonds_parser.log
+2026-02-06 21:33:48 [INFO    ] Базовый URL MOEX API: https://iss.moex.com/iss
+2026-02-06 21:33:48 [INFO    ] Запуск парсера облигаций MOEX...
+2026-02-06 21:33:48 [INFO    ] Начало парсинга всех облигаций...
+2026-02-06 21:33:48 [INFO    ] Получение списка торговых площадок...
+2026-02-06 21:33:48 [DEBUG   ] Запрос: Получение торговых площадок | URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards.json
+2026-02-06 21:33:48 [DEBUG   ] Starting new HTTPS connection (1): iss.moex.com:443
+2026-02-06 21:33:48 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards.json?iss.meta=off&iss.json=extended&limit=100 HTTP/1.1" 200 None
+2026-02-06 21:33:48 [INFO    ] Найдено 3 торговых площадок: ['TQOB', 'TQCB', 'TQDB']
+2026-02-06 21:33:48 [INFO    ] Обработка площадки: TQOB
+2026-02-06 21:33:48 [INFO    ] Загрузка облигаций с площадки TQOB...
+2026-02-06 21:33:48 [DEBUG   ] Запрос: Получение облигаций с TQOB | URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQOB/securities.json
+2026-02-06 21:33:48 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQOB/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
+2026-02-06 21:33:48 [INFO    ] На площадке TQOB больше нет данных.
+2026-02-06 21:33:48 [INFO    ] Загружено 0 облигаций с площадки TQOB
+2026-02-06 21:33:48 [WARNING ] ✗ TQOB: не содержит облигаций
+2026-02-06 21:33:49 [INFO    ] Обработка площадки: TQCB
+2026-02-06 21:33:49 [INFO    ] Загрузка облигаций с площадки TQCB...
+2026-02-06 21:33:49 [DEBUG   ] Запрос: Получение облигаций с TQCB | URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQCB/securities.json
+2026-02-06 21:33:49 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQCB/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
+2026-02-06 21:33:49 [INFO    ] На площадке TQCB больше нет данных.
+2026-02-06 21:33:49 [INFO    ] Загружено 0 облигаций с площадки TQCB
+2026-02-06 21:33:49 [WARNING ] ✗ TQCB: не содержит облигаций
+2026-02-06 21:33:49 [INFO    ] Обработка площадки: TQDB
+2026-02-06 21:33:49 [INFO    ] Загрузка облигаций с площадки TQDB...
+2026-02-06 21:33:49 [DEBUG   ] Запрос: Получение облигаций с TQDB | URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQDB/securities.json
+2026-02-06 21:33:49 [DEBUG   ] https://iss.moex.com:443 "GET /iss/engines/stock/markets/bonds/boards/TQDB/securities.json?iss.meta=off&iss.json=extended&limit=100&start=0&securities.columns=SECID%2CSHORTNAME%2CSECNAME%2CMATDATE%2CPREVLEGALCLOSEPRICE%2CACCRUEDINT%2CCOUPONPERIOD%2CCOUPONPERCENT%2CISIN%2CREGNUMBER%2CLOTVALUE%2CMINSTEP%2CPREVWAPRICE%2CCURRENCYID%2CFACEVALUE%2CISSUESIZE%2CCOUPONVALUE%2CNEXTCOUPON HTTP/1.1" 200 None
+2026-02-06 21:33:49 [INFO    ] На площадке TQDB больше нет данных.
+2026-02-06 21:33:49 [INFO    ] Загружено 0 облигаций с площадки TQDB
+2026-02-06 21:33:49 [WARNING ] ✗ TQDB: не содержит облигаций
+2026-02-06 21:33:50 [ERROR   ] Не удалось получить данные об облигациях
+2026-02-06 21:33:50 [ERROR   ] Не удалось получить данные об облигациях
+2026-02-06 21:33:50 [INFO    ] Общее время работы скрипта: 2.46 секунд
