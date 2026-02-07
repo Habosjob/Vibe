@@ -1,0 +1,106 @@
+{
+  "securities": {
+    "metadata": {
+      "secid": {
+        "type": "string",
+        "bytes": 51,
+        "max_size": 0
+      },
+      "shortname": {
+        "type": "string",
+        "bytes": 189,
+        "max_size": 0
+      },
+      "regnumber": {
+        "type": "string",
+        "bytes": 189,
+        "max_size": 0
+      },
+      "name": {
+        "type": "string",
+        "bytes": 765,
+        "max_size": 0
+      },
+      "isin": {
+        "type": "string",
+        "bytes": 51,
+        "max_size": 0
+      },
+      "is_traded": {
+        "type": "int32"
+      },
+      "emitent_id": {
+        "type": "int32"
+      },
+      "emitent_title": {
+        "type": "string",
+        "bytes": 765,
+        "max_size": 0
+      },
+      "emitent_inn": {
+        "type": "string",
+        "bytes": 30,
+        "max_size": 0
+      },
+      "emitent_okpo": {
+        "type": "string",
+        "bytes": 24,
+        "max_size": 0
+      },
+      "type": {
+        "type": "string",
+        "bytes": 93,
+        "max_size": 0
+      },
+      "group": {
+        "type": "string",
+        "bytes": 93,
+        "max_size": 0
+      },
+      "primary_boardid": {
+        "type": "string",
+        "bytes": 12,
+        "max_size": 0
+      },
+      "marketprice_boardid": {
+        "type": "string",
+        "bytes": 12,
+        "max_size": 0
+      }
+    },
+    "columns": [
+      "secid",
+      "shortname",
+      "regnumber",
+      "name",
+      "isin",
+      "is_traded",
+      "emitent_id",
+      "emitent_title",
+      "emitent_inn",
+      "emitent_okpo",
+      "type",
+      "group",
+      "primary_boardid",
+      "marketprice_boardid"
+    ],
+    "data": [
+      [
+        "RU000A0ZZ885",
+        "КАМАЗ БО-9",
+        "4-09-55010-D",
+        "КАМАЗ ПАО об. БО-09",
+        "RU000A0ZZ885",
+        1,
+        855,
+        "Публичное акционерное общество \"КАМАЗ\"",
+        "1650032058",
+        "00231515",
+        "corporate_bond",
+        "stock_bonds",
+        "TQCB",
+        "TQCB"
+      ]
+    ]
+  }
+}

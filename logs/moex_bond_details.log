@@ -19,3 +19,17 @@
 2026-02-07 14:51:51,224 | WARNING | Неуспешный статус: 404 для https://iss.moex.com/iss/statistics/engines/stock/markets/bonds/bonds.json?iss.only=bonds&bonds.isin=RU000A0ZZ885
 2026-02-07 14:51:52,228 | INFO | Информация по ISIN RU000A0ZZ885 успешно получена и сохранена в responses/bond_details
 2026-02-07 14:51:52,231 | INFO | Завершение работы
+2026-02-07 15:13:08,592 - INFO - Starting data collection for ISIN: RU000A0ZZ885
+2026-02-07 15:13:08,593 - INFO - Requesting Security Search from https://iss.moex.com/iss/securities.json?q=RU000A0ZZ885
+2026-02-07 15:13:08,997 - INFO - Successfully received Security Search
+2026-02-07 15:13:10,001 - INFO - Requesting Security Info from https://iss.moex.com/iss/securities/RU000A0ZZ885.json
+2026-02-07 15:13:10,024 - INFO - Successfully received Security Info
+2026-02-07 15:13:11,035 - INFO - Requesting Bond Market Data from https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQOB/securities/RU000A0ZZ885.json
+2026-02-07 15:13:11,065 - INFO - Successfully received Bond Market Data
+2026-02-07 15:13:11,429 - INFO - Saved raw data to sheet 'security_search'
+2026-02-07 15:13:11,429 - INFO - Saved raw data to sheet 'security_info'
+2026-02-07 15:13:11,445 - INFO - Saved raw data to sheet 'bond_market_data'
+2026-02-07 15:13:11,486 - INFO - Excel file saved: RU000A0ZZ885.xlsx
+2026-02-07 15:13:11,486 - INFO - Collection completed in 2.48 seconds
+2026-02-07 15:13:11,486 - INFO - Successfully collected data from 3/3 endpoints
+2026-02-07 15:13:11,486 - INFO - Script execution completed successfully

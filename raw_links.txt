@@ -1,6 +1,7 @@
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bond_Parser.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_shares_Parser.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_bond_details.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_download.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_shares_download.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/script.log
@@ -9,3 +10,9 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bond_rates.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_shares_rates.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_engines_stock_markets_bonds_boards_tqob_securities_RU000A0ZZ885.json_20260207_145149_849178.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_engines_stock_markets_bonds_boards_tqob_securities_RU000A0ZZ885.json_20260207_145149_849178.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities.json_20260207_145145_722144.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities.json_20260207_145145_722144.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities_RU000A0ZZ885.json_20260207_145147_104806.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities_RU000A0ZZ885.json_20260207_145147_104806.txt

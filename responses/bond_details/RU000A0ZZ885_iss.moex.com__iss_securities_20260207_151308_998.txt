@@ -1,0 +1,28 @@
+URL: https://iss.moex.com/iss/securities.json?q=RU000A0ZZ885
+Status Code: 200
+Headers: {'Server': 'nginx', 'Date': 'Sat, 07 Feb 2026 12:13:08 GMT', 'Content-Type': 'application/json; charset=utf-8', 'Transfer-Encoding': 'chunked', 'Connection': 'keep-alive', 'Set-Cookie': 'MicexTrackID=60c71ba6.64a3ad431b564; path=/; expires=Sat, 07-Mar-26 12:13:08 GMT; domain=.moex.com', 'X-ISS-Profiling': 'url_parsing: 1.108000; queries_get: 0.000000, processing: 1.103000; lua: 1.099000', 'Cache-Control': 'max-age=5', 'Expires': 'Sat, 07 Feb 2026 12:13:13 GMT', 'X-MicexCacheTime': '5', 'X-MicexPassport-Marker': 'granted', 'Access-Control-Allow-Credentials': 'true', 'Access-Control-Expose-Headers': 'X-MicexPassport-Marker', 'X-Frame-Options': 'SAMEORIGIN', 'X-Request-ID': '41225e239097457d38ce3bb6e449aea6', 'X-XSS-Protection': '1; mode=block', 'Content-Encoding': 'gzip'}
+Content:
+{
+"securities": {
+	"metadata": {
+		"secid": {"type": "string", "bytes": 51, "max_size": 0},
+		"shortname": {"type": "string", "bytes": 189, "max_size": 0},
+		"regnumber": {"type": "string", "bytes": 189, "max_size": 0},
+		"name": {"type": "string", "bytes": 765, "max_size": 0},
+		"isin": {"type": "string", "bytes": 51, "max_size": 0},
+		"is_traded": {"type": "int32"},
+		"emitent_id": {"type": "int32"},
+		"emitent_title": {"type": "string", "bytes": 765, "max_size": 0},
+		"emitent_inn": {"type": "string", "bytes": 30, "max_size": 0},
+		"emitent_okpo": {"type": "string", "bytes": 24, "max_size": 0},
+		"type": {"type": "string", "bytes": 93, "max_size": 0},
+		"group": {"type": "string", "bytes": 93, "max_size": 0},
+		"primary_boardid": {"type": "string", "bytes": 12, "max_size": 0},
+		"marketprice_boardid": {"type": "string", "bytes": 12, "max_size": 0}
+	},
+	"columns": ["secid", "shortname", "regnumber", "name", "isin", "is_traded", "emitent_id", "emitent_title", "emitent_inn", "emitent_okpo", "type", "group", "primary_boardid", "marketprice_boardid"], 
+	"data": [
+		["RU000A0ZZ885", "КАМАЗ БО-9", "4-09-55010-D", "КАМАЗ ПАО об. БО-09", "RU000A0ZZ885", 1, 855, "Публичное акционерное общество \"КАМАЗ\"", "1650032058", "00231515", "corporate_bond", "stock_bonds", "TQCB", "TQCB"]
+	]
+}}
+
