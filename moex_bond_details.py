@@ -4,31 +4,33 @@ import time
 import os
 import sys
 import requests
-from datetime import datetime
 import json
+import argparse
+from datetime import datetime, timedelta
+from urllib.parse import urljoin
 
 # ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
-def setup_logging():
-    """Настройка логирования: детальные логи в файл, только важное в консоль."""
-    log_dir = "logs"
+def setup_logging(isin, output_dir):
+    """Настройка логирования с максимальной детализацией."""
+    log_dir = os.path.join(output_dir, "logs")
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
-
-    log_filename = os.path.join(log_dir, "moex_bond_collector.log")
+    
+    log_filename = os.path.join(log_dir, f"{isin}_explorer.log")
     
     # Создаем логгер
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(isin)
     logger.setLevel(logging.DEBUG)
     
-    # Формат для файла (детальный)
+    # Формат для файла (максимально детальный)
     file_formatter = logging.Formatter(
-        '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+        '%(asctime)s - %(levelname)s - [%(module)s:%(lineno)d] - %(message)s'
     )
     
-    # Формат для консоли (краткий)
+    # Формат для консоли (только важное)
     console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     
-    # Обработчик для файла (все сообщения)
+    # Обработчик для файла (ВСЁ в файл)
     file_handler = logging.FileHandler(log_filename, mode='w', encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(file_formatter)
@@ -38,349 +40,674 @@ def setup_logging():
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(console_formatter)
     
-    # Добавляем обработчики
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     
-    logger.info(f"Инициализировано логирование. Детальные логи в: {log_filename}")
-    return logger
+    # Логгер для запросов/ответов (отдельный файл)
+    traffic_logger = setup_traffic_logger(isin, output_dir)
+    
+    return logger, traffic_logger, log_filename
 
-# ==================== КОНФИГУРАЦИЯ ====================
-BOND_ISINS = [
-    "RU000A10D533",
-    "RU000A0JV4P3", 
-    "RU000A10DB16",
-    "RU000A0ZZ885",
-    "RU000A106LL5"
-]
+def setup_traffic_logger(isin, output_dir):
+    """Создает отдельный логгер для трафика запросов/ответов."""
+    traffic_dir = os.path.join(output_dir, "traffic_logs")
+    if not os.path.exists(traffic_dir):
+        os.makedirs(traffic_dir)
+    
+    traffic_filename = os.path.join(traffic_dir, f"{isin}_traffic.log")
+    
+    traffic_logger = logging.getLogger(f"{isin}_traffic")
+    traffic_logger.setLevel(logging.DEBUG)
+    
+    # Формат для трафика
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
+    handler = logging.FileHandler(traffic_filename, mode='w', encoding='utf-8')
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(formatter)
+    
+    traffic_logger.addHandler(handler)
+    traffic_logger.propagate = False  # Не передаем сообщения родительским логгерам
+    
+    return traffic_logger
 
+# ==================== КОНСТАНТЫ И КОНФИГУРАЦИЯ ====================
 BASE_URL = "https://iss.moex.com/iss"
 
-# ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
-def fetch_endpoint_data(endpoint, logger):
-    """
-    Загружает данные с указанного endpoint API MOEX.
-    Ключевое исправление: используем правильный формат URL с параметрами.
-    """
-    # ИСПРАВЛЕНИЕ 1: Добавляем параметры для получения данных в правильном формате
-    url = f"{BASE_URL}{endpoint}?iss.meta=off&iss.json=extended&limit=unlimited"
-    logger.debug(f"Запрос: {url}")
+# Список возможных точек входа (endpoints) для MOEX API
+ENDPOINTS = [
+    # Основная информация
+    ("securities", "/securities/{isin}.json"),
+    ("securities_search", "/securities.json?q={isin}&iss.meta=off&iss.json=extended"),
     
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
-            logger.warning(f"HTTP ошибка {response.status_code} для {endpoint}")
-            return None
-        
-        # Парсим JSON
-        data = response.json()
-        logger.debug(f"JSON успешно распарсен. Структура: {type(data)}")
-        
-        # Формат extended: [metadata1, data1, metadata2, data2, ...]
-        if isinstance(data, list) and len(data) >= 2:
-            result = {}
-            
-            # Обрабатываем пары metadata/data
-            for i in range(0, len(data), 2):
-                if i+1 < len(data):
-                    metadata = data[i]
-                    rows = data[i+1]
-                    
-                    # metadata - словарь с ключами (названия таблиц)
-                    for table_name, table_info in metadata.items():
-                        if isinstance(table_info, dict) and 'columns' in table_info:
-                            columns = table_info['columns']
-                            
-                            if rows and isinstance(rows, list) and len(rows) > 0:
-                                df = pd.DataFrame(rows, columns=columns)
-                                result[table_name] = df
-                                logger.debug(f"  Таблица '{table_name}': {len(df)} строк")
-                            else:
-                                logger.debug(f"  Таблица '{table_name}': нет данных")
-            
-            return result if result else None
-            
-    except Exception as e:
-        logger.error(f"Ошибка для {endpoint}: {e}")
-        return None
+    # Рыночные данные
+    ("marketdata", "/securities/{isin}/marketdata.json"),
+    ("marketdata_yields", "/securities/{isin}/marketdata/yields.json"),
+    
+    # Финансовые данные по облигациям
+    ("coupons", "/securities/{isin}/coupons.json"),
+    ("coupons_full", "/securities/{isin}/coupons.json?iss.meta=off&iss.json=extended"),
+    ("amortizations", "/securities/{isin}/amortizations.json"),
+    ("offers", "/securities/{isin}/offers.json"),
+    ("yields", "/securities/{isin}/yields.json"),
+    ("zcyc", "/securities/{isin}/zcyc.json"),  # Кривая бескупонной доходности
+    
+    # Размещение
+    ("placement", "/securities/{isin}/placement.json"),
+    
+    # Индикаторы и аналитика
+    ("indicator", "/securities/{isin}/indicator.json"),
+    ("indicatorhistory", "/securities/{isin}/indicatorhistory.json"),
+    
+    # Информация о торгах и листинге
+    ("boards", "/securities/{isin}/boards.json"),
+    ("boardgroups", "/securities/{isin}/boardgroups.json"),
+    ("listing", "/securities/{isin}/listing.json"),
+    
+    # История торгов
+    ("history_security", "/history/securities/{isin}.json"),
+    ("history_engines", "/history/engines/stock/markets/bonds/securities/{isin}.json"),
+    
+    # Общая статистика
+    ("statistics_bonds", "/statistics/engines/stock/markets/bonds/securities/{isin}.json"),
+    ("statistics_bondization", "/statistics/engines/stock/markets/bonds/bondization.json?q={isin}"),
+    
+    # Индексы
+    ("indices", "/statistics/engines/stock/markets/index/analytics/{isin}.json"),
+    
+    # Депозитарные данные
+    ("depository", "/depository/{isin}.json"),
+]
 
-def fetch_bond_data(isin, logger):
-    """
-    Загружает все доступные данные по облигации.
-    ИСПРАВЛЕНИЕ 2: Используем правильные endpoint'ы.
-    """
-    logger.info(f"\nСбор данных для: {isin}")
-    
-    bond_data = {}
-    
-    # Ключевые endpoint'ы для облигаций
-    endpoints = [
-        ("securities", f"/securities/{isin}.json"),
-        ("marketdata", f"/securities/{isin}/marketdata.json"),
-        ("coupons", f"/securities/{isin}/coupons.json"),
-        ("offers", f"/securities/{isin}/offers.json"),
-        ("amortizations", f"/securities/{isin}/amortizations.json"),
-    ]
-    
-    for endpoint_name, endpoint_url in endpoints:
-        logger.info(f"  Загрузка: {endpoint_name}")
-        data = fetch_endpoint_data(endpoint_url, logger)
-        
-        if data:
-            bond_data[endpoint_name] = data
-            # Логируем что получили
-            for table_name, df in data.items():
-                logger.info(f"    ✓ {table_name}: {len(df)} строк")
-        else:
-            logger.warning(f"    ✗ Нет данных")
-    
-    return bond_data if bond_data else None
+# Дополнительные endpoint'ы, требующие предварительного получения параметров
+DYNAMIC_ENDPOINTS = [
+    ("history_board", "/history/engines/{engine}/markets/{market}/boards/{board}/securities/{isin}.json"),
+    ("history_dates", "/history/engines/{engine}/markets/{market}/boards/{board}/securities/{isin}.json?from={date_from}&till={date_to}"),
+]
 
-def consolidate_all_data(all_bonds_data, logger):
-    """
-    Объединяет все данные со всех облигаций в один DataFrame.
-    ИСПРАВЛЕНИЕ 3: Все на одном листе + удаление дубликатов.
-    """
-    logger.info("\n" + "="*60)
-    logger.info("КОНСОЛИДАЦИЯ ВСЕХ ДАННЫХ")
-    logger.info("="*60)
+# ==================== УТИЛИТЫ ДЛЯ ЗАПРОСОВ ====================
+def make_request(url, logger, traffic_logger, timeout=30, max_retries=2):
+    """Выполняет HTTP-запрос с полным логированием."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+        'Accept-Encoding': 'gzip, deflate'
+    }
     
-    all_rows = []
+    for attempt in range(max_retries):
+        try:
+            # Логируем запрос
+            traffic_logger.info(f"=== ЗАПРОС ===")
+            traffic_logger.info(f"URL: {url}")
+            traffic_logger.info(f"Попытка: {attempt + 1}/{max_retries}")
+            traffic_logger.info(f"Заголовки: {headers}")
+            
+            start_time = time.time()
+            response = requests.get(url, headers=headers, timeout=timeout)
+            request_time = time.time() - start_time
+            
+            # Логируем ответ
+            traffic_logger.info(f"=== ОТВЕТ ===")
+            traffic_logger.info(f"Статус: {response.status_code}")
+            traffic_logger.info(f"Время: {request_time:.2f} сек")
+            traffic_logger.info(f"Размер: {len(response.content)} байт")
+            traffic_logger.info(f"Заголовки ответа: {dict(response.headers)}")
+            
+            # Пробуем разные кодировки
+            raw_content = response.content
+            decoded_content = None
+            used_encoding = None
+            
+            encodings_to_try = ['utf-8', 'windows-1251', 'cp1251', 'iso-8859-5', 'koi8-r']
+            
+            for encoding in encodings_to_try:
+                try:
+                    decoded_content = raw_content.decode(encoding)
+                    if decoded_content and len(decoded_content) > 0:
+                        used_encoding = encoding
+                        break
+                except UnicodeDecodeError:
+                    continue
+            
+            if decoded_content:
+                traffic_logger.info(f"Кодировка: {used_encoding}")
+                # Логируем первые 1000 символов ответа
+                preview = decoded_content[:1000]
+                traffic_logger.info(f"Начало ответа:\n{preview}")
+                
+                if len(decoded_content) > 1000:
+                    traffic_logger.info(f"... и еще {len(decoded_content) - 1000} символов")
+            else:
+                traffic_logger.warning("Не удалось декодировать ответ")
+                preview = raw_content[:500]
+                traffic_logger.info(f"Сырые байты: {preview}")
+            
+            traffic_logger.info(f"=== КОНЕЦ ОТВЕТА ===\n")
+            
+            return {
+                'success': True,
+                'status_code': response.status_code,
+                'url': url,
+                'encoding': used_encoding,
+                'content': decoded_content if decoded_content else raw_content,
+                'headers': dict(response.headers),
+                'time': request_time,
+                'size': len(response.content)
+            }
+            
+        except requests.exceptions.Timeout:
+            traffic_logger.error(f"Таймаут запроса (попытка {attempt + 1})")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            return {
+                'success': False,
+                'error': 'Timeout',
+                'url': url
+            }
+            
+        except requests.exceptions.ConnectionError as e:
+            traffic_logger.error(f"Ошибка соединения: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+                continue
+            return {
+                'success': False,
+                'error': f'ConnectionError: {e}',
+                'url': url
+            }
+            
+        except Exception as e:
+            traffic_logger.error(f"Неожиданная ошибка: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': f'Exception: {str(e)[:200]}',
+                'url': url
+            }
     
-    for isin, bond_data in all_bonds_data.items():
-        logger.info(f"\nОбработка данных для {isin}:")
-        
-        for source_name, tables in bond_data.items():
-            for table_name, df in tables.items():
-                if not df.empty:
-                    # Добавляем идентификационные колонки
-                    df = df.copy()
-                    df['ISIN'] = isin
-                    df['DATA_SOURCE'] = source_name
-                    df['TABLE_NAME'] = table_name
-                    df['LOAD_TIMESTAMP'] = datetime.now()
-                    
-                    all_rows.append(df)
-                    logger.info(f"  Добавлено {len(df)} строк из {source_name}.{table_name}")
-    
-    if not all_rows:
-        logger.error("Нет данных для консолидации!")
-        return pd.DataFrame()
-    
-    # Объединяем все данные
-    consolidated_df = pd.concat(all_rows, ignore_index=True)
-    
-    # УДАЛЯЕМ ДУБЛИКАТЫ
-    initial_rows = len(consolidated_df)
-    
-    # Удаляем полные дубликаты по всем колонкам
-    consolidated_df = consolidated_df.drop_duplicates()
-    
-    # Также удаляем дубликаты по ключевым полям (если они есть)
-    # Ищем колонки, которые могут быть ключевыми
-    key_columns = []
-    for col in consolidated_df.columns:
-        if col.lower() in ['id', 'isin', 'secid', 'trade_date', 'coupondate', 'recorddate']:
-            key_columns.append(col)
-    
-    if key_columns and len(key_columns) > 1:
-        # Удаляем дубликаты по ключевым полям
-        consolidated_df = consolidated_df.drop_duplicates(subset=key_columns, keep='first')
-    
-    final_rows = len(consolidated_df)
-    removed = initial_rows - final_rows
-    
-    logger.info(f"\nРезультаты консолидации:")
-    logger.info(f"  Изначально строк: {initial_rows}")
-    logger.info(f"  После удаления дубликатов: {final_rows}")
-    logger.info(f"  Удалено дубликатов: {removed}")
-    logger.info(f"  Столбцов: {len(consolidated_df.columns)}")
-    
-    return consolidated_df
+    return {
+        'success': False,
+        'error': 'Max retries exceeded',
+        'url': url
+    }
 
-def save_to_excel(consolidated_df, logger):
-    """
-    Сохраняет объединенные данные в один Excel файл.
-    ВСЕ ДАННЫЕ НА ОДНОМ ЛИСТЕ.
-    """
-    if consolidated_df.empty:
-        logger.error("Нет данных для сохранения!")
-        return False
+def save_response(result, endpoint_name, isin, output_dir):
+    """Сохраняет ответ endpoint'а в файл."""
+    endpoint_dir = os.path.join(output_dir, "responses", endpoint_name)
+    if not os.path.exists(endpoint_dir):
+        os.makedirs(endpoint_dir)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"all_bonds_data_{timestamp}.xlsx"
     
-    logger.info(f"\nСохранение в Excel: {filename}")
+    # Сохраняем метаданные
+    metadata = {
+        'endpoint': endpoint_name,
+        'isin': isin,
+        'timestamp': timestamp,
+        'success': result.get('success', False),
+        'status_code': result.get('status_code'),
+        'request_time': result.get('time'),
+        'size_bytes': result.get('size'),
+        'encoding': result.get('encoding'),
+        'url': result.get('url'),
+        'error': result.get('error')
+    }
     
-    try:
-        with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
-            # ВСЁ НА ОДНОМ ЛИСТЕ
-            sheet_name = 'All_Bonds_Data'
-            consolidated_df.to_excel(writer, sheet_name=sheet_name, index=False)
-            
-            # Автонастройка ширины столбцов
-            worksheet = writer.sheets[sheet_name]
-            for i, col in enumerate(consolidated_df.columns):
-                max_length = max(
-                    consolidated_df[col].astype(str).str.len().max(),
-                    len(str(col))
-                )
-                worksheet.set_column(i, i, min(max_length + 2, 50))
+    metadata_filename = os.path.join(endpoint_dir, f"metadata_{timestamp}.json")
+    with open(metadata_filename, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    
+    # Сохраняем содержимое ответа
+    if result.get('success') and result.get('content'):
+        content = result['content']
         
-        # Создаем summary файл
-        create_summary_file(consolidated_df, filename, logger)
-        
-        logger.info(f"✓ Файл успешно сохранен")
-        logger.info(f"  Размер: {os.path.getsize(filename) / 1024:.1f} KB")
-        logger.info(f"  Лист: {sheet_name}")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Ошибка сохранения Excel: {e}")
-        return False
+        # Пробуем определить тип содержимого
+        if isinstance(content, str):
+            # Возможно, это JSON
+            if content.strip().startswith('{') or content.strip().startswith('['):
+                # Сохраняем как JSON
+                json_filename = os.path.join(endpoint_dir, f"response_{timestamp}.json")
+                try:
+                    # Пробуем распарсить и сохранить красиво
+                    parsed = json.loads(content)
+                    with open(json_filename, 'w', encoding='utf-8') as f:
+                        json.dump(parsed, f, indent=2, ensure_ascii=False)
+                    
+                    # Также сохраняем как сырой текст
+                    raw_filename = os.path.join(endpoint_dir, f"response_{timestamp}.txt")
+                    with open(raw_filename, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    
+                    return {
+                        'metadata_file': metadata_filename,
+                        'json_file': json_filename,
+                        'raw_file': raw_filename
+                    }
+                    
+                except json.JSONDecodeError:
+                    # Сохраняем как текст
+                    txt_filename = os.path.join(endpoint_dir, f"response_{timestamp}.txt")
+                    with open(txt_filename, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    
+                    return {
+                        'metadata_file': metadata_filename,
+                        'raw_file': txt_filename
+                    }
+            else:
+                # Сохраняем как текст
+                txt_filename = os.path.join(endpoint_dir, f"response_{timestamp}.txt")
+                with open(txt_filename, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                
+                return {
+                    'metadata_file': metadata_filename,
+                    'raw_file': txt_filename
+                }
+    
+    return {
+        'metadata_file': metadata_filename
+    }
 
-def create_summary_file(df, excel_filename, logger):
-    """Создает текстовый файл с описанием данных."""
-    summary_filename = excel_filename.replace('.xlsx', '_SUMMARY.txt')
+# ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
+def discover_dynamic_endpoints(isin, initial_responses, logger, traffic_logger):
+    """Обнаруживает динамические endpoints на основе полученных данных."""
+    dynamic_results = []
     
-    try:
-        with open(summary_filename, 'w', encoding='utf-8') as f:
-            f.write("="*60 + "\n")
-            f.write("СВОДКА ПО СОБРАННЫМ ДАННЫМ ОБЛИГАЦИЙ\n")
-            f.write("="*60 + "\n\n")
-            
-            f.write(f"Файл данных: {excel_filename}\n")
-            f.write(f"Дата создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            
-            f.write(f"Всего строк: {len(df)}\n")
-            f.write(f"Всего столбцов: {len(df.columns)}\n\n")
-            
-            f.write("Количество записей по ISIN:\n")
-            isin_counts = df['ISIN'].value_counts()
-            for isin, count in isin_counts.items():
-                f.write(f"  {isin}: {count} строк\n")
-            
-            f.write("\nКоличество записей по источникам данных:\n")
-            source_counts = df['DATA_SOURCE'].value_counts()
-            for source, count in source_counts.items():
-                f.write(f"  {source}: {count} строк\n")
-            
-            f.write("\nСтолбцы в данных:\n")
-            for i, col in enumerate(df.columns, 1):
-                f.write(f"{i:3d}. {col}\n")
-                if i >= 50:  # Ограничим вывод
-                    f.write(f"... и еще {len(df.columns) - 50} столбцов\n")
-                    break
+    # Ищем информацию о торговых площадках (engine, market, board)
+    boards_data = None
+    for endpoint_name, result in initial_responses.items():
+        if endpoint_name == 'boards' and result.get('success') and result.get('content'):
+            try:
+                content = json.loads(result['content'])
+                boards_data = content
+                logger.info("Найдены данные о торговых площадках для динамических запросов")
+                break
+            except:
+                pass
+    
+    if boards_data:
+        # Парсим данные о boards
+        try:
+            # Ищем первый доступный board
+            if 'boards' in boards_data and 'data' in boards_data['boards']:
+                boards_list = boards_data['boards']['data']
+                if boards_list and len(boards_list) > 0:
+                    # Берем первую площадку
+                    first_board = boards_list[0]
+                    columns = boards_data['boards']['columns']
+                    
+                    # Ищем нужные колонки
+                    engine_idx = columns.index('engine') if 'engine' in columns else -1
+                    market_idx = columns.index('market') if 'market' in columns else -1
+                    board_idx = columns.index('boardid') if 'boardid' in columns else -1
+                    
+                    if engine_idx >= 0 and market_idx >= 0 and board_idx >= 0:
+                        engine = first_board[engine_idx]
+                        market = first_board[market_idx]
+                        board = first_board[board_idx]
+                        
+                        logger.info(f"Найдены параметры: engine={engine}, market={market}, board={board}")
+                        
+                        # Формируем динамические endpoints
+                        date_to = datetime.now().strftime("%Y-%m-%d")
+                        date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+                        
+                        dynamic_templates = [
+                            ("history_board", 
+                             f"/history/engines/{engine}/markets/{market}/boards/{board}/securities/{isin}.json"),
+                            ("history_dates", 
+                             f"/history/engines/{engine}/markets/{market}/boards/{board}/securities/{isin}.json?from={date_from}&till={date_to}"),
+                        ]
+                        
+                        # Выполняем запросы к динамическим endpoints
+                        for name, template in dynamic_templates:
+                            url = urljoin(BASE_URL, template)
+                            logger.info(f"Динамический запрос: {name}")
+                            
+                            result = make_request(url, logger, traffic_logger)
+                            dynamic_results.append((name, result))
+                            
+                            if result.get('success'):
+                                logger.info(f"  ✓ Успешно (статус: {result.get('status_code')})")
+                            else:
+                                logger.warning(f"  ✗ Ошибка: {result.get('error', 'Неизвестная ошибка')}")
+        except Exception as e:
+            logger.error(f"Ошибка при обработке динамических endpoints: {e}")
+    
+    return dynamic_results
+
+def test_all_endpoints(isin, logger, traffic_logger, output_dir):
+    """Тестирует все возможные endpoints для заданного ISIN."""
+    logger.info(f"\n{'='*80}")
+    logger.info(f"НАЧАЛО ТЕСТИРОВАНИЯ ENDPOINTS ДЛЯ {isin}")
+    logger.info(f"{'='*80}\n")
+    
+    all_results = {}
+    
+    # Тестируем статические endpoints
+    for endpoint_name, endpoint_template in ENDPOINTS:
+        # Заменяем плейсхолдеры
+        url_template = endpoint_template.replace("{isin}", isin)
+        url = urljoin(BASE_URL, url_template)
         
-        logger.info(f"✓ Сводка сохранена в: {summary_filename}")
+        logger.info(f"Тестируем endpoint: {endpoint_name}")
+        logger.info(f"URL: {url}")
         
-    except Exception as e:
-        logger.warning(f"Не удалось создать сводку: {e}")
+        # Выполняем запрос
+        result = make_request(url, logger, traffic_logger)
+        all_results[endpoint_name] = result
+        
+        # Сохраняем ответ
+        saved_files = save_response(result, endpoint_name, isin, output_dir)
+        
+        # Логируем результат
+        if result.get('success'):
+            status = result.get('status_code')
+            time_taken = result.get('time', 0)
+            size = result.get('size', 0)
+            
+            logger.info(f"  ✓ Успешно (статус: {status}, время: {time_taken:.2f} сек, размер: {size} байт)")
+            
+            # Проверяем, есть ли данные в ответе
+            if result.get('content'):
+                content = result['content']
+                if isinstance(content, str):
+                    try:
+                        data = json.loads(content)
+                        # Считаем количество записей данных
+                        total_records = 0
+                        if isinstance(data, dict):
+                            for key, value in data.items():
+                                if isinstance(value, dict) and 'data' in value:
+                                    records = len(value['data'])
+                                    total_records += records
+                                    if records > 0:
+                                        logger.info(f"    - {key}: {records} записей")
+                        
+                        if total_records == 0:
+                            logger.warning(f"    ⚠ В ответе нет данных (пустые массивы)")
+                    except json.JSONDecodeError:
+                        logger.info(f"    - Ответ не в формате JSON")
+        else:
+            error_msg = result.get('error', 'Неизвестная ошибка')
+            logger.error(f"  ✗ Ошибка: {error_msg}")
+    
+    # После тестирования статических endpoints, ищем динамические
+    logger.info(f"\n{'='*80}")
+    logger.info("ПОИСК ДИНАМИЧЕСКИХ ENDPOINTS")
+    logger.info(f"{'='*80}\n")
+    
+    dynamic_results = discover_dynamic_endpoints(isin, all_results, logger, traffic_logger)
+    
+    # Сохраняем динамические результаты
+    for endpoint_name, result in dynamic_results:
+        saved_files = save_response(result, endpoint_name, isin, output_dir)
+        all_results[endpoint_name] = result
+    
+    return all_results
+
+def analyze_results(results, logger):
+    """Анализирует результаты тестирования endpoints."""
+    logger.info(f"\n{'='*80}")
+    logger.info("АНАЛИЗ РЕЗУЛЬТАТОВ ТЕСТИРОВАНИЯ")
+    logger.info(f"{'='*80}")
+    
+    total_endpoints = len(results)
+    successful = sum(1 for r in results.values() if r.get('success') and r.get('status_code') == 200)
+    failed = sum(1 for r in results.values() if not r.get('success') or r.get('status_code') != 200)
+    
+    logger.info(f"Всего протестировано endpoints: {total_endpoints}")
+    logger.info(f"Успешных (HTTP 200): {successful}")
+    logger.info(f"Неуспешных: {failed}")
+    
+    # Анализ кодов ответа
+    status_codes = {}
+    for result in results.values():
+        status = result.get('status_code')
+        if status:
+            status_codes[status] = status_codes.get(status, 0) + 1
+    
+    if status_codes:
+        logger.info("\nРаспределение по кодам ответа:")
+        for code, count in sorted(status_codes.items()):
+            logger.info(f"  HTTP {code}: {count}")
+    
+    # Находим endpoints с данными
+    endpoints_with_data = []
+    for endpoint_name, result in results.items():
+        if result.get('success') and result.get('status_code') == 200 and result.get('content'):
+            try:
+                content = result['content']
+                if isinstance(content, str):
+                    data = json.loads(content)
+                    has_data = False
+                    
+                    if isinstance(data, dict):
+                        for key, value in data.items():
+                            if isinstance(value, dict) and 'data' in value and len(value['data']) > 0:
+                                has_data = True
+                                break
+                    
+                    if has_data:
+                        endpoints_with_data.append(endpoint_name)
+            except:
+                pass
+    
+    if endpoints_with_data:
+        logger.info("\nEndpoints с данными:")
+        for endpoint in sorted(endpoints_with_data):
+            logger.info(f"  ✓ {endpoint}")
+    else:
+        logger.warning("\n⚠ Не найдено endpoints с данными")
+    
+    return {
+        'total': total_endpoints,
+        'successful': successful,
+        'failed': failed,
+        'status_codes': status_codes,
+        'with_data': endpoints_with_data
+    }
+
+def generate_summary_report(isin, results, analysis, output_dir):
+    """Генерирует сводный отчет."""
+    report_dir = os.path.join(output_dir, "reports")
+    if not os.path.exists(report_dir):
+        os.makedirs(report_dir)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_filename = os.path.join(report_dir, f"summary_{timestamp}.txt")
+    
+    with open(report_filename, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write(f"СВОДНЫЙ ОТЧЕТ ДЛЯ ОБЛИГАЦИИ: {isin}\n")
+        f.write(f"Время создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 80 + "\n\n")
+        
+        f.write(f"ОБЩАЯ СТАТИСТИКА:\n")
+        f.write(f"  Всего протестировано endpoints: {analysis['total']}\n")
+        f.write(f"  Успешных (HTTP 200): {analysis['successful']}\n")
+        f.write(f"  Неуспешных: {analysis['failed']}\n")
+        
+        if analysis['with_data']:
+            f.write(f"  Endpoints с данными: {len(analysis['with_data'])}\n")
+        else:
+            f.write(f"  Endpoints с данными: 0\n")
+        
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("ПОДРОБНЫЕ РЕЗУЛЬТАТЫ:\n")
+        f.write("=" * 80 + "\n\n")
+        
+        # Группируем по статусу
+        successful_endpoints = []
+        failed_endpoints = []
+        
+        for endpoint_name, result in sorted(results.items()):
+            status = result.get('status_code', 'N/A')
+            success = result.get('success', False)
+            error = result.get('error', '')
+            
+            if success and status == 200:
+                successful_endpoints.append((endpoint_name, status, result.get('time', 0), result.get('size', 0)))
+            else:
+                failed_endpoints.append((endpoint_name, status, error))
+        
+        if successful_endpoints:
+            f.write("УСПЕШНЫЕ ENDPOINTS:\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"{'Endpoint':<30} {'Status':<10} {'Time (s)':<10} {'Size (bytes)':<15}\n")
+            f.write("-" * 80 + "\n")
+            
+            for endpoint, status, time_taken, size in sorted(successful_endpoints):
+                f.write(f"{endpoint:<30} {status:<10} {time_taken:<10.2f} {size:<15}\n")
+            
+            f.write("\n")
+        
+        if failed_endpoints:
+            f.write("НЕУСПЕШНЫЕ ENDPOINTS:\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"{'Endpoint':<30} {'Status':<10} {'Error':<40}\n")
+            f.write("-" * 80 + "\n")
+            
+            for endpoint, status, error in sorted(failed_endpoints):
+                f.write(f"{endpoint:<30} {status:<10} {error[:38]:<40}\n")
+            
+            f.write("\n")
+        
+        # Endpoints с данными
+        if analysis['with_data']:
+            f.write("ENDPOINTS С ДАННЫМИ:\n")
+            f.write("-" * 80 + "\n")
+            for endpoint in sorted(analysis['with_data']):
+                f.write(f"  • {endpoint}\n")
+            f.write("\n")
+        
+        f.write("=" * 80 + "\n")
+        f.write("ДИРЕКТОРИИ С ДАННЫМИ:\n")
+        f.write("=" * 80 + "\n\n")
+        
+        f.write("Структура сохраненных данных:\n")
+        base_path = os.path.join(output_dir, "responses")
+        if os.path.exists(base_path):
+            for root, dirs, files in os.walk(base_path):
+                level = root.replace(base_path, '').count(os.sep)
+                indent = '  ' * level
+                rel_path = os.path.relpath(root, base_path)
+                
+                if rel_path == '.':
+                    f.write(f"{indent}responses/\n")
+                else:
+                    f.write(f"{indent}{os.path.basename(root)}/\n")
+                
+                subindent = '  ' * (level + 1)
+                # Показываем только несколько файлов
+                for i, file in enumerate(sorted(files)[:5]):
+                    if i == 4 and len(files) > 5:
+                        f.write(f"{subindent}... и еще {len(files) - 5} файлов\n")
+                        break
+                    f.write(f"{subindent}{file}\n")
+        
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("РЕКОМЕНДАЦИИ:\n")
+        f.write("=" * 80 + "\n\n")
+        
+        if analysis['with_data']:
+            f.write("1. Для дальнейшего анализа используйте endpoints с данными (список выше).\n")
+            f.write("2. Проверьте директорию 'responses' для получения сырых данных.\n")
+            f.write("3. Для парсинга JSON ответов используйте сохраненные файлы .json.\n")
+        else:
+            f.write("1. Не найдено endpoints с данными. Возможные причины:\n")
+            f.write("   - ISIN указан неверно\n")
+            f.write("   - Облигация не торгуется на MOEX\n")
+            f.write("   - Ограниченный доступ к данным\n")
+            f.write("2. Проверьте логи в директории 'logs' для деталей.\n")
+            f.write("3. Попробуйте другой ISIN.\n")
+    
+    return report_filename
 
 # ==================== ОСНОВНАЯ ФУНКЦИЯ ====================
 def main():
     """Главная функция скрипта."""
-    logger = setup_logging()
+    parser = argparse.ArgumentParser(description='Поиск точек входа для облигаций на MOEX')
+    parser.add_argument('isin', help='ISIN облигации (например, RU000A10D533)')
+    parser.add_argument('--output', '-o', default='./moex_explorer_output',
+                       help='Директория для сохранения результатов (по умолчанию: ./moex_explorer_output)')
     
-    logger.info("="*60)
-    logger.info("СКРИПТ СБОРА ДАННЫХ ПО ОБЛИГАЦИЯМ MOEX (ИСПРАВЛЕННЫЙ)")
-    logger.info("="*60)
-    logger.info(f"Облигаций для обработки: {len(BOND_ISINS)}")
-    logger.info(f"ISIN: {BOND_ISINS}")
-    logger.info(f"Дата запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info("="*60)
+    args = parser.parse_args()
+    isin = args.isin.upper()
+    output_dir = os.path.join(args.output, isin)
     
-    start_time_total = time.time()
+    # Создаем директорию для результатов
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     
-    # Собираем данные по всем облигациям
-    all_bonds_data = {}
-    successful = []
-    failed = []
+    # Настраиваем логирование
+    logger, traffic_logger, log_filename = setup_logging(isin, output_dir)
     
-    for i, isin in enumerate(BOND_ISINS, 1):
-        logger.info(f"\n[{i}/{len(BOND_ISINS)}] Обработка облигации: {isin}")
-        bond_start = time.time()
+    logger.info(f"{'='*80}")
+    logger.info(f"ЗАПУСК СКРИПТА ДЛЯ ОБЛИГАЦИИ: {isin}")
+    logger.info(f"Директория результатов: {output_dir}")
+    logger.info(f"Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"{'='*80}\n")
+    
+    print(f"\n{'='*60}")
+    print(f"ЗАПУСК ПОИСКА ТОЧЕК ВХОДА ДЛЯ: {isin}")
+    print(f"Директория результатов: {output_dir}")
+    print(f"{'='*60}\n")
+    
+    start_time = time.time()
+    
+    try:
+        # Тестируем все endpoints
+        results = test_all_endpoints(isin, logger, traffic_logger, output_dir)
         
-        try:
-            bond_data = fetch_bond_data(isin, logger)
-            
-            if bond_data:
-                all_bonds_data[isin] = bond_data
-                successful.append(isin)
-                logger.info(f"✓ Данные получены для {isin}")
-            else:
-                failed.append(isin)
-                logger.warning(f"✗ Не удалось получить данные для {isin}")
-                
-        except Exception as e:
-            failed.append(isin)
-            logger.error(f"✗ Ошибка для {isin}: {e}", exc_info=True)
+        # Анализируем результаты
+        analysis = analyze_results(results, logger)
         
-        bond_time = time.time() - bond_start
-        logger.info(f"Время обработки: {bond_time:.2f} сек")
-    
-    # Консолидируем и сохраняем данные
-    if all_bonds_data:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"УСПЕШНО ОБРАБОТАНО: {len(successful)} из {len(BOND_ISINS)}")
-        logger.info(f"С ОШИБКАМИ: {len(failed)}")
-        logger.info(f"{'='*60}")
+        # Генерируем отчет
+        report_file = generate_summary_report(isin, results, analysis, output_dir)
         
-        # Консолидация всех данных
-        consolidated_df = consolidate_all_data(all_bonds_data, logger)
+        total_time = time.time() - start_time
         
-        # Сохранение в Excel
-        if not consolidated_df.empty:
-            save_success = save_to_excel(consolidated_df, logger)
-            
-            if save_success:
-                logger.info(f"\n✓ ВСЕ ДАННЫЕ УСПЕШНО СОХРАНЕНЫ")
-            else:
-                logger.error(f"\n✗ ОШИБКА ПРИ СОХРАНЕНИИ")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"ЗАВЕРШЕНО УСПЕШНО!")
+        logger.info(f"Общее время выполнения: {total_time:.2f} сек")
+        logger.info(f"Отчет сохранен в: {report_file}")
+        logger.info(f"{'='*80}")
+        
+        # Краткий вывод в консоль
+        print(f"\n{'='*60}")
+        print("РЕЗУЛЬТАТЫ ПОИСКА:")
+        print(f"{'='*60}")
+        print(f"Облигация: {isin}")
+        print(f"Всего endpoints протестировано: {analysis['total']}")
+        print(f"Успешных (HTTP 200): {analysis['successful']}")
+        print(f"Endpoints с данными: {len(analysis['with_data'])}")
+        print(f"\nСОХРАНЕННЫЕ ДАННЫЕ:")
+        print(f"• Логи: {output_dir}/logs/")
+        print(f"• Ответы endpoints: {output_dir}/responses/")
+        print(f"• Трафик: {output_dir}/traffic_logs/")
+        print(f"• Отчеты: {output_dir}/reports/")
+        print(f"\nВремя выполнения: {total_time:.2f} сек")
+        print(f"{'='*60}")
+        
+        if analysis['with_data']:
+            print(f"\nНАЙДЕНЫ ДАННЫЕ В СЛЕДУЮЩИХ ENDPOINTS:")
+            for endpoint in sorted(analysis['with_data']):
+                print(f"  • {endpoint}")
         else:
-            logger.error(f"\n✗ НЕТ ДАННЫХ ДЛЯ СОХРАНЕНИЯ")
-    else:
-        logger.error(f"\n✗ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ НИ ПО ОДНОЙ ОБЛИГАЦИИ")
+            print(f"\n⚠ ВНИМАНИЕ: Не найдено endpoints с данными")
+            print(f"   Проверьте логи для деталей")
+        
+    except KeyboardInterrupt:
+        logger.info("Скрипт прерван пользователем")
+        print("\n\nСкрипт прерван пользователем")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
+        print(f"\n\n❌ Критическая ошибка: {e}")
+        print(f"   Проверьте логи для деталей")
     
-    # Итоги
-    total_time = time.time() - start_time_total
-    
-    logger.info(f"\n{'='*60}")
-    logger.info("ИТОГИ ВЫПОЛНЕНИЯ")
-    logger.info(f"{'='*60}")
-    logger.info(f"Успешно: {len(successful)} облигаций")
-    logger.info(f"С ошибками: {len(failed)} облигаций")
-    
-    if failed:
-        logger.info(f"\nОблигации с ошибками:")
-        for isin in failed:
-            logger.info(f"  • {isin}")
-    
-    logger.info(f"\nОбщее время выполнения: {total_time:.2f} сек")
-    logger.info(f"Завершено: {datetime.now().strftime('%H:%M:%S')}")
-    logger.info(f"{'='*60}")
-    
-    # Краткий вывод в консоль
-    print(f"\n{'='*50}")
-    print("РЕЗУЛЬТАТЫ СБОРА ДАННЫХ ПО ОБЛИГАЦИЯМ")
-    print(f"{'='*50}")
-    
-    if successful:
-        print(f"✓ Успешно обработано: {len(successful)} облигаций")
-        print(f"✗ С ошибками: {len(failed)} облигаций")
-        print(f"\nСозданные файлы:")
-        print("  • all_bonds_data_YYYYMMDD_HHMMSS.xlsx - все данные на одном листе")
-        print("  • all_bonds_data_YYYYMMDD_HHMMSS_SUMMARY.txt - сводка")
-        print(f"\nДетальный лог: logs/moex_bond_collector.log")
-    else:
-        print("✗ Не удалось получить данные ни по одной облигации")
-        print("  Проверьте лог-файл для деталей")
-    
-    print(f"\nОбщее время: {total_time:.2f} сек")
-    print(f"{'='*50}")
+    print(f"\nДля деталей смотрите: {log_filename}")
 
 if __name__ == "__main__":
     main()

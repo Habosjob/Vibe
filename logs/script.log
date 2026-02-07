@@ -1,0 +1,22 @@
+2026-02-07 08:00:02,236 - DEBUG - Starting new HTTPS connection (1): api.moex.com:443
+2026-02-07 08:00:02,650 - DEBUG - https://api.moex.com:443 "GET /bonds/RU000A10D533 HTTP/1.1" 404 40
+2026-02-07 08:00:02,651 - ERROR - Ошибка при запросе к API для ISIN RU000A10D533: 404 Client Error: Not Found for url: https://api.moex.com/bonds/RU000A10D533
+2026-02-07 08:00:02,653 - WARNING - Не удалось получить данные для ISIN RU000A10D533
+2026-02-07 08:00:02,655 - DEBUG - Starting new HTTPS connection (1): api.moex.com:443
+2026-02-07 08:00:02,998 - DEBUG - https://api.moex.com:443 "GET /bonds/RU000A0JV4P3 HTTP/1.1" 404 40
+2026-02-07 08:00:02,999 - ERROR - Ошибка при запросе к API для ISIN RU000A0JV4P3: 404 Client Error: Not Found for url: https://api.moex.com/bonds/RU000A0JV4P3
+2026-02-07 08:00:03,005 - WARNING - Не удалось получить данные для ISIN RU000A0JV4P3
+2026-02-07 08:00:03,007 - DEBUG - Starting new HTTPS connection (1): api.moex.com:443
+2026-02-07 08:00:03,394 - DEBUG - https://api.moex.com:443 "GET /bonds/RU000A10DB16 HTTP/1.1" 404 40
+2026-02-07 08:00:03,396 - ERROR - Ошибка при запросе к API для ISIN RU000A10DB16: 404 Client Error: Not Found for url: https://api.moex.com/bonds/RU000A10DB16
+2026-02-07 08:00:03,398 - WARNING - Не удалось получить данные для ISIN RU000A10DB16
+2026-02-07 08:00:03,401 - DEBUG - Starting new HTTPS connection (1): api.moex.com:443
+2026-02-07 08:00:03,750 - DEBUG - https://api.moex.com:443 "GET /bonds/RU000A0ZZ885 HTTP/1.1" 404 40
+2026-02-07 08:00:03,750 - ERROR - Ошибка при запросе к API для ISIN RU000A0ZZ885: 404 Client Error: Not Found for url: https://api.moex.com/bonds/RU000A0ZZ885
+2026-02-07 08:00:03,750 - WARNING - Не удалось получить данные для ISIN RU000A0ZZ885
+2026-02-07 08:00:03,755 - DEBUG - Starting new HTTPS connection (1): api.moex.com:443
+2026-02-07 08:00:04,113 - DEBUG - https://api.moex.com:443 "GET /bonds/RU000A106LL5 HTTP/1.1" 404 40
+2026-02-07 08:00:04,113 - ERROR - Ошибка при запросе к API для ISIN RU000A106LL5: 404 Client Error: Not Found for url: https://api.moex.com/bonds/RU000A106LL5
+2026-02-07 08:00:04,113 - WARNING - Не удалось получить данные для ISIN RU000A106LL5
+2026-02-07 08:00:04,113 - ERROR - Данные не получены, файл Excel не создан
+2026-02-07 08:00:04,113 - DEBUG - Время отработки скрипта: 1.8860845565795898 секунд
