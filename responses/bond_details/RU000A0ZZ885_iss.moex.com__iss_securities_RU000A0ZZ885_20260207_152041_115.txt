@@ -1,8 +1,7 @@
-Endpoint: https://iss.moex.com/iss/securities/RU000A0ZZ885.json
-Status: 200
-Headers: {'Server': 'nginx', 'Date': 'Sat, 07 Feb 2026 11:51:46 GMT', 'Content-Type': 'application/json; charset=utf-8', 'Transfer-Encoding': 'chunked', 'Connection': 'keep-alive', 'Set-Cookie': 'MicexTrackID=c2dadd3c.64a3a87c99b35; path=/; expires=Sat, 07-Mar-26 11:51:46 GMT; domain=.moex.com', 'X-ISS-Profiling': 'url_parsing: 0.410000; queries_get: 0.000000, processing: 0.405000; lua: 0.398000', 'Cache-Control': 'max-age=5', 'Expires': 'Sat, 07 Feb 2026 11:51:51 GMT', 'X-MicexCacheTime': '5', 'X-MicexPassport-Marker': 'granted', 'Access-Control-Allow-Credentials': 'true', 'Access-Control-Expose-Headers': 'X-MicexPassport-Marker', 'X-Frame-Options': 'SAMEORIGIN', 'X-Request-ID': '9ee10ea628cb3aebe328d70e7674528b', 'X-XSS-Protection': '1; mode=block', 'Content-Encoding': 'gzip'}
-
-Response body:
+URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json
+Status Code: 200
+Headers: {'Server': 'nginx', 'Date': 'Sat, 07 Feb 2026 12:20:40 GMT', 'Content-Type': 'application/json; charset=utf-8', 'Transfer-Encoding': 'chunked', 'Connection': 'keep-alive', 'X-ISS-Profiling': 'url_parsing: 0.432000; queries_get: 0.000000, processing: 0.427000; lua: 0.419000', 'Cache-Control': 'max-age=5', 'Expires': 'Sat, 07 Feb 2026 12:20:45 GMT', 'X-MicexCacheTime': '5', 'X-MicexPassport-Marker': 'granted', 'Access-Control-Allow-Credentials': 'true', 'Access-Control-Expose-Headers': 'X-MicexPassport-Marker', 'X-Frame-Options': 'SAMEORIGIN', 'X-Request-ID': '6dec24e256ec447d42a3519c513645c7', 'X-XSS-Protection': '1; mode=block', 'Content-Encoding': 'gzip'}
+Content:
 {
 "description": {
 	"metadata": {
@@ -110,17 +109,4 @@ Response body:
 		["RU000A0ZZ885", "OCAY", "OTC: Облигации с ЦК адрес. (CNY) - двусторонние", 1265, 1014, "ndm", 1012, "otc", 1, 4, null, null, "2023-04-10", "2026-02-06", 0, "CNY", "%"],
 		["RU000A0ZZ885", "OCAU", "OTC: Облигации с ЦК адрес. (USD) - двусторонние", 1267, 1014, "ndm", 1012, "otc", 1, 4, null, null, "2023-04-10", "2026-02-06", 0, "USD", "%"],
 		["RU000A0ZZ885", "RPMO", "РЕПО-М - адрес.", 201, 3, "repo", 1, "stock", 1, 4, "2018-05-29", "2020-02-06", "2018-05-29", "2026-02-07", 0, "RUB", "%"],
-		["RU000A0ZZ885", "RPEK", "РЕПО-М в ин. валюте: (KZT) - адрес.", 1426, 3, "repo", 1, "stock", 1, 6, null, null, "2025-06-23", "2026-02-07", 0, "KZT", "%"],
-		["RU000A0ZZ885", "RPEB", "РЕПО-М в ин. валюте: (BYN) - адрес.", 1428, 3, "repo", 1, "stock", 1, 6, null, null, "2025-06-23", "2026-02-07", 0, "BYN", "%"],
-		["RU000A0ZZ885", "CIQR", "Урегулирование РЕПО с ЦК Нерезиденты - безадрес.", 1080, 1019, "nonresccp", 1, "stock", 1, 4, null, null, "2022-06-27", "2026-02-07", 0, "RUB", "%"],
-		["RU000A0ZZ885", "CIQB", "Урегулирование с ЦК Нерезиденты - безадрес.", 1082, 36, "mamc", 1, "stock", 1, 2, null, null, "2022-06-27", "2026-02-07", 0, null, "%"],
-		["RU000A0ZZ885", "CTOB", "РПС с ЦК Нерезиденты: Облигации - адрес.", 1062, 1015, "nonresndm", 1, "stock", 1, 2, null, null, "2022-06-27", "2026-02-07", 0, "RUB", "%"],
-		["RU000A0ZZ885", "CPMO", "РЕПО-M Нерезиденты - адрес.", 1071, 1017, "nonresrepo", 1, "stock", 1, 4, null, null, "2022-06-27", "2026-02-07", 0, "RUB", "%"],
-		["RU000A0ZZ885", "CPEU", "РЕПО-M Нерезиденты (USD) - адрес.", 1073, 1017, "nonresrepo", 1, "stock", 1, 6, null, null, "2022-06-27", "2026-02-07", 0, "USD", "%"],
-		["RU000A0ZZ885", "CPEO", "РЕПО-M Нерезиденты (EUR) - адрес.", 1075, 1017, "nonresrepo", 1, "stock", 1, 6, null, null, "2022-06-27", "2026-02-07", 0, "EUR", "%"],
-		["RU000A0ZZ885", "CPEY", "РЕПО-M Нерезиденты (CNY) - адрес.", 1077, 1017, "nonresrepo", 1, "stock", 1, 6, null, null, "2022-09-26", "2026-02-07", 0, "CNY", "%"],
-		["RU000A0ZZ885", "OBBO", "ОТС-система: облигации", 141, 39, "bonds", 7, "offboard", 0, 2, "2018-11-08", "2020-02-10", "2018-11-08", "2022-12-30", 0, null, "%"],
-		["RU000A0ZZ885", "QBND", "Квоты", 1280, 1279, "bonds", 1282, "quotes", 1, 4, null, null, "2023-06-05", "2026-02-06", 0, null, "%"]
-	]
-}}
-
+		["RU000A0ZZ885", "RPEK", "РЕПО-М в ин. валюте: (KZT) - адрес.", 1426, 3, "repo",

@@ -33,3 +33,17 @@
 2026-02-07 15:13:11,486 - INFO - Collection completed in 2.48 seconds
 2026-02-07 15:13:11,486 - INFO - Successfully collected data from 3/3 endpoints
 2026-02-07 15:13:11,486 - INFO - Script execution completed successfully
+2026-02-07 15:20:39,651 - INFO - Starting data collection for ISIN: RU000A0ZZ885
+2026-02-07 15:20:39,651 - INFO - Requesting Security Search from https://iss.moex.com/iss/securities.json?q=RU000A0ZZ885
+2026-02-07 15:20:40,088 - INFO - Successfully received Security Search
+2026-02-07 15:20:41,094 - INFO - Requesting Security Info from https://iss.moex.com/iss/securities/RU000A0ZZ885.json
+2026-02-07 15:20:41,115 - INFO - Successfully received Security Info
+2026-02-07 15:20:42,132 - INFO - Requesting Bond Market Data from https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQOB/securities/RU000A0ZZ885.json
+2026-02-07 15:20:42,161 - INFO - Successfully received Bond Market Data
+2026-02-07 15:20:42,540 - INFO - Saved raw data to sheet 'security_search'
+2026-02-07 15:20:42,540 - INFO - Saved raw data to sheet 'security_info'
+2026-02-07 15:20:42,546 - INFO - Saved raw data to sheet 'bond_market_data'
+2026-02-07 15:20:42,596 - INFO - Excel file saved: RU000A0ZZ885.xlsx
+2026-02-07 15:20:42,596 - INFO - Collection completed in 2.52 seconds
+2026-02-07 15:20:42,596 - INFO - Successfully collected data from 3/3 endpoints
+2026-02-07 15:20:42,596 - INFO - Script execution completed successfully
