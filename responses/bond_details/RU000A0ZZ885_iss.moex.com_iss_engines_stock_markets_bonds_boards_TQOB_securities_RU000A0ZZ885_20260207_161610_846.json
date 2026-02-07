@@ -13,7 +13,7 @@
       },
       "SHORTNAME": {
         "type": "string",
-        "bytes": 30,
+        "bytes": 90,
         "max_size": 0
       },
       "PREVWAPRICE": {

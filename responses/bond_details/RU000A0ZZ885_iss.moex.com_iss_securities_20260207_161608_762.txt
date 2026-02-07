@@ -1,3 +1,12 @@
+URL: https://iss.moex.com/iss/securities.json?q=RU000A0ZZ885&lang=en
+Timestamp: 2026-02-07T16:16:08.764422
+Status Code: 200
+Content-Type: application/json; charset=utf-8
+Content-Length: 1289 bytes
+
+==================================================
+RESPONSE CONTENT:
+==================================================
 {
   "securities": {
     "metadata": {
@@ -8,7 +17,7 @@
       },
       "shortname": {
         "type": "string",
-        "bytes": 189,
+        "bytes": 765,
         "max_size": 0
       },
       "regnumber": {
@@ -87,13 +96,13 @@
     "data": [
       [
         "RU000A0ZZ885",
-        "КАМАЗ БО-9",
+        "KAMAZ PTC BO-09",
         "4-09-55010-D",
-        "КАМАЗ ПАО об. БО-09",
+        "KAMAZ PTC BO-09",
         "RU000A0ZZ885",
         1,
         855,
-        "Публичное акционерное общество \"КАМАЗ\"",
+        "KAMAZ Publicly Traded Company",
         "1650032058",
         "00231515",
         "corporate_bond",

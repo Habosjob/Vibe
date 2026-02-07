@@ -47,3 +47,42 @@
 2026-02-07 15:20:42,596 - INFO - Collection completed in 2.52 seconds
 2026-02-07 15:20:42,596 - INFO - Successfully collected data from 3/3 endpoints
 2026-02-07 15:20:42,596 - INFO - Script execution completed successfully
+2026-02-07 16:16:08,263 - INFO - Removed old response file: RU000A0ZZ885_iss.moex.com__iss_engines_stock_markets_bonds_boards_TQOB_securities_RU000A0ZZ885_20260207_152042_166.json
+2026-02-07 16:16:08,273 - INFO - Removed old response file: RU000A0ZZ885_iss.moex.com__iss_engines_stock_markets_bonds_boards_TQOB_securities_RU000A0ZZ885_20260207_152042_166.txt
+2026-02-07 16:16:08,277 - INFO - Removed old response file: RU000A0ZZ885_iss.moex.com__iss_securities_20260207_152040_090.json
+2026-02-07 16:16:08,280 - INFO - Removed old response file: RU000A0ZZ885_iss.moex.com__iss_securities_20260207_152040_090.txt
+2026-02-07 16:16:08,285 - INFO - Removed old response file: RU000A0ZZ885_iss.moex.com__iss_securities_RU000A0ZZ885_20260207_152041_115.json
+2026-02-07 16:16:08,290 - INFO - Removed old response file: RU000A0ZZ885_iss.moex.com__iss_securities_RU000A0ZZ885_20260207_152041_115.txt
+2026-02-07 16:16:08,290 - INFO - ============================================================
+2026-02-07 16:16:08,291 - INFO - Starting data collection for ISIN: RU000A0ZZ885
+2026-02-07 16:16:08,291 - INFO - ============================================================
+2026-02-07 16:16:08,291 - INFO - --- Collecting SECURITY SEARCH ---
+2026-02-07 16:16:08,291 - INFO - Requesting Security Search from https://iss.moex.com/iss/securities.json?q=RU000A0ZZ885&lang=en
+2026-02-07 16:16:08,762 - INFO - Successfully received Security Search (1289 bytes)
+2026-02-07 16:16:09,775 - INFO - --- Collecting SECURITY INFO ---
+2026-02-07 16:16:09,776 - INFO - Requesting Security Info from https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=en
+2026-02-07 16:16:09,795 - INFO - Successfully received Security Info (11597 bytes)
+2026-02-07 16:16:10,817 - INFO - --- Collecting BOND MARKET DATA ---
+2026-02-07 16:16:10,818 - INFO - Requesting Bond Market Data from https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQOB/securities/RU000A0ZZ885.json?lang=en
+2026-02-07 16:16:10,844 - INFO - Successfully received Bond Market Data (8383 bytes)
+2026-02-07 16:16:11,868 - INFO - --- Collecting ADDITIONAL INFO ---
+2026-02-07 16:16:11,868 - INFO - Requesting Additional Bond Info from https://iss.moex.com/iss/statistics/engines/stock/bondization/RU000A0ZZ885.json?lang=en
+2026-02-07 16:16:11,891 - ERROR - HTTP 404 for Additional Bond Info
+2026-02-07 16:16:11,896 - INFO - --- Saving results to Excel ---
+2026-02-07 16:16:12,250 - INFO - Extracted table 'security_search_securities' with 1 rows
+2026-02-07 16:16:12,267 - INFO - Saved sheet 'security_search_securities' with 1 rows
+2026-02-07 16:16:12,267 - INFO - Extracted table 'security_info_description' with 37 rows
+2026-02-07 16:16:12,267 - INFO - Extracted table 'security_info_boards' with 44 rows
+2026-02-07 16:16:12,286 - INFO - Saved sheet 'security_info_description' with 37 rows
+2026-02-07 16:16:12,333 - INFO - Saved sheet 'security_info_boards' with 44 rows
+2026-02-07 16:16:12,333 - INFO - Extracted table 'bond_market_data_dataversion' with 1 rows
+2026-02-07 16:16:12,338 - INFO - Saved sheet 'bond_market_data_dataversion' with 1 rows
+2026-02-07 16:16:12,406 - INFO - Excel file successfully saved: RU000A0ZZ885.xlsx
+2026-02-07 16:16:12,406 - INFO - ============================================================
+2026-02-07 16:16:12,406 - INFO - COLLECTION SUMMARY
+2026-02-07 16:16:12,406 - INFO - ============================================================
+2026-02-07 16:16:12,406 - INFO - ISIN: RU000A0ZZ885
+2026-02-07 16:16:12,406 - INFO - Total time: 3.61 seconds
+2026-02-07 16:16:12,406 - INFO - Endpoints: 3/4 successful
+2026-02-07 16:16:12,449 - INFO - Output: RU000A0ZZ885.xlsx
+2026-02-07 16:16:12,450 - INFO - ============================================================
