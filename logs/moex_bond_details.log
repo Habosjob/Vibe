@@ -1,0 +1,21 @@
+2026-02-07 14:51:43,906 | INFO | Старт поиска информации по ISIN: RU000A0ZZ885
+2026-02-07 14:51:43,906 | INFO | Запрос к https://iss.moex.com/iss/securities.json
+2026-02-07 14:51:45,719 | INFO | Статус: 200
+2026-02-07 14:51:45,721 | INFO | Успешный ответ от https://iss.moex.com/iss/securities.json
+2026-02-07 14:51:45,737 | INFO | Сохранён JSON-ответ: responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities.json_20260207_145145_722144.json
+2026-02-07 14:51:46,740 | INFO | Запрос к https://iss.moex.com/iss/securities/RU000A0ZZ885.json
+2026-02-07 14:51:47,102 | INFO | Статус: 200
+2026-02-07 14:51:47,104 | INFO | Успешный ответ от https://iss.moex.com/iss/securities/RU000A0ZZ885.json
+2026-02-07 14:51:47,112 | INFO | Сохранён JSON-ответ: responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities_RU000A0ZZ885.json_20260207_145147_104806.json
+2026-02-07 14:51:48,114 | INFO | Запрос к https://iss.moex.com/iss/history/securities.json?secid=RU000A0ZZ885
+2026-02-07 14:51:48,458 | INFO | Статус: 404
+2026-02-07 14:51:48,458 | WARNING | Неуспешный статус: 404 для https://iss.moex.com/iss/history/securities.json?secid=RU000A0ZZ885
+2026-02-07 14:51:49,470 | INFO | Запрос к https://iss.moex.com/iss/engines/stock/markets/bonds/boards/tqob/securities/RU000A0ZZ885.json
+2026-02-07 14:51:49,849 | INFO | Статус: 200
+2026-02-07 14:51:49,849 | INFO | Успешный ответ от https://iss.moex.com/iss/engines/stock/markets/bonds/boards/tqob/securities/RU000A0ZZ885.json
+2026-02-07 14:51:49,861 | INFO | Сохранён JSON-ответ: responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_engines_stock_markets_bonds_boards_tqob_securities_RU000A0ZZ885.json_20260207_145149_849178.json
+2026-02-07 14:51:50,863 | INFO | Запрос к https://iss.moex.com/iss/statistics/engines/stock/markets/bonds/bonds.json?iss.only=bonds&bonds.isin=RU000A0ZZ885
+2026-02-07 14:51:51,224 | INFO | Статус: 404
+2026-02-07 14:51:51,224 | WARNING | Неуспешный статус: 404 для https://iss.moex.com/iss/statistics/engines/stock/markets/bonds/bonds.json?iss.only=bonds&bonds.isin=RU000A0ZZ885
+2026-02-07 14:51:52,228 | INFO | Информация по ISIN RU000A0ZZ885 успешно получена и сохранена в responses/bond_details
+2026-02-07 14:51:52,231 | INFO | Завершение работы
