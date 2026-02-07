@@ -7,27 +7,44 @@ import requests
 from datetime import datetime
 import json
 
-# ==================== НАСТРОЙКА УГЛУБЛЕННОГО ЛОГИРОВАНИЯ ====================
+# ==================== НАСТРОЙКА ЛОГИРОВАНИЯ (ДЕТАЛЬНО В ФАЙЛ, КРАТКО В КОНСОЛЬ) ====================
 def setup_logging():
-    """Настройка перезаписываемого лога с максимальной детализацией."""
+    """Настройка логирования: детальные логи в файл, только важное в консоль."""
     log_dir = "logs"
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-    log_filename = os.path.join(log_dir, "moex_bond_details_debug.log")
+    log_filename = os.path.join(log_dir, "moex_bond_details.log")
     
-    # Устанавливаем уровень DEBUG для максимальной детализации
-    logging.basicConfig(
-        level=logging.DEBUG,  # Изменено с INFO на DEBUG
-        format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-        handlers=[
-            logging.FileHandler(log_filename, mode='w', encoding='utf-8'),
-            logging.StreamHandler(sys.stdout)
-        ]
+    # Создаем логгер
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)  # Ловим все сообщения от DEBUG и выше
+    
+    # Формат для файла (детальный)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
     )
     
-    logger = logging.getLogger(__name__)
-    logger.info(f"Инициализировано ДЕТАЛЬНОЕ логирование. Файл: {log_filename}")
+    # Формат для консоли (краткий)
+    console_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    # Обработчик для файла (все сообщения от DEBUG)
+    file_handler = logging.FileHandler(log_filename, mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(file_formatter)
+    
+    # Обработчик для консоли (только INFO и выше, без DEBUG)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)  # В консоль только INFO, WARNING, ERROR, CRITICAL
+    console_handler.setFormatter(console_formatter)
+    
+    # Добавляем обработчики к логгеру
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    logger.info(f"Инициализировано логирование. Детальные логи в файле: {log_filename}")
     logger.debug(f"Текущая директория: {os.getcwd()}")
     logger.debug(f"Python версия: {sys.version}")
     
@@ -44,11 +61,10 @@ BOND_ISINS = [
 
 BASE_URL = "https://iss.moex.com/iss"
 
-# ==================== ОСНОВНЫЕ ФУНКЦИИ С ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ ====================
+# ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
 def fetch_endpoint_data(endpoint, logger, max_retries=2):
     """
-    Загружает данные с указанного endpoint API MOEX с детальным логированием.
-    Возвращает словарь с DataFrame для каждого блока данных.
+    Загружает данные с указанного endpoint API MOEX.
     """
     url = f"{BASE_URL}{endpoint}"
     logger.debug(f"=== НАЧАЛО ЗАПРОСА ===")
@@ -59,11 +75,9 @@ def fetch_endpoint_data(endpoint, logger, max_retries=2):
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'application/json',
-                'Accept-Encoding': 'gzip, deflate'
             }
             
             logger.debug(f"Попытка {attempt + 1}/{max_retries}")
-            logger.debug(f"Заголовки запроса: {headers}")
             
             start_time = time.time()
             response = requests.get(url, headers=headers, timeout=30)
@@ -75,8 +89,6 @@ def fetch_endpoint_data(endpoint, logger, max_retries=2):
             
             if response.status_code != 200:
                 logger.warning(f"HTTP ошибка {response.status_code} для {endpoint}")
-                logger.warning(f"Текст ответа: {response.text[:500]}...")
-                
                 if response.status_code == 404:
                     logger.error(f"Endpoint не найден: {endpoint}")
                     return None
@@ -87,10 +99,7 @@ def fetch_endpoint_data(endpoint, logger, max_retries=2):
                     continue
                 return None
             
-            # Логируем заголовки ответа
-            logger.debug(f"Заголовки ответа: {dict(response.headers)}")
-            
-            # Пробуем разные кодировки
+            # Декодируем ответ
             raw_content = response.content
             text_content = None
             used_encoding = None
@@ -110,7 +119,7 @@ def fetch_endpoint_data(endpoint, logger, max_retries=2):
                 logger.error(f"Не удалось декодировать ответ для {endpoint}")
                 return None
             
-            # Логируем первые 500 символов ответа
+            # Логируем начало ответа только в файл
             logger.debug(f"Начало ответа (500 символов):")
             logger.debug(f"{'-'*50}")
             logger.debug(text_content[:500])
@@ -133,44 +142,30 @@ def fetch_endpoint_data(endpoint, logger, max_retries=2):
                     logger.debug(f"Метаданные для {endpoint}: {data[key]}")
                     continue
                     
-                if key == 'securities' or key == 'marketdata' or key == 'history' or key == 'description':
+                if isinstance(data[key], dict) and 'columns' in data[key] and 'data' in data[key]:
                     logger.debug(f"Обработка ключа: {key}")
                     
-                    if isinstance(data[key], dict):
-                        # Новый формат API: {"columns": [...], "data": [...]}
-                        if 'columns' in data[key] and 'data' in data[key]:
-                            columns = data[key]['columns']
-                            rows = data[key]['data']
-                            
-                            logger.debug(f"  Столбцов: {len(columns)}, Строк: {len(rows)}")
-                            logger.debug(f"  Столбцы: {columns}")
-                            
-                            if rows:
-                                df = pd.DataFrame(rows, columns=columns)
-                                
-                                # Преобразуем даты
-                                for col in df.columns:
-                                    if isinstance(col, str) and ('date' in col.lower() or 'time' in col.lower()):
-                                        try:
-                                            df[col] = pd.to_datetime(df[col], errors='coerce')
-                                        except Exception as e:
-                                            logger.debug(f"  Не удалось преобразовать столбец {col}: {e}")
-                                
-                                result[key] = df
-                                logger.debug(f"  Создан DataFrame: {df.shape}")
-                            else:
-                                logger.warning(f"  Нет данных для ключа {key}")
-                        else:
-                            logger.warning(f"  Неожиданная структура для ключа {key}: {list(data[key].keys())}")
-                    elif isinstance(data[key], list):
-                        # Старый формат API: список списков
-                        logger.debug(f"  Формат списка, длина: {len(data[key])}")
-                        if len(data[key]) >= 2 and isinstance(data[key][0], list) and isinstance(data[key][1], list):
-                            columns = data[key][0]
-                            rows = data[key][1:]
-                            df = pd.DataFrame(rows, columns=columns)
-                            result[key] = df
-                            logger.debug(f"  Создан DataFrame из списка: {df.shape}")
+                    columns = data[key]['columns']
+                    rows = data[key]['data']
+                    
+                    logger.debug(f"  Столбцов: {len(columns)}, Строк: {len(rows)}")
+                    logger.debug(f"  Столбцы: {columns}")
+                    
+                    if rows:
+                        df = pd.DataFrame(rows, columns=columns)
+                        
+                        # Преобразуем даты
+                        for col in df.columns:
+                            if isinstance(col, str) and ('date' in col.lower() or 'time' in col.lower()):
+                                try:
+                                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                                except Exception as e:
+                                    logger.debug(f"  Не удалось преобразовать столбец {col}: {e}")
+                        
+                        result[key] = df
+                        logger.debug(f"  Создан DataFrame: {df.shape}")
+                    else:
+                        logger.warning(f"  Нет данных для ключа {key}")
             
             logger.debug(f"=== КОНЕЦ ЗАПРОСА, получено {len(result)} блоков ===")
             return result if result else None
@@ -209,15 +204,14 @@ def fetch_bond_data(isin, logger):
     endpoints_to_fetch = [
         ("Основная информация", f"/securities/{isin}.json"),
         ("Рыночные данные", f"/securities/{isin}/marketdata.json"),
-        ("Доходности", f"/securities/{isin}/indicator.json"),
         ("Купоны", f"/securities/{isin}/coupons.json"),
         ("Амортизация", f"/securities/{isin}/amortizations.json"),
         ("Оферты", f"/securities/{isin}/offers.json"),
+        ("Размещение", f"/securities/{isin}/placement.json"),
     ]
     
     for endpoint_name, endpoint_url in endpoints_to_fetch:
-        logger.info(f"\nЗагрузка: {endpoint_name}")
-        logger.info(f"Endpoint: {endpoint_url}")
+        logger.info(f"Загрузка: {endpoint_name}")
         
         data = fetch_endpoint_data(endpoint_url, logger)
         
@@ -231,14 +225,11 @@ def fetch_bond_data(isin, logger):
             for data_key, df in data.items():
                 if isinstance(df, pd.DataFrame):
                     logger.info(f"  - {data_key}: {df.shape[0]} строк, {df.shape[1]} столбцов")
-                    if not df.empty:
-                        logger.debug(f"    Столбцы: {list(df.columns)}")
-                        logger.debug(f"    Первая строка: {df.iloc[0].to_dict()}")
         else:
             logger.warning(f"✗ Не удалось загрузить: {endpoint_name}")
     
-    # Пробуем получить данные по торгам (историю) через engines/markets
-    logger.info(f"\nПоиск исторических данных...")
+    # Пробуем получить исторические данные
+    logger.info(f"Поиск исторических данных...")
     
     # Сначала получаем информацию о бумаге, чтобы узнать engine/market/board
     if 'основная_информация' in bond_data and 'securities' in bond_data['основная_информация']:
@@ -259,7 +250,7 @@ def fetch_bond_data(isin, logger):
                     board_id = boards_df.iloc[0]['boardid']
                     
                     # Формируем URL для истории
-                    history_url = f"/history/engines/{engine}/markets/{market}/boards/{board_id}/securities/{isin}.json?limit=100"
+                    history_url = f"/history/engines/{engine}/markets/{market}/boards/{board_id}/securities/{isin}.json?limit=50"
                     logger.info(f"Загрузка истории: {history_url}")
                     
                     history_data = fetch_endpoint_data(history_url, logger)
@@ -267,16 +258,14 @@ def fetch_bond_data(isin, logger):
                         bond_data['история'] = history_data
                         logger.info(f"✓ Загружена история: {len(history_data.get('history', pd.DataFrame()))} записей")
     
-    logger.info(f"\n{'='*80}")
-    logger.info(f"ЗАВЕРШЕНО: {isin}. Получено блоков данных: {len(bond_data)}")
-    logger.info(f"{'='*80}")
+    logger.info(f"\nЗАВЕРШЕНО: {isin}. Получено блоков данных: {len(bond_data)}")
     
     return bond_data if bond_data else None
 
 def save_bond_data_to_excel(bond_data, isin, logger):
     """Сохраняет все данные по облигации в Excel файл."""
     filename = f"bond_{isin}_data.xlsx"
-    logger.info(f"\nСохранение в Excel: {filename}")
+    logger.info(f"Сохранение в Excel: {filename}")
     
     try:
         # Удаляем старый файл
@@ -304,15 +293,14 @@ def save_bond_data_to_excel(bond_data, isin, logger):
                             df.to_excel(writer, sheet_name=sheet_name, index=False)
                             sheets_created += 1
                             
-                            # Логируем
-                            logger.debug(f"  Лист '{sheet_name}': {df.shape}")
+                            logger.debug(f"Лист '{sheet_name}': {df.shape}")
             
             # Создаем summary лист
             summary_df = create_summary_df(bond_data, isin)
             if not summary_df.empty:
                 summary_df.to_excel(writer, sheet_name='SUMMARY', index=False)
                 sheets_created += 1
-                logger.debug(f"  Лист 'SUMMARY': {summary_df.shape}")
+                logger.debug(f"Лист 'SUMMARY': {summary_df.shape}")
         
         file_size = os.path.getsize(filename)
         logger.info(f"✓ Файл сохранен: {filename}")
@@ -343,7 +331,7 @@ def create_summary_df(bond_data, isin):
                 summary_data['Название'] = [row.get('SHORTNAME', '')[:30]]
                 summary_data['Номинал'] = [row.get('FACEVALUE', '')]
                 summary_data['Валюта'] = [row.get('FACEUNIT', '')]
-                summary_data['Погашение'] = [row.get('MATDATE', '')]
+                summary_data['Погашение'] = [str(row.get('MATDATE', ''))[:10]]
         
         # Рыночные данные
         if 'рыночные_данные' in bond_data and 'marketdata' in bond_data['рыночные_данные']:
@@ -358,11 +346,6 @@ def create_summary_df(bond_data, isin):
         if 'купоны' in bond_data and 'coupons' in bond_data['купоны']:
             coupons_df = bond_data['купоны']['coupons']
             summary_data['Купонов'] = [len(coupons_df)]
-        
-        # История
-        if 'история' in bond_data and 'history' in bond_data['история']:
-            history_df = bond_data['история']['history']
-            summary_data['Исторических_записей'] = [len(history_df)]
     
     except Exception as e:
         logger.warning(f"Ошибка создания summary: {e}")
@@ -375,7 +358,7 @@ def main():
     logger = setup_logging()
     
     logger.info("=" * 80)
-    logger.info("СКРИПТ СБОРА ДАННЫХ ПО ОБЛИГАЦИЯМ MOEX (УГЛУБЛЕННАЯ ОТЛАДКА)")
+    logger.info("СКРИПТ СБОРА ДАННЫХ ПО ОБЛИГАЦИЯМ MOEX")
     logger.info("=" * 80)
     logger.info(f"Облигаций для обработки: {len(BOND_ISINS)}")
     logger.info(f"ISIN: {BOND_ISINS}")
@@ -387,9 +370,7 @@ def main():
     start_time_total = time.time()
     
     for i, isin in enumerate(BOND_ISINS, 1):
-        logger.info(f"\n\n{'#' * 80}")
-        logger.info(f"ОБРАБОТКА {i}/{len(BOND_ISINS)}: {isin}")
-        logger.info(f"{'#' * 80}")
+        logger.info(f"\nОБРАБОТКА {i}/{len(BOND_ISINS)}: {isin}")
         
         bond_start = time.time()
         
@@ -441,12 +422,12 @@ def main():
     logger.info(f"Завершено: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 80)
     
-    # Консольный вывод
+    # Консольный вывод (только итоги)
     print(f"\n{'='*60}")
-    print("РЕЗУЛЬТАТЫ СБОРА ДАННЫХ")
+    print("РЕЗУЛЬТАТЫ СБОРА ДАННЫХ ПО ОБЛИГАЦИЯМ")
     print(f"{'='*60}")
     print(f"Всего облигаций: {len(BOND_ISINS)}")
-    print(f"Успешно: {len(successful)}")
+    print(f"Успешно обработано: {len(successful)}")
     print(f"С ошибками: {len(failed)}")
     
     if successful:
@@ -454,12 +435,7 @@ def main():
         for isin in successful:
             print(f"  • bond_{isin}_data.xlsx")
     
-    if failed:
-        print(f"\nПроблемные (см. лог для деталей):")
-        for isin in failed:
-            print(f"  • {isin}")
-    
-    print(f"\nПодробный лог: logs/moex_bond_details_debug.log")
+    print(f"\nДетальный лог: logs/moex_bond_details.log")
     print(f"Общее время: {total_time:.2f} сек")
     print(f"{'='*60}")
 
