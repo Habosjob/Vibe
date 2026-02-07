@@ -14,7 +14,7 @@ def setup_logging():
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-    log_filename = os.path.join(log_dir, "moex_bond_consolidated.log")
+    log_filename = os.path.join(log_dir, "moex_bond_collector.log")
     
     # Создаем логгер
     logger = logging.getLogger(__name__)
@@ -54,342 +54,329 @@ BOND_ISINS = [
     "RU000A106LL5"
 ]
 
-# ==================== ФУНКЦИИ ДЛЯ ЗАГРУЗКИ ДАННЫХ ====================
-def get_security_info(isin, logger):
-    """
-    Получает основную информацию по бумаге.
-    Использует корректный endpoint API MOEX.
-    """
-    url = f"https://iss.moex.com/iss/securities.json?q={isin}&iss.meta=off&iss.json=extended"
-    logger.debug(f"Запрос основной информации: {url}")
-    
-    try:
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            # Структура ответа: [metadata1, data1, metadata2, data2, ...]
-            if len(data) >= 2 and isinstance(data[1], list) and len(data[1]) > 0:
-                # Первый блок данных - информация о бумагах
-                columns = data[0]['securities']['columns']
-                rows = data[1]  # Данные securities
-                
-                if rows and len(rows) > 0:
-                    # Ищем строку с нашим ISIN
-                    for row in rows:
-                        if row[columns.index('ISIN')] == isin:
-                            df = pd.DataFrame([row], columns=columns)
-                            logger.info(f"Найдена основная информация для {isin}")
-                            return df
-    except Exception as e:
-        logger.error(f"Ошибка при получении основной информации для {isin}: {e}")
-    
-    return pd.DataFrame()  # Пустой DataFrame
+BASE_URL = "https://iss.moex.com/iss"
 
-def get_market_data(isin, logger):
+# ==================== ОСНОВНЫЕ ФУНКЦИИ ====================
+def fetch_endpoint_data(endpoint, logger):
     """
-    Получает рыночные данные по бумаге.
+    Загружает данные с указанного endpoint API MOEX.
+    Ключевое исправление: используем правильный формат URL с параметрами.
     """
-    url = f"https://iss.moex.com/iss/securities/{isin}/marketdata.json?iss.meta=off&iss.json=extended"
-    logger.debug(f"Запрос рыночных данных: {url}")
+    # ИСПРАВЛЕНИЕ 1: Добавляем параметры для получения данных в правильном формате
+    url = f"{BASE_URL}{endpoint}?iss.meta=off&iss.json=extended&limit=unlimited"
+    logger.debug(f"Запрос: {url}")
     
     try:
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            if len(data) >= 2 and isinstance(data[1], list) and len(data[1]) > 0:
-                columns = data[0]['marketdata']['columns']
-                rows = data[1]  # Данные marketdata
-                
-                if rows and len(rows) > 0:
-                    df = pd.DataFrame(rows, columns=columns)
-                    logger.info(f"Загружены рыночные данные для {isin}: {len(df)} строк")
-                    return df
-    except Exception as e:
-        logger.error(f"Ошибка при получении рыночных данных для {isin}: {e}")
-    
-    return pd.DataFrame()
-
-def get_coupons(isin, logger):
-    """
-    Получает данные о купонах.
-    """
-    url = f"https://iss.moex.com/iss/securities/{isin}/coupons.json?iss.meta=off&iss.json=extended"
-    logger.debug(f"Запрос данных о купонах: {url}")
-    
-    try:
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            if len(data) >= 2 and isinstance(data[1], list):
-                columns = data[0]['coupons']['columns']
-                rows = data[1]  # Данные coupons
-                
-                if rows and len(rows) > 0:
-                    df = pd.DataFrame(rows, columns=columns)
-                    logger.info(f"Загружены данные о купонах для {isin}: {len(df)} записей")
-                    return df
-    except Exception as e:
-        logger.error(f"Ошибка при получении данных о купонах для {isin}: {e}")
-    
-    return pd.DataFrame()
-
-def get_bond_data(isin, logger):
-    """
-    Собирает ВСЕ доступные данные по одной облигации.
-    """
-    logger.info(f"\nСбор данных для облигации: {isin}")
-    logger.info("-" * 50)
-    
-    all_data = []
-    
-    # 1. Основная информация
-    logger.info("1. Загрузка основной информации...")
-    sec_info = get_security_info(isin, logger)
-    if not sec_info.empty:
-        # Добавляем идентификатор источника данных
-        sec_info['data_source'] = 'security_info'
-        sec_info['isin'] = isin
-        all_data.append(sec_info)
-        logger.info(f"   Загружено: {len(sec_info)} строк, {len(sec_info.columns)} столбцов")
-    else:
-        logger.warning("   Основная информация не найдена")
-    
-    # 2. Рыночные данные
-    logger.info("2. Загрузка рыночных данных...")
-    market_data = get_market_data(isin, logger)
-    if not market_data.empty:
-        market_data['data_source'] = 'market_data'
-        market_data['isin'] = isin
-        all_data.append(market_data)
-        logger.info(f"   Загружено: {len(market_data)} строк, {len(market_data.columns)} столбцов")
-    else:
-        logger.warning("   Рыночные данные не найдены")
-    
-    # 3. Данные о купонах
-    logger.info("3. Загрузка данных о купонах...")
-    coupons_data = get_coupons(isin, logger)
-    if not coupons_data.empty:
-        coupons_data['data_source'] = 'coupons'
-        coupons_data['isin'] = isin
-        all_data.append(coupons_data)
-        logger.info(f"   Загружено: {len(coupons_data)} строк, {len(coupons_data.columns)} столбцов")
-    else:
-        logger.warning("   Данные о купонах не найдены")
-    
-    # 4. Попробуем получить данные через общий endpoint для облигаций
-    logger.info("4. Поиск дополнительных данных...")
-    try:
-        # Общий запрос для облигаций
-        bonds_url = "https://iss.moex.com/iss/statistics/engines/stock/markets/bonds/bondization.json?iss.meta=off&iss.json=extended"
-        response = requests.get(bonds_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=30)
         
-        if response.status_code == 200:
-            data = response.json()
-            if len(data) >= 2 and isinstance(data[1], list) and len(data[1]) > 0:
-                columns = data[0]['bondization']['columns']
-                rows = data[1]
-                
-                if rows and len(rows) > 0:
-                    # Фильтруем по ISIN
-                    isin_index = columns.index('ISIN') if 'ISIN' in columns else -1
-                    if isin_index >= 0:
-                        filtered_rows = [row for row in rows if row[isin_index] == isin]
-                        if filtered_rows:
-                            df = pd.DataFrame(filtered_rows, columns=columns)
-                            df['data_source'] = 'bondization'
-                            df['isin'] = isin
-                            all_data.append(df)
-                            logger.info(f"   Найдено записей в bondization: {len(df)}")
+        if response.status_code != 200:
+            logger.warning(f"HTTP ошибка {response.status_code} для {endpoint}")
+            return None
+        
+        # Парсим JSON
+        data = response.json()
+        logger.debug(f"JSON успешно распарсен. Структура: {type(data)}")
+        
+        # Формат extended: [metadata1, data1, metadata2, data2, ...]
+        if isinstance(data, list) and len(data) >= 2:
+            result = {}
+            
+            # Обрабатываем пары metadata/data
+            for i in range(0, len(data), 2):
+                if i+1 < len(data):
+                    metadata = data[i]
+                    rows = data[i+1]
+                    
+                    # metadata - словарь с ключами (названия таблиц)
+                    for table_name, table_info in metadata.items():
+                        if isinstance(table_info, dict) and 'columns' in table_info:
+                            columns = table_info['columns']
+                            
+                            if rows and isinstance(rows, list) and len(rows) > 0:
+                                df = pd.DataFrame(rows, columns=columns)
+                                result[table_name] = df
+                                logger.debug(f"  Таблица '{table_name}': {len(df)} строк")
+                            else:
+                                logger.debug(f"  Таблица '{table_name}': нет данных")
+            
+            return result if result else None
+            
     except Exception as e:
-        logger.debug(f"   Ошибка при запросе bondization: {e}")
+        logger.error(f"Ошибка для {endpoint}: {e}")
+        return None
+
+def fetch_bond_data(isin, logger):
+    """
+    Загружает все доступные данные по облигации.
+    ИСПРАВЛЕНИЕ 2: Используем правильные endpoint'ы.
+    """
+    logger.info(f"\nСбор данных для: {isin}")
     
-    # Объединяем все данные
-    if all_data:
-        combined_df = pd.concat(all_data, ignore_index=True, sort=False)
-        logger.info(f"Итого собрано данных для {isin}: {len(combined_df)} строк")
-        return combined_df
-    else:
-        logger.warning(f"Не удалось собрать данные для {isin}")
+    bond_data = {}
+    
+    # Ключевые endpoint'ы для облигаций
+    endpoints = [
+        ("securities", f"/securities/{isin}.json"),
+        ("marketdata", f"/securities/{isin}/marketdata.json"),
+        ("coupons", f"/securities/{isin}/coupons.json"),
+        ("offers", f"/securities/{isin}/offers.json"),
+        ("amortizations", f"/securities/{isin}/amortizations.json"),
+    ]
+    
+    for endpoint_name, endpoint_url in endpoints:
+        logger.info(f"  Загрузка: {endpoint_name}")
+        data = fetch_endpoint_data(endpoint_url, logger)
+        
+        if data:
+            bond_data[endpoint_name] = data
+            # Логируем что получили
+            for table_name, df in data.items():
+                logger.info(f"    ✓ {table_name}: {len(df)} строк")
+        else:
+            logger.warning(f"    ✗ Нет данных")
+    
+    return bond_data if bond_data else None
+
+def consolidate_all_data(all_bonds_data, logger):
+    """
+    Объединяет все данные со всех облигаций в один DataFrame.
+    ИСПРАВЛЕНИЕ 3: Все на одном листе + удаление дубликатов.
+    """
+    logger.info("\n" + "="*60)
+    logger.info("КОНСОЛИДАЦИЯ ВСЕХ ДАННЫХ")
+    logger.info("="*60)
+    
+    all_rows = []
+    
+    for isin, bond_data in all_bonds_data.items():
+        logger.info(f"\nОбработка данных для {isin}:")
+        
+        for source_name, tables in bond_data.items():
+            for table_name, df in tables.items():
+                if not df.empty:
+                    # Добавляем идентификационные колонки
+                    df = df.copy()
+                    df['ISIN'] = isin
+                    df['DATA_SOURCE'] = source_name
+                    df['TABLE_NAME'] = table_name
+                    df['LOAD_TIMESTAMP'] = datetime.now()
+                    
+                    all_rows.append(df)
+                    logger.info(f"  Добавлено {len(df)} строк из {source_name}.{table_name}")
+    
+    if not all_rows:
+        logger.error("Нет данных для консолидации!")
         return pd.DataFrame()
-
-# ==================== ОБРАБОТКА И СОХРАНЕНИЕ ====================
-def process_and_save_all_bonds(bond_isins, logger):
-    """
-    Обрабатывает все облигации, объединяет данные и сохраняет в один файл.
-    """
-    logger.info(f"\nНачало обработки {len(bond_isins)} облигаций")
-    logger.info("=" * 60)
-    
-    all_bonds_data = []
-    processed_count = 0
-    
-    for i, isin in enumerate(bond_isins, 1):
-        logger.info(f"\n[{i}/{len(bond_isins)}] Обработка: {isin}")
-        start_time = time.time()
-        
-        try:
-            # Получаем данные по облигации
-            bond_df = get_bond_data(isin, logger)
-            
-            if not bond_df.empty:
-                all_bonds_data.append(bond_df)
-                processed_count += 1
-                logger.info(f"✓ Данные успешно получены ({len(bond_df)} строк)")
-            else:
-                logger.warning(f"✗ Не удалось получить данные для {isin}")
-            
-            elapsed = time.time() - start_time
-            logger.info(f"Время обработки: {elapsed:.2f} сек")
-            
-        except Exception as e:
-            logger.error(f"Ошибка при обработке {isin}: {e}", exc_info=True)
     
     # Объединяем все данные
-    if all_bonds_data:
-        logger.info(f"\nОбъединение данных всех облигаций...")
-        final_df = pd.concat(all_bonds_data, ignore_index=True, sort=False)
-        
-        # УДАЛЯЕМ ДУБЛИКАТЫ
-        initial_count = len(final_df)
-        final_df = final_df.drop_duplicates()
-        removed_count = initial_count - len(final_df)
-        
-        logger.info(f"Итоговый датасет: {len(final_df)} строк, {len(final_df.columns)} столбцов")
-        if removed_count > 0:
-            logger.info(f"Удалено дубликатов: {removed_count} строк")
-        
-        # Анализируем структуру данных
-        logger.info("\nАнализ структуры данных:")
-        logger.info(f"- Уникальных ISIN: {final_df['isin'].nunique()}")
-        logger.info(f"- Источников данных: {final_df['data_source'].unique().tolist()}")
-        
-        # Сохраняем в Excel
-        return save_consolidated_excel(final_df, logger, processed_count)
-    else:
-        logger.error("Не удалось собрать данные ни по одной облигации")
-        return False
+    consolidated_df = pd.concat(all_rows, ignore_index=True)
+    
+    # УДАЛЯЕМ ДУБЛИКАТЫ
+    initial_rows = len(consolidated_df)
+    
+    # Удаляем полные дубликаты по всем колонкам
+    consolidated_df = consolidated_df.drop_duplicates()
+    
+    # Также удаляем дубликаты по ключевым полям (если они есть)
+    # Ищем колонки, которые могут быть ключевыми
+    key_columns = []
+    for col in consolidated_df.columns:
+        if col.lower() in ['id', 'isin', 'secid', 'trade_date', 'coupondate', 'recorddate']:
+            key_columns.append(col)
+    
+    if key_columns and len(key_columns) > 1:
+        # Удаляем дубликаты по ключевым полям
+        consolidated_df = consolidated_df.drop_duplicates(subset=key_columns, keep='first')
+    
+    final_rows = len(consolidated_df)
+    removed = initial_rows - final_rows
+    
+    logger.info(f"\nРезультаты консолидации:")
+    logger.info(f"  Изначально строк: {initial_rows}")
+    logger.info(f"  После удаления дубликатов: {final_rows}")
+    logger.info(f"  Удалено дубликатов: {removed}")
+    logger.info(f"  Столбцов: {len(consolidated_df.columns)}")
+    
+    return consolidated_df
 
-def save_consolidated_excel(df, logger, bond_count):
+def save_to_excel(consolidated_df, logger):
     """
-    Сохраняет объединенные данные в один Excel файл на одном листе.
+    Сохраняет объединенные данные в один Excel файл.
+    ВСЕ ДАННЫЕ НА ОДНОМ ЛИСТЕ.
     """
-    filename = f"all_bonds_consolidated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    logger.info(f"\nСохранение данных в файл: {filename}")
+    if consolidated_df.empty:
+        logger.error("Нет данных для сохранения!")
+        return False
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"all_bonds_data_{timestamp}.xlsx"
+    
+    logger.info(f"\nСохранение в Excel: {filename}")
     
     try:
-        # Создаем Excel writer
         with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
-            # Сохраняем все данные на одном листе
+            # ВСЁ НА ОДНОМ ЛИСТЕ
             sheet_name = 'All_Bonds_Data'
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            consolidated_df.to_excel(writer, sheet_name=sheet_name, index=False)
             
-            # Настраиваем ширину столбцов
+            # Автонастройка ширины столбцов
             worksheet = writer.sheets[sheet_name]
-            for i, col in enumerate(df.columns):
+            for i, col in enumerate(consolidated_df.columns):
                 max_length = max(
-                    df[col].astype(str).str.len().max(),
+                    consolidated_df[col].astype(str).str.len().max(),
                     len(str(col))
                 )
                 worksheet.set_column(i, i, min(max_length + 2, 50))
         
-        file_size = os.path.getsize(filename) / 1024
-        logger.info(f"✓ Файл успешно сохранен")
-        logger.info(f"  Размер: {file_size:.1f} KB")
-        logger.info(f"  Лист: {sheet_name}")
-        logger.info(f"  Облигаций в файле: {bond_count}")
+        # Создаем summary файл
+        create_summary_file(consolidated_df, filename, logger)
         
-        # Создаем дополнительный файл со статистикой
-        save_statistics(df, logger)
+        logger.info(f"✓ Файл успешно сохранен")
+        logger.info(f"  Размер: {os.path.getsize(filename) / 1024:.1f} KB")
+        logger.info(f"  Лист: {sheet_name}")
         
         return True
         
     except Exception as e:
-        logger.error(f"Ошибка сохранения Excel: {e}", exc_info=True)
+        logger.error(f"Ошибка сохранения Excel: {e}")
         return False
 
-def save_statistics(df, logger):
-    """
-    Сохраняет статистику по данным в отдельный файл.
-    """
+def create_summary_file(df, excel_filename, logger):
+    """Создает текстовый файл с описанием данных."""
+    summary_filename = excel_filename.replace('.xlsx', '_SUMMARY.txt')
+    
     try:
-        stats_filename = "bonds_data_statistics.txt"
-        
-        with open(stats_filename, 'w', encoding='utf-8') as f:
-            f.write("СТАТИСТИКА ПО ДАННЫМ ОБЛИГАЦИЙ\n")
-            f.write("=" * 50 + "\n\n")
+        with open(summary_filename, 'w', encoding='utf-8') as f:
+            f.write("="*60 + "\n")
+            f.write("СВОДКА ПО СОБРАННЫМ ДАННЫМ ОБЛИГАЦИЙ\n")
+            f.write("="*60 + "\n\n")
             
-            f.write(f"Дата создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Файл данных: {excel_filename}\n")
+            f.write(f"Дата создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            
             f.write(f"Всего строк: {len(df)}\n")
             f.write(f"Всего столбцов: {len(df.columns)}\n\n")
             
             f.write("Количество записей по ISIN:\n")
-            isin_counts = df['isin'].value_counts()
+            isin_counts = df['ISIN'].value_counts()
             for isin, count in isin_counts.items():
                 f.write(f"  {isin}: {count} строк\n")
             
             f.write("\nКоличество записей по источникам данных:\n")
-            source_counts = df['data_source'].value_counts()
+            source_counts = df['DATA_SOURCE'].value_counts()
             for source, count in source_counts.items():
                 f.write(f"  {source}: {count} строк\n")
             
-            f.write("\nСписок столбцов:\n")
+            f.write("\nСтолбцы в данных:\n")
             for i, col in enumerate(df.columns, 1):
-                f.write(f"  {i:2d}. {col}\n")
+                f.write(f"{i:3d}. {col}\n")
+                if i >= 50:  # Ограничим вывод
+                    f.write(f"... и еще {len(df.columns) - 50} столбцов\n")
+                    break
         
-        logger.info(f"Статистика сохранена в: {stats_filename}")
+        logger.info(f"✓ Сводка сохранена в: {summary_filename}")
         
     except Exception as e:
-        logger.warning(f"Не удалось сохранить статистику: {e}")
+        logger.warning(f"Не удалось создать сводку: {e}")
 
 # ==================== ОСНОВНАЯ ФУНКЦИЯ ====================
 def main():
     """Главная функция скрипта."""
     logger = setup_logging()
     
-    logger.info("=" * 60)
-    logger.info("СКРИПТ СБОРА И КОНСОЛИДАЦИИ ДАННЫХ ПО ОБЛИГАЦИЯМ MOEX")
-    logger.info("=" * 60)
+    logger.info("="*60)
+    logger.info("СКРИПТ СБОРА ДАННЫХ ПО ОБЛИГАЦИЯМ MOEX (ИСПРАВЛЕННЫЙ)")
+    logger.info("="*60)
     logger.info(f"Облигаций для обработки: {len(BOND_ISINS)}")
+    logger.info(f"ISIN: {BOND_ISINS}")
     logger.info(f"Дата запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info("=" * 60)
+    logger.info("="*60)
     
     start_time_total = time.time()
     
-    # Обрабатываем все облигации
-    success = process_and_save_all_bonds(BOND_ISINS, logger)
+    # Собираем данные по всем облигациям
+    all_bonds_data = {}
+    successful = []
+    failed = []
     
-    # Итоги выполнения
+    for i, isin in enumerate(BOND_ISINS, 1):
+        logger.info(f"\n[{i}/{len(BOND_ISINS)}] Обработка облигации: {isin}")
+        bond_start = time.time()
+        
+        try:
+            bond_data = fetch_bond_data(isin, logger)
+            
+            if bond_data:
+                all_bonds_data[isin] = bond_data
+                successful.append(isin)
+                logger.info(f"✓ Данные получены для {isin}")
+            else:
+                failed.append(isin)
+                logger.warning(f"✗ Не удалось получить данные для {isin}")
+                
+        except Exception as e:
+            failed.append(isin)
+            logger.error(f"✗ Ошибка для {isin}: {e}", exc_info=True)
+        
+        bond_time = time.time() - bond_start
+        logger.info(f"Время обработки: {bond_time:.2f} сек")
+    
+    # Консолидируем и сохраняем данные
+    if all_bonds_data:
+        logger.info(f"\n{'='*60}")
+        logger.info(f"УСПЕШНО ОБРАБОТАНО: {len(successful)} из {len(BOND_ISINS)}")
+        logger.info(f"С ОШИБКАМИ: {len(failed)}")
+        logger.info(f"{'='*60}")
+        
+        # Консолидация всех данных
+        consolidated_df = consolidate_all_data(all_bonds_data, logger)
+        
+        # Сохранение в Excel
+        if not consolidated_df.empty:
+            save_success = save_to_excel(consolidated_df, logger)
+            
+            if save_success:
+                logger.info(f"\n✓ ВСЕ ДАННЫЕ УСПЕШНО СОХРАНЕНЫ")
+            else:
+                logger.error(f"\n✗ ОШИБКА ПРИ СОХРАНЕНИИ")
+        else:
+            logger.error(f"\n✗ НЕТ ДАННЫХ ДЛЯ СОХРАНЕНИЯ")
+    else:
+        logger.error(f"\n✗ НЕ УДАЛОСЬ ПОЛУЧИТЬ ДАННЫЕ НИ ПО ОДНОЙ ОБЛИГАЦИИ")
+    
+    # Итоги
     total_time = time.time() - start_time_total
     
-    logger.info("\n" + "=" * 60)
+    logger.info(f"\n{'='*60}")
     logger.info("ИТОГИ ВЫПОЛНЕНИЯ")
-    logger.info("=" * 60)
+    logger.info(f"{'='*60}")
+    logger.info(f"Успешно: {len(successful)} облигаций")
+    logger.info(f"С ошибками: {len(failed)} облигаций")
     
-    if success:
-        logger.info("✓ Скрипт выполнен успешно!")
-        logger.info(f"✓ Данные сохранены в консолидированном Excel-файле")
-    else:
-        logger.error("✗ В процессе выполнения возникли ошибки")
+    if failed:
+        logger.info(f"\nОблигации с ошибками:")
+        for isin in failed:
+            logger.info(f"  • {isin}")
     
     logger.info(f"\nОбщее время выполнения: {total_time:.2f} сек")
     logger.info(f"Завершено: {datetime.now().strftime('%H:%M:%S')}")
-    logger.info("=" * 60)
+    logger.info(f"{'='*60}")
     
     # Краткий вывод в консоль
     print(f"\n{'='*50}")
-    print("РЕЗУЛЬТАТЫ ВЫПОЛНЕНИЯ СКРИПТА")
+    print("РЕЗУЛЬТАТЫ СБОРА ДАННЫХ ПО ОБЛИГАЦИЯМ")
     print(f"{'='*50}")
     
-    if success:
-        print("✓ Данные успешно собраны и сохранены")
-        print("✓ Все данные объединены в одном файле Excel")
-        print("✓ Дубликаты удалены")
-        print(f"\nПроверьте файлы:")
-        print("  • all_bonds_consolidated_*.xlsx - основные данные")
-        print("  • bonds_data_statistics.txt - статистика")
-        print("  • logs/moex_bond_consolidated.log - детальный лог")
+    if successful:
+        print(f"✓ Успешно обработано: {len(successful)} облигаций")
+        print(f"✗ С ошибками: {len(failed)} облигаций")
+        print(f"\nСозданные файлы:")
+        print("  • all_bonds_data_YYYYMMDD_HHMMSS.xlsx - все данные на одном листе")
+        print("  • all_bonds_data_YYYYMMDD_HHMMSS_SUMMARY.txt - сводка")
+        print(f"\nДетальный лог: logs/moex_bond_collector.log")
     else:
-        print("✗ При выполнении скрипта возникли ошибки")
+        print("✗ Не удалось получить данные ни по одной облигации")
         print("  Проверьте лог-файл для деталей")
     
     print(f"\nОбщее время: {total_time:.2f} сек")

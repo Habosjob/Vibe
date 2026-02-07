@@ -6,6 +6,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/bond_RU000A0ZZ885_data.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/bond_RU000A106LL5_data.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/bond_RU000A10DB16_data.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_bond_consolidated.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_bond_details.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_bond_details_debug.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_download.log
