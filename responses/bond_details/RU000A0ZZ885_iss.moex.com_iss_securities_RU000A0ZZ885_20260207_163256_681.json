@@ -1,12 +1,3 @@
-URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=en
-Timestamp: 2026-02-07T16:16:09.805076
-Status Code: 200
-Content-Type: application/json; charset=utf-8
-Content-Length: 11597 bytes
-
-==================================================
-RESPONSE CONTENT:
-==================================================
 {
   "description": {
     "metadata": {
@@ -52,7 +43,7 @@ RESPONSE CONTENT:
     "data": [
       [
         "SECID",
-        "Security code",
+        "Код ценной бумаги",
         "RU000A0ZZ885",
         "string",
         1,
@@ -61,7 +52,7 @@ RESPONSE CONTENT:
       ],
       [
         "ISSUENAME",
-        "Security name",
+        "Наименование ценной бумаги",
         "Облигации процентные неконвертируемые документарные на предъявителя с обязательным централизованным хранением серии БО-09",
         "string",
         2,
@@ -70,8 +61,8 @@ RESPONSE CONTENT:
       ],
       [
         "NAME",
-        "Full name",
-        "KAMAZ PTC BO-09",
+        "Полное наименование",
+        "КАМАЗ ПАО об. БО-09",
         "string",
         3,
         0,
@@ -79,8 +70,8 @@ RESPONSE CONTENT:
       ],
       [
         "SHORTNAME",
-        "Short name",
-        "KAMAZ PTC BO-09",
+        "Краткое наименование",
+        "КАМАЗ БО-9",
         "string",
         4,
         0,
@@ -88,7 +79,7 @@ RESPONSE CONTENT:
       ],
       [
         "REGNUMBER",
-        "State registration  number",
+        "Номер государственной регистрации",
         "4-09-55010-D",
         "string",
         5,
@@ -97,7 +88,7 @@ RESPONSE CONTENT:
       ],
       [
         "ISIN",
-        "ISIN Code",
+        "ISIN код",
         "RU000A0ZZ885",
         "string",
         6,
@@ -106,7 +97,7 @@ RESPONSE CONTENT:
       ],
       [
         "ISSUEDATE",
-        "Date of listing",
+        "Дата начала торгов",
         "2018-05-29",
         "date",
         7,
@@ -115,7 +106,7 @@ RESPONSE CONTENT:
       ],
       [
         "MATDATE",
-        "Maturity date",
+        "Дата погашения",
         "2033-05-10",
         "date",
         8,
@@ -124,7 +115,7 @@ RESPONSE CONTENT:
       ],
       [
         "INITIALFACEVALUE",
-        "Initial face value",
+        "Первоначальная номинальная стоимость",
         "1000",
         "number",
         10,
@@ -133,7 +124,7 @@ RESPONSE CONTENT:
       ],
       [
         "FACEUNIT",
-        "Face value currency",
+        "Валюта номинала",
         "SUR",
         "string",
         11,
@@ -142,7 +133,7 @@ RESPONSE CONTENT:
       ],
       [
         "LATNAME",
-        "Full name in English",
+        "Английское наименование",
         "KAMAZ PTC BO-09",
         "string",
         12,
@@ -151,7 +142,7 @@ RESPONSE CONTENT:
       ],
       [
         "STARTDATEMOEX",
-        "Trading start date on Moscow Exchange",
+        "Дата начала торгов на Московской Бирже",
         "2018-05-29",
         "date",
         13,
@@ -160,7 +151,7 @@ RESPONSE CONTENT:
       ],
       [
         "HASPROSPECTUS",
-        "Has prospectus",
+        "Наличие проспекта",
         "1",
         "boolean",
         14,
@@ -169,7 +160,7 @@ RESPONSE CONTENT:
       ],
       [
         "DECISIONDATE",
-        "Date of listing",
+        "Дата принятия решения организатором торговли о включении ценной бумаги в Список",
         "2016-12-05",
         "date",
         15,
@@ -178,7 +169,7 @@ RESPONSE CONTENT:
       ],
       [
         "ISCONCESSIONAGREEMENT",
-        "The bonds were placed to fund partnership agreements",
+        "Облигации размещены с целью финансирования соглашений о партнерстве",
         "0",
         "boolean",
         16,
@@ -187,7 +178,7 @@ RESPONSE CONTENT:
       ],
       [
         "HASDEFAULT",
-        "Defaulted",
+        "Допущен дефолт",
         "0",
         "boolean",
         17,
@@ -196,7 +187,7 @@ RESPONSE CONTENT:
       ],
       [
         "HASTECHNICALDEFAULT",
-        "Technically defaulted",
+        "Допущен технический дефолт",
         "0",
         "boolean",
         18,
@@ -205,7 +196,7 @@ RESPONSE CONTENT:
       ],
       [
         "EMITENTMISMATCHCUR",
-        "The Issuer is not eligible for the current List",
+        "Эмитент не соответствует требованию на текущий Список",
         "0",
         "number",
         21,
@@ -214,7 +205,7 @@ RESPONSE CONTENT:
       ],
       [
         "EARLYREPAYMENT",
-        "Option for early redemption",
+        "Возможен досрочный выкуп",
         "0",
         "boolean",
         22,
@@ -223,7 +214,7 @@ RESPONSE CONTENT:
       ],
       [
         "LISTLEVEL",
-        "List level",
+        "Уровень листинга",
         "2",
         "number",
         23,
@@ -232,7 +223,7 @@ RESPONSE CONTENT:
       ],
       [
         "DAYSTOREDEMPTION",
-        "Days to redemption",
+        "Дней до погашения",
         "2649",
         "number",
         25,
@@ -241,7 +232,7 @@ RESPONSE CONTENT:
       ],
       [
         "ISSUESIZE",
-        "Issue Size",
+        "Объем выпуска",
         "3000000",
         "number",
         26,
@@ -250,7 +241,7 @@ RESPONSE CONTENT:
       ],
       [
         "FACEVALUE",
-        "Face value",
+        "Номинальная стоимость",
         "1000",
         "number",
         27,
@@ -259,7 +250,7 @@ RESPONSE CONTENT:
       ],
       [
         "ISQUALIFIEDINVESTORS",
-        "Qualified investors",
+        "Бумаги для квалифицированных инвесторов",
         "0",
         "boolean",
         28,
@@ -268,7 +259,7 @@ RESPONSE CONTENT:
       ],
       [
         "COUPONFREQUENCY",
-        "Coupon payment interval in year",
+        "Периодичность выплаты купона в год",
         "2",
         "number",
         30,
@@ -277,7 +268,7 @@ RESPONSE CONTENT:
       ],
       [
         "COUPONDATE",
-        "Coupon date",
+        "Дата выплаты купона",
         "2026-05-19",
         "date",
         31,
@@ -286,7 +277,7 @@ RESPONSE CONTENT:
       ],
       [
         "COUPONPERCENT",
-        "Coupon rate, %",
+        "Ставка купона, %",
         "15.43",
         "number",
         32,
@@ -295,7 +286,7 @@ RESPONSE CONTENT:
       ],
       [
         "COUPONVALUE",
-        "Coupon value, in face value currency",
+        "Сумма купона, в валюте номинала",
         "76.94",
         "number",
         33,
@@ -304,7 +295,7 @@ RESPONSE CONTENT:
       ],
       [
         "EVENINGSESSION",
-        "Admission to the evening additional trading session",
+        "Допуск к вечерней дополнительной торговой сессии",
         "1",
         "boolean",
         37,
@@ -313,7 +304,7 @@ RESPONSE CONTENT:
       ],
       [
         "REGISTRY_DATE",
-        "Date of state registration of the security",
+        "Дата государственной регистрации ценной бумаги",
         "2015-06-04",
         "date",
         41,
@@ -322,8 +313,8 @@ RESPONSE CONTENT:
       ],
       [
         "BOND_TYPE",
-        "Bond type",
-        "Floater",
+        "Вид облигации",
+        "Флоатер",
         "string",
         42,
         1,
@@ -331,8 +322,8 @@ RESPONSE CONTENT:
       ],
       [
         "BOND_SUBTYPE",
-        "Bond sub-type",
-        "Till maturity",
+        "Подвид облигации",
+        "До погашения",
         "string",
         43,
         1,
@@ -340,8 +331,8 @@ RESPONSE CONTENT:
       ],
       [
         "TYPENAME",
-        "Security type",
-        "Bond",
+        "Вид/категория ценной бумаги",
+        "Корпоративная облигация",
         "string",
         9000,
         0,
@@ -349,7 +340,7 @@ RESPONSE CONTENT:
       ],
       [
         "GROUP",
-        "Instrument type code",
+        "Код типа инструмента",
         "stock_bonds",
         "string",
         9001,
@@ -358,7 +349,7 @@ RESPONSE CONTENT:
       ],
       [
         "TYPE",
-        "Security type",
+        "Тип бумаги",
         "corporate_bond",
         "string",
         10000,
@@ -367,8 +358,8 @@ RESPONSE CONTENT:
       ],
       [
         "GROUPNAME",
-        "Instrument type",
-        "Bonds",
+        "Типа инструмента",
+        "Облигации",
         "string",
         10011,
         1,
@@ -376,7 +367,7 @@ RESPONSE CONTENT:
       ],
       [
         "EMITTER_ID",
-        "Emitter code",
+        "Код эмитента",
         "855",
         "number",
         11000,
@@ -484,7 +475,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "TQCB",
-        "T+: Bonds - order-driven",
+        "Т+: Облигации - безадрес.",
         58,
         2,
         "bonds",
@@ -503,7 +494,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "EQOB",
-        "Main market: A1 bonds - order-driven",
+        "Т0 Облигации - безадрес.",
         7,
         2,
         "bonds",
@@ -522,7 +513,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "LIQB",
-        "Order-driven CCP deals - order-driven",
+        "Продажа обеспечения бирж.рынок - безадрес.",
         120,
         36,
         "mamc",
@@ -541,7 +532,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "RPEY",
-        "REPO (CNY) - negotiated",
+        "РЕПО в ин.валюте (CNY) - адрес.",
         2,
         3,
         "repo",
@@ -560,7 +551,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "RPEU",
-        "REPO (USD) - negotiated",
+        "РЕПО в ин. валюте (USD) - адрес.",
         94,
         3,
         "repo",
@@ -579,7 +570,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "RPUO",
-        "REPO: bonds (USD) - negotiated",
+        "РЕПО c облигациями (USD) - адрес.",
         94,
         3,
         "repo",
@@ -598,7 +589,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "RPEO",
-        "REPO (EUR) - negotiated",
+        "РЕПО в ин. валюте (EUR) - адрес.",
         90,
         3,
         "repo",
@@ -617,7 +608,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "EQRP",
-        "REPO with CCP 1 day - order-driven",
+        "РЕПО с ЦК 1 день - безадрес.",
         50,
         27,
         "ccp",
@@ -636,7 +627,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "EQRD",
-        "REPO with CCP 1 day (USD) - order-driven",
+        "РЕПО с ЦК 1 день (USD) - безадрес.",
         92,
         27,
         "ccp",
@@ -655,7 +646,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "EQRE",
-        "REPO with CCP 1 day (EUR) - order-driven",
+        "РЕПО с ЦК 1 день (EUR) - безадрес.",
         93,
         27,
         "ccp",
@@ -674,7 +665,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "EQRY",
-        "REPO CCP 1 day (CNY) - order-driven",
+        "РЕПО с ЦК 1 день (CNY) - безадрес.",
         152,
         27,
         "ccp",
@@ -693,7 +684,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "EQWP",
-        "REPO with CCP 7 day - order-driven",
+        "РЕПО с ЦК 7 дн. - безадрес.",
         76,
         27,
         "ccp",
@@ -712,7 +703,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "EQWD",
-        "REPO with CCP 7 day (USD) - order-driven",
+        "РЕПО с ЦК 7 дней (USD) - безадрес.",
         78,
         27,
         "ccp",
@@ -731,7 +722,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "EQWE",
-        "REPO with CCP 7 day (EUR) - order-driven",
+        "РЕПО с ЦК 7 дней (EUR) - безадрес.",
         79,
         27,
         "ccp",
@@ -750,7 +741,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "EQWY",
-        "REPO with CCP 7 day (CNY) - order-driven",
+        "РЕПО с ЦК 7 дней (CNY) - безадрес.",
         1116,
         27,
         "ccp",
@@ -769,7 +760,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "LIQR",
-        "REPO CCP Settle's Deals - order-driven",
+        "РЕПО с ЦК: Урегулирование - безадрес.",
         148,
         27,
         "ccp",
@@ -788,7 +779,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "PSRP",
-        "REPO with CCP - negotiated",
+        "РЕПО с ЦК - адрес.",
         65,
         27,
         "ccp",
@@ -807,7 +798,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "PSRD",
-        "REPO with CCP (USD) - negotiated",
+        "РЕПО с ЦК (USD) - адрес.",
         91,
         27,
         "ccp",
@@ -826,7 +817,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "PSRE",
-        "REPO with CCP (EUR) - negotiated",
+        "РЕПО с ЦК (EUR) - адрес.",
         96,
         27,
         "ccp",
@@ -845,7 +836,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "PSRY",
-        "REPO CCP (CNY) - negotiated",
+        "РЕПО с ЦК (CNY) - адрес.",
         153,
         27,
         "ccp",
@@ -864,7 +855,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "PSRK",
-        "REPO with CCP (KZT) - negotiated",
+        "РЕПО с ЦК (KZT) - адрес.",
         1422,
         27,
         "ccp",
@@ -883,7 +874,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "PSRB",
-        "REPO with CCP (BYN) - negotiated",
+        "РЕПО с ЦК (BYN) - адрес.",
         1424,
         27,
         "ccp",
@@ -902,7 +893,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "PSOB",
-        "Neg. deals: bonds - negotiated",
+        "РПС: Облигации - адрес.",
         284,
         4,
         "ndm",
@@ -921,7 +912,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "PSAU",
-        "Primary distribution auction - negotiated",
+        "Размещение - адрес.",
         107,
         4,
         "ndm",
@@ -940,7 +931,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "OTCB",
-        "Neg. deals: Anonymous - negotiated",
+        "Анонимный РПС - адрес.",
         126,
         4,
         "ndm",
@@ -959,7 +950,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "PTOB",
-        "Neg. deals CCP: bonds - negotiated",
+        "РПС с ЦК: Облигации - адрес.",
         282,
         4,
         "ndm",
@@ -978,7 +969,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "OCBR",
-        "OTC: Bonds with CCP",
+        "OTC: Облигации с ЦК - двусторонние",
         1017,
         1014,
         "ndm",
@@ -997,7 +988,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "OCBU",
-        "OTC: Bonds with CCP (USD)",
+        "OTC: Облигации с ЦК (USD) - двусторонние",
         1019,
         1014,
         "ndm",
@@ -1016,7 +1007,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "OCBY",
-        "OTC: Bonds with CCP (CNY)",
+        "OTC: Облигации с ЦК (CNY) - двусторонние",
         1204,
         1014,
         "ndm",
@@ -1035,7 +1026,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "OCAR",
-        "OTC: Bonds with CCP ndm",
+        "OTC: Облигации с ЦК адрес. - двусторонние",
         1263,
         1014,
         "ndm",
@@ -1054,7 +1045,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "OCAY",
-        "OTC: Bonds with CCP ndm (CNY)",
+        "OTC: Облигации с ЦК адрес. (CNY) - двусторонние",
         1265,
         1014,
         "ndm",
@@ -1073,7 +1064,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "OCAU",
-        "OTC: Bonds with CCP ndm (USD)",
+        "OTC: Облигации с ЦК адрес. (USD) - двусторонние",
         1267,
         1014,
         "ndm",
@@ -1092,7 +1083,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "RPMO",
-        "REPO-M - negotiated",
+        "РЕПО-М - адрес.",
         201,
         3,
         "repo",
@@ -1111,7 +1102,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "RPEK",
-        "REPO-M (KZT) - negotiated",
+        "РЕПО-М в ин. валюте: (KZT) - адрес.",
         1426,
         3,
         "repo",
@@ -1130,7 +1121,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "RPEB",
-        "REPO-M (BYN) - negotiated",
+        "РЕПО-М в ин. валюте: (BYN) - адрес.",
         1428,
         3,
         "repo",
@@ -1149,7 +1140,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "CIQR",
-        "REPO CCP settle's Deals : Non-residents - order-driven",
+        "Урегулирование РЕПО с ЦК Нерезиденты - безадрес.",
         1080,
         1019,
         "nonresccp",
@@ -1168,7 +1159,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "CIQB",
-        "Neg. CCP settle's Deals: Non-residents - order-driven",
+        "Урегулирование с ЦК Нерезиденты - безадрес.",
         1082,
         36,
         "mamc",
@@ -1187,7 +1178,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "CTOB",
-        "Neg. deals CCP Non-residents: Bonds - negotiated",
+        "РПС с ЦК Нерезиденты: Облигации - адрес.",
         1062,
         1015,
         "nonresndm",
@@ -1206,7 +1197,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "CPMO",
-        "REPO-M: Non-residents - negotiated",
+        "РЕПО-M Нерезиденты - адрес.",
         1071,
         1017,
         "nonresrepo",
@@ -1225,7 +1216,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "CPEU",
-        "REPO-M: Non-residents (USD) - negotiated",
+        "РЕПО-M Нерезиденты (USD) - адрес.",
         1073,
         1017,
         "nonresrepo",
@@ -1244,7 +1235,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "CPEO",
-        "REPO-M: Non-residents (EUR) - negotiated",
+        "РЕПО-M Нерезиденты (EUR) - адрес.",
         1075,
         1017,
         "nonresrepo",
@@ -1263,7 +1254,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "CPEY",
-        "REPO-M: Non-residents (CNY) - negotiated",
+        "РЕПО-M Нерезиденты (CNY) - адрес.",
         1077,
         1017,
         "nonresrepo",
@@ -1282,7 +1273,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "OBBO",
-        "OffBoard bonds",
+        "ОТС-система: облигации",
         141,
         39,
         "bonds",
@@ -1301,7 +1292,7 @@ RESPONSE CONTENT:
       [
         "RU000A0ZZ885",
         "QBND",
-        "Quotes",
+        "Квоты",
         1280,
         1279,
         "bonds",

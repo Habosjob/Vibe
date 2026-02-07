@@ -1,12 +1,11 @@
-URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQOB/securities/RU000A0ZZ885.json?lang=en
-Timestamp: 2026-02-07T16:16:10.858756
-Status Code: 200
-Content-Type: application/json; charset=utf-8
-Content-Length: 8383 bytes
+URL: https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQOB/securities/RU000A0ZZ885.json?lang=ru
+Время: 2026-02-07T16:32:57.751609
+Статус: 200
+Размер: 8383 байт
 
-==================================================
-RESPONSE CONTENT:
-==================================================
+============================================================
+СЫРОЙ ОТВЕТ:
+============================================================
 {
   "securities": {
     "metadata": {
@@ -22,7 +21,7 @@ RESPONSE CONTENT:
       },
       "SHORTNAME": {
         "type": "string",
-        "bytes": 90,
+        "bytes": 30,
         "max_size": 0
       },
       "PREVWAPRICE": {

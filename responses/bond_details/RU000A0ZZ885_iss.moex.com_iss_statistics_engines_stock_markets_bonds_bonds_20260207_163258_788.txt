@@ -1,12 +1,11 @@
-URL: https://iss.moex.com/iss/statistics/engines/stock/bondization/RU000A0ZZ885.json?lang=en
-Timestamp: 2026-02-07T16:16:11.892886
-Status Code: 404
-Content-Type: text/html
-Content-Length: 14673 bytes
+URL: https://iss.moex.com/iss/statistics/engines/stock/markets/bonds/bonds.json?iss.only=bonds&bonds.isin=RU000A0ZZ885&lang=ru
+Время: 2026-02-07T16:32:58.788689
+Статус: 404
+Размер: 14673 байт
 
-==================================================
-RESPONSE CONTENT:
-==================================================
+============================================================
+СЫРОЙ ОТВЕТ:
+============================================================
 ï»¿<!DOCTYPE html>
 
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
