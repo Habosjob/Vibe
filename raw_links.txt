@@ -1,7 +1,10 @@
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bond_Parser.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bond_Parser_Column_Description.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Stock_Parser.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_download.log
-https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_download_20260206_223124.log
+https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_shares_download.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bond_rates.xlsx
+https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_shares_rates.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
