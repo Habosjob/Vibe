@@ -26,10 +26,8 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/script.log
   Директория: responses/bond_details/
   ----------------------------------------------------------
 
-https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_engines_stock_markets_bonds_boards_TQOB_securities_RU000A0ZZ885_20260207_161610_846.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_engines_stock_markets_bonds_boards_TQOB_securities_RU000A0ZZ885_20260207_161610_846.txt
-https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities_20260207_161608_762.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities_20260207_161608_762.txt
-https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities_RU000A0ZZ885_20260207_161609_796.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities_RU000A0ZZ885_20260207_161609_796.txt
-https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_statistics_engines_stock_bondization_RU000A0ZZ885_20260207_161611_892.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_engines_stock_markets_bonds_boards_TQOB_securities_RU000A0ZZ885_20260207_163257_737.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_engines_stock_markets_bonds_boards_TQOB_securities_RU000A0ZZ885_20260207_163257_737.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities_RU000A0ZZ885_20260207_163256_681.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_securities_RU000A0ZZ885_20260207_163256_681.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/responses/bond_details/RU000A0ZZ885_iss.moex.com_iss_statistics_engines_stock_markets_bonds_bonds_20260207_163258_788.txt

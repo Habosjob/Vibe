@@ -1,5 +1,5 @@
 URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
-Время: 2026-02-07T16:32:56.690545
+Время: 2026-02-10T13:14:16.887001
 Статус: 200
 Размер: 13620 байт
 
@@ -232,7 +232,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
       [
         "DAYSTOREDEMPTION",
         "Дней до погашения",
-        "2649",
+        "2646",
         "number",
         25,
         0,
@@ -492,9 +492,9 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         1,
         2,
         "2020-05-25",
-        "2026-02-06",
+        "2026-02-09",
         "2020-05-25",
-        "2026-02-07",
+        "2026-02-10",
         1,
         "RUB",
         "%"
@@ -532,7 +532,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         null,
         "%"
@@ -551,7 +551,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-09-26",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "CNY",
         "%"
@@ -570,7 +570,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2019-04-22",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "USD",
         "%"
@@ -608,7 +608,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2019-04-22",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "EUR",
         "%"
@@ -627,7 +627,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         "2019-12-11",
         "2023-09-19",
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -646,7 +646,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "USD",
         "%"
@@ -665,7 +665,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "EUR",
         "%"
@@ -684,7 +684,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2019-03-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "CNY",
         "%"
@@ -703,7 +703,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -722,7 +722,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "USD",
         "%"
@@ -741,7 +741,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "EUR",
         "%"
@@ -760,7 +760,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-09-26",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "CNY",
         "%"
@@ -779,7 +779,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2019-03-04",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -798,7 +798,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         "2019-10-02",
         "2020-04-17",
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -817,7 +817,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "USD",
         "%"
@@ -836,7 +836,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "EUR",
         "%"
@@ -855,7 +855,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2019-03-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "CNY",
         "%"
@@ -874,7 +874,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2025-06-23",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "KZT",
         "%"
@@ -893,7 +893,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2025-06-23",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "BYN",
         "%"
@@ -912,7 +912,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         "2018-05-29",
         "2025-12-30",
         "2018-05-29",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -969,7 +969,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         "2019-03-11",
         "2024-03-15",
         "2018-12-07",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -988,7 +988,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-04-25",
-        "2026-02-06",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -1007,7 +1007,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-04-25",
-        "2026-02-06",
+        "2026-02-10",
         0,
         "USD",
         "%"
@@ -1026,7 +1026,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-12-05",
-        "2026-02-06",
+        "2026-02-10",
         0,
         "CNY",
         "%"
@@ -1045,7 +1045,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2023-04-10",
-        "2026-02-06",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -1064,7 +1064,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2023-04-10",
-        "2026-02-06",
+        "2026-02-10",
         0,
         "CNY",
         "%"
@@ -1083,7 +1083,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2023-04-10",
-        "2026-02-06",
+        "2026-02-10",
         0,
         "USD",
         "%"
@@ -1102,7 +1102,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         "2018-05-29",
         "2020-02-06",
         "2018-05-29",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -1121,7 +1121,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2025-06-23",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "KZT",
         "%"
@@ -1140,7 +1140,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2025-06-23",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "BYN",
         "%"
@@ -1159,7 +1159,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-06-27",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -1178,7 +1178,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-06-27",
-        "2026-02-07",
+        "2026-02-10",
         0,
         null,
         "%"
@@ -1197,7 +1197,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-06-27",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -1216,7 +1216,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-06-27",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "RUB",
         "%"
@@ -1235,7 +1235,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-06-27",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "USD",
         "%"
@@ -1254,7 +1254,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-06-27",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "EUR",
         "%"
@@ -1273,7 +1273,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2022-09-26",
-        "2026-02-07",
+        "2026-02-10",
         0,
         "CNY",
         "%"
@@ -1311,7 +1311,7 @@ URL: https://iss.moex.com/iss/securities/RU000A0ZZ885.json?lang=ru
         null,
         null,
         "2023-06-05",
-        "2026-02-06",
+        "2026-02-10",
         0,
         null,
         "%"
