@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import time
@@ -8,8 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
-
-import json
 
 
 @dataclass
@@ -66,10 +65,7 @@ def setup_logging(
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
         handlers=handlers,
     )
-
-    # подавим шум urllib3
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-
     return log_path
 
 
@@ -99,3 +95,8 @@ def dump_json(
     if logger:
         logger.debug("RAW saved: %s", p.resolve())
     return p
+
+
+def json_dumps_compact(obj: Any) -> str:
+    """Компактный JSON для логов/SQLite."""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
