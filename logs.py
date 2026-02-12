@@ -46,7 +46,10 @@ def setup_logging(
     clear_previous: bool = True,
     also_console: bool = True,
 ) -> Path:
-    """Настраивает логирование. По умолчанию очищает предыдущий лог при старте."""
+    """
+    Настраивает логирование.
+    Важно: выставляем terminator="\\n", чтобы GitHub/Windows не склеивали лог в 1 строку.
+    """
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_file
@@ -55,16 +58,25 @@ def setup_logging(
         log_path.unlink()
 
     numeric_level = getattr(logging, level.upper(), logging.INFO)
+    fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
 
-    handlers = [logging.FileHandler(log_path, mode="w", encoding="utf-8")]
+    root = logging.getLogger()
+    root.setLevel(numeric_level)
+
+    # очистим старые хендлеры (актуально при перезапуске в одной сессии)
+    root.handlers.clear()
+
+    file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    file_handler.setFormatter(fmt)
+    file_handler.terminator = "\n"
+    root.addHandler(file_handler)
+
     if also_console:
-        handlers.append(logging.StreamHandler(sys.stdout))
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(fmt)
+        console.terminator = "\n"
+        root.addHandler(console)
 
-    logging.basicConfig(
-        level=numeric_level,
-        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-        handlers=handlers,
-    )
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     return log_path
 

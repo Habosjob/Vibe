@@ -5,12 +5,13 @@
 Moex_API.py
 - Получаем список облигаций с MOEX ISS.
 - Кэшируем в SQLite раз в день (UTC).
-- Пишем requests_log в SQLite по каждому HTTP запросу.
-- Детализация: берём 10 рандомных бондов из SQLite и тянем /iss/securities/{SECID}.json
-  Сохраняем RAW + description + табличные блоки (coupons/amortizations/offers/...) в SQLite.
-- Экспортируем:
-  - Moex_Bonds.xlsx (базовый список)
-  - Moex_Bonds_Detail.xlsx (детализация, перезапись)
+- requests_log: лог всех HTTP запросов в SQLite.
+- Детализация (sample N):
+  1) /iss/securities/{SECID}.json
+  2) /iss/securities/{SECID}/bondization.json  (coupons/amortizations/offers)
+  Всё сохраняем в SQLite (RAW + нормализация) и временно в Excel:
+    - Moex_Bonds.xlsx
+    - Moex_Bonds_Detail.xlsx (перезапись)
 
 Запуск:
   python Moex_API.py
@@ -68,7 +69,7 @@ def moex_get_json_logged(
     raw_tag: str,
 ) -> Tuple[Dict[str, Any], int, float, int]:
     """
-    Делает GET JSON с ретраями + пишет запись в requests_log.
+    GET JSON с ретраями + запись в requests_log.
     Возвращает: payload, status_code, elapsed_ms, response_size_bytes
     """
     params_json = json_dumps_compact(params) if params else None
@@ -77,34 +78,35 @@ def moex_get_json_logged(
     for attempt in range(1, retries + 1):
         status_code: Optional[int] = None
         t0 = time.perf_counter()
+        final_url_for_log = url
+
         try:
             r = session.get(url, params=params, timeout=timeout)
             status_code = r.status_code
+            final_url_for_log = r.url
             r.raise_for_status()
 
             data = r.json()
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-            # оценка размера
             try:
                 size = int(r.headers.get("Content-Length") or 0)
             except Exception:
                 size = 0
             if size <= 0:
-                # fallback: сериализуем (дороже, но для 10 запросов ок)
                 size = len(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
             cache.log_request(
                 created_utc=utc_now_iso(),
-                url=str(r.url),
+                url=str(final_url_for_log),
                 params_json=params_json,
-                status_code=status_code,
-                elapsed_ms=elapsed_ms,
-                response_size=size,
+                status_code=int(status_code),
+                elapsed_ms=float(elapsed_ms),
+                response_size=int(size),
                 error=None,
             )
 
-            logger.debug("GET ok | %s | status=%s | %.1f ms | %d bytes", r.url, status_code, elapsed_ms, size)
+            logger.debug("GET ok | %s | status=%s | %.1f ms | %d bytes", final_url_for_log, status_code, elapsed_ms, size)
 
             if save_raw:
                 dump_json(data, raw_dir, tag=f"{raw_tag}_attempt{attempt}", logger=logger)
@@ -114,16 +116,15 @@ def moex_get_json_logged(
         except Exception as e:
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             last_exc = e
-            err_text = repr(e)
 
             cache.log_request(
                 created_utc=utc_now_iso(),
-                url=url,
+                url=str(final_url_for_log),
                 params_json=params_json,
                 status_code=status_code,
-                elapsed_ms=elapsed_ms,
+                elapsed_ms=float(elapsed_ms),
                 response_size=None,
-                error=err_text,
+                error=repr(e),
             )
 
             logger.warning("HTTP error attempt %d/%d | %s | %r", attempt, retries, url, e)
@@ -145,8 +146,8 @@ def fetch_bonds_from_moex(
     raw_dir: Path,
 ) -> pd.DataFrame:
     """
-    На практике этот эндпойнт часто отдаёт весь список облигаций одним куском (~3000 строк).
-    Поэтому делаем 1 запрос и сохраняем то, что дали.
+    На практике /engines/stock/markets/bonds/securities.json часто отдаёт весь список одним куском.
+    Поэтому делаем 1 запрос.
     """
     url = f"{MOEX_BASE_URL}/engines/stock/markets/bonds/securities.json"
     wanted_columns = [
@@ -209,11 +210,10 @@ def save_to_excel(df: pd.DataFrame, out_path: Path, logger: logging.Logger, meta
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         meta_df.to_excel(writer, index=False, sheet_name="meta")
         df.to_excel(writer, index=False, sheet_name="bonds")
-
     logger.info("Excel saved: %s | rows=%d", out_path, len(df))
 
 
-def fetch_bond_detail(
+def fetch_security_detail(
     session: requests.Session,
     cache: SQLiteCache,
     logger: logging.Logger,
@@ -240,56 +240,205 @@ def fetch_bond_detail(
         backoff=backoff,
         save_raw=save_raw,
         raw_dir=raw_dir,
-        raw_tag=f"detail_{secid}",
+        raw_tag=f"security_{secid}",
     )
 
-    # RAW в БД
     cache.save_bond_raw(
         asof_date_utc=asof_date_utc,
         secid=secid,
+        kind="security",
         fetched_utc=utc_now_iso(),
         url=url,
         params_json=json_dumps_compact(params),
         payload_json=json.dumps(payload, ensure_ascii=False),
     )
-
     return payload
 
 
-def persist_detail_tables(
+def fetch_bondization_detail(
+    session: requests.Session,
+    cache: SQLiteCache,
+    logger: logging.Logger,
+    asof_date_utc: str,
+    secid: str,
+    timeout: int,
+    retries: int,
+    backoff: float,
+    save_raw: bool,
+    raw_dir: Path,
+) -> Dict[str, Any]:
+    url = f"{MOEX_BASE_URL}/securities/{secid}/bondization.json"
+    params = {
+        "iss.meta": "off",
+        "iss.only": "coupons,amortizations,offers",
+    }
+
+    payload, _, _, _ = moex_get_json_logged(
+        session=session,
+        cache=cache,
+        logger=logger,
+        url=url,
+        params=params,
+        timeout=timeout,
+        retries=retries,
+        backoff=backoff,
+        save_raw=save_raw,
+        raw_dir=raw_dir,
+        raw_tag=f"bondization_{secid}",
+    )
+
+    cache.save_bond_raw(
+        asof_date_utc=asof_date_utc,
+        secid=secid,
+        kind="bondization",
+        fetched_utc=utc_now_iso(),
+        url=url,
+        params_json=json_dumps_compact(params),
+        payload_json=json.dumps(payload, ensure_ascii=False),
+    )
+    return payload
+
+
+def persist_security_payload(
     cache: SQLiteCache,
     asof_date_utc: str,
     secid: str,
     payload: Dict[str, Any],
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Сохраняем:
-      - description -> bond_description
-      - табличные блоки (если есть): coupons/amortizations/offers/...) -> bond_events
-    Возвращаем DF для Excel:
-      desc_df, events_df (flatten)
+    Из /securities/{secid}.json:
+    - description -> bond_description
+    - часть табличных блоков -> bond_events (универсально)
+    Возвращаем DF для Excel: desc_df, events_df
     """
     desc_df = table_to_df(payload, "description")
     if not desc_df.empty:
         cache.replace_bond_description(asof_date_utc, secid, desc_df)
 
-    # универсально складываем любые известные блоки как JSON-строки
-    blocks = ["coupons", "amortizations", "offers", "boards", "marketdata", "securities"]
+    blocks = ["boards", "marketdata", "securities"]
     events_rows = []
     for block in blocks:
         dfb = table_to_df(payload, block)
         if dfb.empty:
             continue
-        # каждую строку - в JSON
+
         rows_json = []
         for _, row in dfb.iterrows():
-            rj = json.dumps(row.to_dict(), ensure_ascii=False, separators=(",", ":"))
-            rows_json.append(rj)
-            events_rows.append({"secid": secid, "block": block, **row.to_dict()})
+            d = row.to_dict()
+            rows_json.append(json.dumps(d, ensure_ascii=False, separators=(",", ":")))
+            events_rows.append({"SECID": secid, "block": block, **d})
+
         cache.replace_bond_events(asof_date_utc, secid, block, rows_json)
 
     events_df = pd.DataFrame(events_rows) if events_rows else pd.DataFrame()
     return desc_df, events_df
+
+
+def _to_iso_date(x: Any) -> Optional[str]:
+    if x is None:
+        return None
+    s = str(x).strip()
+    if not s or s.lower() in ("nan", "none"):
+        return None
+    # как правило MOEX отдаёт YYYY-MM-DD; не будем усложнять — просто вернём строку
+    return s
+
+
+def _to_float(x: Any) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        if isinstance(x, str) and x.strip() == "":
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+
+def persist_bondization_payload(
+    cache: SQLiteCache,
+    asof_date_utc: str,
+    secid: str,
+    payload: Dict[str, Any],
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Из /bondization.json:
+    - coupons/offers/amortizations -> отдельные таблицы + дублируем в bond_events
+    Возвращаем DF для Excel: coupons_df, offers_df, amort_df, events_extra_df
+    """
+    coupons_df = table_to_df(payload, "coupons")
+    offers_df = table_to_df(payload, "offers")
+    amort_df = table_to_df(payload, "amortizations")
+
+    events_extra_rows = []
+
+    # coupons
+    if not coupons_df.empty:
+        rows = []
+        rows_json = []
+        for _, row in coupons_df.iterrows():
+            d = row.to_dict()
+            rj = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+            rows_json.append(rj)
+
+            rows.append({
+                "coupondate": _to_iso_date(d.get("COUPONDATE") or d.get("coupondate")),
+                "startdate": _to_iso_date(d.get("STARTDATE") or d.get("startdate")),
+                "enddate": _to_iso_date(d.get("ENDDATE") or d.get("enddate")),
+                "value": _to_float(d.get("VALUE") or d.get("value") or d.get("COUPONVALUE") or d.get("couponvalue")),
+                "percent": _to_float(d.get("PERCENT") or d.get("percent") or d.get("COUPONPERCENT") or d.get("couponpercent")),
+                "currency": (d.get("CURRENCY") or d.get("currency") or d.get("FACEUNIT") or d.get("faceunit")),
+            })
+
+            events_extra_rows.append({"SECID": secid, "block": "coupons", **d})
+
+        cache.replace_bond_coupons(asof_date_utc, secid, rows, rows_json)
+        cache.replace_bond_events(asof_date_utc, secid, "coupons", rows_json)
+
+    # offers
+    if not offers_df.empty:
+        rows = []
+        rows_json = []
+        for _, row in offers_df.iterrows():
+            d = row.to_dict()
+            rj = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+            rows_json.append(rj)
+
+            rows.append({
+                "offerdate": _to_iso_date(d.get("OFFERDATE") or d.get("offerdate") or d.get("DATE") or d.get("date")),
+                "offertype": (d.get("OFFERTYPE") or d.get("offertype") or d.get("TYPE") or d.get("type")),
+                "price": _to_float(d.get("PRICE") or d.get("price")),
+                "currency": (d.get("CURRENCY") or d.get("currency")),
+            })
+
+            events_extra_rows.append({"SECID": secid, "block": "offers", **d})
+
+        cache.replace_bond_offers(asof_date_utc, secid, rows, rows_json)
+        cache.replace_bond_events(asof_date_utc, secid, "offers", rows_json)
+
+    # amortizations
+    if not amort_df.empty:
+        rows = []
+        rows_json = []
+        for _, row in amort_df.iterrows():
+            d = row.to_dict()
+            rj = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+            rows_json.append(rj)
+
+            rows.append({
+                "amortdate": _to_iso_date(d.get("AMORTDATE") or d.get("amortdate") or d.get("DATE") or d.get("date")),
+                "value": _to_float(d.get("VALUE") or d.get("value")),
+                "percent": _to_float(d.get("PERCENT") or d.get("percent")),
+                "currency": (d.get("CURRENCY") or d.get("currency") or d.get("FACEUNIT") or d.get("faceunit")),
+            })
+
+            events_extra_rows.append({"SECID": secid, "block": "amortizations", **d})
+
+        cache.replace_bond_amortizations(asof_date_utc, secid, rows, rows_json)
+        cache.replace_bond_events(asof_date_utc, secid, "amortizations", rows_json)
+
+    events_extra_df = pd.DataFrame(events_extra_rows) if events_extra_rows else pd.DataFrame()
+    return coupons_df, offers_df, amort_df, events_extra_df
 
 
 def make_detail_excel(
@@ -298,6 +447,9 @@ def make_detail_excel(
     meta: Dict[str, Any],
     all_desc: pd.DataFrame,
     all_events: pd.DataFrame,
+    all_coupons: pd.DataFrame,
+    all_offers: pd.DataFrame,
+    all_amort: pd.DataFrame,
 ) -> None:
     out_path = out_path.resolve()
     if out_path.exists():
@@ -308,13 +460,18 @@ def make_detail_excel(
         meta_df.to_excel(writer, index=False, sheet_name="meta")
         (all_desc if not all_desc.empty else pd.DataFrame()).to_excel(writer, index=False, sheet_name="description")
         (all_events if not all_events.empty else pd.DataFrame()).to_excel(writer, index=False, sheet_name="events")
+        (all_coupons if not all_coupons.empty else pd.DataFrame()).to_excel(writer, index=False, sheet_name="coupons")
+        (all_offers if not all_offers.empty else pd.DataFrame()).to_excel(writer, index=False, sheet_name="offers")
+        (all_amort if not all_amort.empty else pd.DataFrame()).to_excel(writer, index=False, sheet_name="amortizations")
 
-    logger.info("Detail Excel saved: %s | desc_rows=%d | event_rows=%d",
-                out_path, len(all_desc), len(all_events))
+    logger.info(
+        "Detail Excel saved: %s | desc=%d | events=%d | coupons=%d | offers=%d | amort=%d",
+        out_path, len(all_desc), len(all_events), len(all_coupons), len(all_offers), len(all_amort)
+    )
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="MOEX bonds -> SQLite cache -> Excel (+ details sample)")
+    p = argparse.ArgumentParser(description="MOEX bonds -> SQLite cache -> Excel (+ details + bondization)")
     p.add_argument("--out", default=DEFAULT_OUT_XLSX, help="Base Excel output path")
     p.add_argument("--out-detail", default=DEFAULT_OUT_DETAIL_XLSX, help="Detail Excel output path")
     p.add_argument("--db", default="moex_cache.sqlite", help="SQLite DB path")
@@ -339,7 +496,8 @@ def main() -> int:
     log_path = setup_logging(args.log_dir, args.log_file, args.log_level, clear_previous=True, also_console=True)
     logger = logging.getLogger("Moex_API")
 
-    logger.info("START | utc=%s | log=%s", utc_now_iso(), log_path.resolve())
+    run_started_utc = utc_now_iso()
+    logger.info("START | utc=%s | log=%s", run_started_utc, log_path.resolve())
 
     cache = SQLiteCache(args.db, logger=logging.getLogger("SQLiteCache"))
     asof_date = utc_today_str()
@@ -399,65 +557,116 @@ def main() -> int:
             save_to_excel(df_bonds, Path(args.out), logger, meta=base_meta)
 
             # --- detail sample ---
-            if df_bonds.empty or "secid" not in [c.lower() for c in df_bonds.columns]:
-                logger.warning("Нет данных bonds или нет колонки SECID — detail пропущен.")
+            if df_bonds.empty:
+                logger.warning("bonds DF пустой — detail пропущен.")
             else:
-                # secid список
-                secid_col = None
-                for c in df_bonds.columns:
-                    if c.lower() == "secid":
-                        secid_col = c
-                        break
-                assert secid_col is not None
-
-                secids = [str(x) for x in df_bonds[secid_col].dropna().unique().tolist()]
-                if not secids:
-                    logger.warning("Список SECID пуст — detail пропущен.")
+                secid_col = next((c for c in df_bonds.columns if c.lower() == "secid"), None)
+                if not secid_col:
+                    logger.warning("Нет колонки SECID — detail пропущен.")
                 else:
-                    k = min(int(args.detail_sample), len(secids))
-                    random.seed(int(args.detail_seed))
-                    sample_secids = random.sample(secids, k=k)
+                    secids = [str(x) for x in df_bonds[secid_col].dropna().unique().tolist()]
+                    if not secids:
+                        logger.warning("Список SECID пуст — detail пропущен.")
+                    else:
+                        k = min(int(args.detail_sample), len(secids))
+                        random.seed(int(args.detail_seed))
+                        sample_secids = random.sample(secids, k=k)
 
-                    logger.info("DETAIL sample | k=%d | seed=%s", k, args.detail_seed)
-                    all_desc_frames = []
-                    all_events_frames = []
+                        logger.info("DETAIL sample | k=%d | seed=%s", k, args.detail_seed)
 
-                    with RunTimer("detail_fetch", logger=logger):
-                        for i, secid in enumerate(sample_secids, start=1):
-                            logger.info("DETAIL %d/%d | %s", i, k, secid)
-                            payload = fetch_bond_detail(
-                                session=session,
-                                cache=cache,
-                                logger=logger,
-                                asof_date_utc=asof_date,
-                                secid=secid,
-                                timeout=args.timeout,
-                                retries=args.retries,
-                                backoff=args.backoff,
-                                save_raw=bool(args.save_raw),
-                                raw_dir=Path(args.raw_dir),
-                                lang=args.lang,
-                            )
-                            desc_df, events_df = persist_detail_tables(cache, asof_date, secid, payload)
-                            if not desc_df.empty:
-                                desc_df = desc_df.copy()
-                                desc_df.insert(0, "SECID", secid)
-                                all_desc_frames.append(desc_df)
-                            if not events_df.empty:
-                                all_events_frames.append(events_df)
+                        desc_frames = []
+                        events_frames = []
+                        coupons_frames = []
+                        offers_frames = []
+                        amort_frames = []
 
-                    all_desc = pd.concat(all_desc_frames, ignore_index=True) if all_desc_frames else pd.DataFrame()
-                    all_events = pd.concat(all_events_frames, ignore_index=True) if all_events_frames else pd.DataFrame()
+                        with RunTimer("detail_fetch", logger=logger):
+                            for i, secid in enumerate(sample_secids, start=1):
+                                logger.info("DETAIL %d/%d | %s", i, k, secid)
 
-                    detail_meta = {
-                        "generated_utc": utc_now_iso(),
-                        "asof_date_utc": asof_date,
-                        "detail_sample": int(k),
-                        "detail_seed": int(args.detail_seed),
-                        "lang": args.lang,
-                        "db": str(Path(args.db).resolve()),
-                    }
-                    make_detail_excel(Path(args.out_detail), logger, detail_meta, all_desc, all_events)
+                                # 1) security detail
+                                sec_payload = fetch_security_detail(
+                                    session=session,
+                                    cache=cache,
+                                    logger=logger,
+                                    asof_date_utc=asof_date,
+                                    secid=secid,
+                                    timeout=args.timeout,
+                                    retries=args.retries,
+                                    backoff=args.backoff,
+                                    save_raw=bool(args.save_raw),
+                                    raw_dir=Path(args.raw_dir),
+                                    lang=args.lang,
+                                )
+                                desc_df, events_df = persist_security_payload(cache, asof_date, secid, sec_payload)
+                                if not desc_df.empty:
+                                    d = desc_df.copy()
+                                    d.insert(0, "SECID", secid)
+                                    desc_frames.append(d)
+                                if not events_df.empty:
+                                    events_frames.append(events_df)
+
+                                # 2) bondization detail
+                                bond_payload = fetch_bondization_detail(
+                                    session=session,
+                                    cache=cache,
+                                    logger=logger,
+                                    asof_date_utc=asof_date,
+                                    secid=secid,
+                                    timeout=args.timeout,
+                                    retries=args.retries,
+                                    backoff=args.backoff,
+                                    save_raw=bool(args.save_raw),
+                                    raw_dir=Path(args.raw_dir),
+                                )
+                                cpn_df, off_df, am_df, extra_events_df = persist_bondization_payload(cache, asof_date, secid, bond_payload)
+
+                                if not cpn_df.empty:
+                                    d = cpn_df.copy()
+                                    d.insert(0, "SECID", secid)
+                                    coupons_frames.append(d)
+                                if not off_df.empty:
+                                    d = off_df.copy()
+                                    d.insert(0, "SECID", secid)
+                                    offers_frames.append(d)
+                                if not am_df.empty:
+                                    d = am_df.copy()
+                                    d.insert(0, "SECID", secid)
+                                    amort_frames.append(d)
+                                if not extra_events_df.empty:
+                                    events_frames.append(extra_events_df)
+
+                        all_desc = pd.concat(desc_frames, ignore_index=True) if desc_frames else pd.DataFrame()
+                        all_events = pd.concat(events_frames, ignore_index=True) if events_frames else pd.DataFrame()
+                        all_coupons = pd.concat(coupons_frames, ignore_index=True) if coupons_frames else pd.DataFrame()
+                        all_offers = pd.concat(offers_frames, ignore_index=True) if offers_frames else pd.DataFrame()
+                        all_amort = pd.concat(amort_frames, ignore_index=True) if amort_frames else pd.DataFrame()
+
+                        # summary по requests_log
+                        rq = cache.requests_summary_since(run_started_utc)
+                        logger.info("REQUESTS summary since start | total=%d | errors=%d", rq.total, rq.errors)
+
+                        detail_meta = {
+                            "generated_utc": utc_now_iso(),
+                            "asof_date_utc": asof_date,
+                            "detail_sample": int(k),
+                            "detail_seed": int(args.detail_seed),
+                            "lang": args.lang,
+                            "db": str(Path(args.db).resolve()),
+                            "requests_total_since_start": rq.total,
+                            "requests_errors_since_start": rq.errors,
+                        }
+
+                        make_detail_excel(
+                            Path(args.out_detail),
+                            logger,
+                            detail_meta,
+                            all_desc,
+                            all_events,
+                            all_coupons,
+                            all_offers,
+                            all_amort,
+                        )
 
         logger.info("FINISH | elapsed=%.3fs", tt.elapsed)
         print(f"\nГотово. Время исполнения: {tt.elapsed:.3f} сек\n")
