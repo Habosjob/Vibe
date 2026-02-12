@@ -5,8 +5,19 @@
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_API.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bonds.xlsx
+https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bonds_Detail.xlsx
+https://raw.githubusercontent.com/Habosjob/Vibe/main/SQL.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/logs.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_cache.sqlite
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
+
+------------------------------------------------------------
+Директория: __pycache__/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/SQL.cpython-311.pyc
+https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/logs.cpython-311.pyc
 
 ------------------------------------------------------------
 Директория: logs/
