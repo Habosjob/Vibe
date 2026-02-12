@@ -3,89 +3,45 @@
 
 """
 Moex_API.py
-1) Парсит все облигации с MOEX ISS (рынок bonds, engine stock).
-2) Сохраняет в Excel (Moex_Bonds.xlsx) с перезаписью.
-3) Логирует работу в папку logs (очищает лог при старте).
-4) Показывает время исполнения.
-5) Дополнительно: ретраи, анти-зацикливание пагинации, метрики, опциональное сохранение RAW-ответов.
+- Берём список облигаций с MOEX ISS.
+- Кэшируем в SQLite "раз в день" (UTC).
+- Пока сохраняем результат в Excel (Moex_Bonds.xlsx).
+- Логирование вынесено в logs.py
+- SQLite слой вынесен в SQL.py
 
 Запуск:
   python Moex_API.py
-  python Moex_API.py --out Moex_Bonds.xlsx --log-level DEBUG --save-raw
-
-Зависимости:
-  pip install requests pandas openpyxl
+  python Moex_API.py --force-refresh
+  python Moex_API.py --log-level DEBUG --save-raw
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import requests
 
+from logs import RunTimer, dump_json, setup_logging, utc_now_iso, utc_today_str
+from SQL import SQLiteCache
+
 
 MOEX_BASE_URL = "https://iss.moex.com/iss"
 DEFAULT_OUT_XLSX = "Moex_Bonds.xlsx"
-DEFAULT_LOG_DIR = "logs"
-DEFAULT_LOG_FILE = "Moex_API.log"
 
 
 @dataclass
 class FetchStats:
-    pages: int = 0
-    rows: int = 0
     http_calls: int = 0
-    started_utc: str = ""
-    finished_utc: str = ""
+    rows: int = 0
 
 
-def setup_logging(log_dir: Path, log_file: str, level: str) -> Path:
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / log_file
-
-    # очистка предыдущего лога
-    if log_path.exists():
-        log_path.unlink()
-
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
-
-    logging.basicConfig(
-        level=numeric_level,
-        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-        handlers=[
-            logging.FileHandler(log_path, mode="w", encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
-
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    return log_path
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def safe_filename(s: str) -> str:
-    keep = []
-    for ch in s:
-        if ch.isalnum() or ch in ("-", "_", "."):
-            keep.append(ch)
-        else:
-            keep.append("_")
-    return "".join(keep)
-
-
-def moex_get(
+def moex_get_json(
     session: requests.Session,
     url: str,
     params: Dict[str, Any],
@@ -93,69 +49,54 @@ def moex_get(
     retries: int,
     backoff: float,
     logger: logging.Logger,
-    save_raw_dir: Optional[Path] = None,
-    raw_tag: str = "response",
+    save_raw: bool,
+    raw_dir: Path,
+    raw_tag: str,
 ) -> Dict[str, Any]:
     last_exc: Optional[Exception] = None
+
     for attempt in range(1, retries + 1):
         try:
             r = session.get(url, params=params, timeout=timeout)
-            logger.debug("GET %s | params=%s | status=%s", r.url, params, r.status_code)
+            logger.debug("GET %s | status=%s", r.url, r.status_code)
             r.raise_for_status()
-
             data = r.json()
 
-            if save_raw_dir is not None:
-                save_raw_dir.mkdir(parents=True, exist_ok=True)
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                fname = safe_filename(f"{ts}_{raw_tag}_attempt{attempt}.json")
-                (save_raw_dir / fname).write_text(
-                    json.dumps(data, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+            if save_raw:
+                dump_json(data, raw_dir, tag=f"{raw_tag}_attempt{attempt}", logger=logger)
 
             return data
+
         except Exception as e:
             last_exc = e
-            logger.warning("Ошибка запроса (attempt %d/%d): %s", attempt, retries, repr(e))
+            logger.warning("HTTP error attempt %d/%d: %r", attempt, retries, e)
             if attempt < retries:
-                sleep_s = backoff * (2 ** (attempt - 1))
-                time.sleep(sleep_s)
+                time.sleep(backoff * (2 ** (attempt - 1)))
 
-    raise RuntimeError(f"Не удалось получить данные после {retries} попыток. Последняя ошибка: {last_exc!r}")
+    raise RuntimeError(f"MOEX request failed after {retries} attempts. Last error: {last_exc!r}")
 
 
 def table_to_df(payload: Dict[str, Any], table_name: str) -> pd.DataFrame:
-    """
-    MOEX ISS JSON формат:
-      { "<table>": { "columns": [...], "data": [[...], ...] }, ... }
-    """
     if table_name not in payload:
-        raise KeyError(f"В ответе нет таблицы '{table_name}'. Доступно: {list(payload.keys())}")
-
+        raise KeyError(f"Missing table '{table_name}', got keys={list(payload.keys())}")
     tbl = payload[table_name]
-    cols = tbl.get("columns", [])
-    data = tbl.get("data", [])
-    return pd.DataFrame(data, columns=cols)
+    return pd.DataFrame(tbl.get("data", []), columns=tbl.get("columns", []))
 
 
-def fetch_all_bonds(
+def fetch_bonds_from_moex(
     session: requests.Session,
     logger: logging.Logger,
     stats: FetchStats,
-    page_size: int = 200,
-    timeout: int = 30,
-    retries: int = 4,
-    backoff: float = 0.7,
-    save_raw: bool = False,
-    raw_dir: Optional[Path] = None,
+    timeout: int,
+    retries: int,
+    backoff: float,
+    save_raw: bool,
+    raw_dir: Path,
 ) -> pd.DataFrame:
     """
-    Тянем все бумаги с MOEX:
-      /iss/engines/stock/markets/bonds/securities.json
-
-    ВАЖНО: используем табличные параметры пагинации:
-      securities.start=<offset>, securities.limit=<page_size>
+    Важно: MOEX часто отдаёт весь список облигаций одним куском (~3000 строк).
+    Пагинация на этом эндпойнте в реальности может игнорироваться.
+    Поэтому делаем 1 запрос и берём то, что дали.
     """
     url = f"{MOEX_BASE_URL}/engines/stock/markets/bonds/securities.json"
 
@@ -168,146 +109,92 @@ def fetch_all_bonds(
         "COUPONPERCENT", "COUPONVALUE", "COUPONPERIOD",
     ]
 
-    all_frames: List[pd.DataFrame] = []
-    start = 0
+    params = {
+        "iss.meta": "off",
+        "iss.only": "securities",
+        "securities.columns": ",".join(wanted_columns),
+    }
 
-    # анти-зацикливание: если снова приходит та же первая запись — пагинация не работает
-    prev_first_key = None
+    payload = moex_get_json(
+        session=session,
+        url=url,
+        params=params,
+        timeout=timeout,
+        retries=retries,
+        backoff=backoff,
+        logger=logger,
+        save_raw=save_raw,
+        raw_dir=raw_dir,
+        raw_tag="bonds_full",
+    )
+    stats.http_calls += 1
 
-    while True:
-        params = {
-            "iss.meta": "off",
-            "iss.only": "securities",
-            "securities.columns": ",".join(wanted_columns),
-            "securities.start": start,          # <-- ключевое исправление
-            "securities.limit": page_size,      # <-- ключевое исправление
-        }
-
-        payload = moex_get(
-            session=session,
-            url=url,
-            params=params,
-            timeout=timeout,
-            retries=retries,
-            backoff=backoff,
-            logger=logger,
-            save_raw_dir=(raw_dir if save_raw else None),
-            raw_tag=f"bonds_start{start}",
-        )
-        stats.http_calls += 1
-
-        df = table_to_df(payload, "securities")
-        if df.empty:
-            logger.info("Пагинация завершена: пустая страница при start=%s", start)
-            break
-
-        # анти-зацикливание (по SECID+BOARDID)
-        first_key = None
-        if "SECID" in df.columns and "BOARDID" in df.columns and len(df) > 0:
-            first_key = (str(df.iloc[0]["SECID"]), str(df.iloc[0]["BOARDID"]))
-        elif "SECID" in df.columns and len(df) > 0:
-            first_key = str(df.iloc[0]["SECID"])
-
-        if prev_first_key is not None and first_key == prev_first_key:
-            logger.error(
-                "Похоже, пагинация не работает: повтор первой записи %s при start=%s. Останавливаюсь.",
-                first_key, start
-            )
-            break
-        prev_first_key = first_key
-
-        all_frames.append(df)
-        rows = len(df)
-        stats.pages += 1
-        stats.rows += rows
-
-        logger.info("Страница %d | start=%d | строк=%d | всего=%d",
-                    stats.pages, start, rows, stats.rows)
-
-        # нормальное условие конца: последняя страница меньше limit
-        if rows < page_size:
-            logger.info("Последняя страница: строк=%d < limit=%d", rows, page_size)
-            break
-
-        start += page_size
-
-    if not all_frames:
-        return pd.DataFrame()
-
-    out = pd.concat(all_frames, ignore_index=True)
+    df = table_to_df(payload, "securities")
+    stats.rows = int(len(df))
 
     # нормализация дат
-    for c in ["ISSUEDATE", "MATDATE"]:
-        if c in out.columns:
-            out[c] = pd.to_datetime(out[c], errors="coerce")
+    for c in ("ISSUEDATE", "MATDATE"):
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
 
-    # уберём дубли (на всякий)
-    if "SECID" in out.columns and "BOARDID" in out.columns:
-        out = out.drop_duplicates(subset=["SECID", "BOARDID"])
-    elif "SECID" in out.columns:
-        out = out.drop_duplicates(subset=["SECID"])
+    # флажок по статусу
+    if "STATUS" in df.columns:
+        df["IS_ACTIVE_STATUS"] = df["STATUS"].astype(str).str.upper().eq("A")
 
-    # флажок "активный статус" (без жесткой фильтрации)
-    if "STATUS" in out.columns:
-        out["IS_ACTIVE_STATUS"] = out["STATUS"].astype(str).str.upper().eq("A")
+    # дубли
+    if "SECID" in df.columns and "BOARDID" in df.columns:
+        df = df.drop_duplicates(subset=["SECID", "BOARDID"])
+    elif "SECID" in df.columns:
+        df = df.drop_duplicates(subset=["SECID"])
 
-    # сортировка для удобства
-    sort_cols = [c for c in ["SECID", "BOARDID"] if c in out.columns]
+    # сортировка
+    sort_cols = [c for c in ("SECID", "BOARDID") if c in df.columns]
     if sort_cols:
-        out = out.sort_values(sort_cols).reset_index(drop=True)
+        df = df.sort_values(sort_cols).reset_index(drop=True)
 
-    return out
+    return df
 
 
-def save_to_excel(df: pd.DataFrame, out_path: Path, logger: logging.Logger, stats: FetchStats) -> None:
+def save_to_excel(df: pd.DataFrame, out_path: Path, logger: logging.Logger, meta: Dict[str, Any]) -> None:
     out_path = out_path.resolve()
-
-    # перезапись всегда
     if out_path.exists():
         out_path.unlink()
 
-    meta = pd.DataFrame(
-        [{
-            "generated_utc": stats.finished_utc,
-            "rows": stats.rows,
-            "pages": stats.pages,
-            "http_calls": stats.http_calls,
-            "source": "MOEX ISS /engines/stock/markets/bonds/securities",
-        }]
-    )
+    meta_df = pd.DataFrame([meta])
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        meta.to_excel(writer, index=False, sheet_name="meta")
+        meta_df.to_excel(writer, index=False, sheet_name="meta")
         df.to_excel(writer, index=False, sheet_name="bonds")
 
-    logger.info("Excel сохранён: %s | rows=%d", out_path, len(df))
+    logger.info("Excel saved: %s | rows=%d", out_path, len(df))
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="MOEX bonds parser -> Excel")
-    p.add_argument("--out", default=DEFAULT_OUT_XLSX, help="Путь к Excel файлу")
-    p.add_argument("--log-dir", default=DEFAULT_LOG_DIR, help="Папка логов")
-    p.add_argument("--log-file", default=DEFAULT_LOG_FILE, help="Имя лог-файла")
+    p = argparse.ArgumentParser(description="MOEX bonds -> SQLite cache -> Excel")
+    p.add_argument("--out", default=DEFAULT_OUT_XLSX, help="Excel output path")
+    p.add_argument("--db", default="moex_cache.sqlite", help="SQLite DB path")
+    p.add_argument("--force-refresh", action="store_true", help="Ignore cache and fetch from MOEX")
+    p.add_argument("--log-dir", default="logs", help="Log directory")
+    p.add_argument("--log-file", default="Moex_API.log", help="Log file name")
     p.add_argument("--log-level", default="INFO", help="INFO/DEBUG/WARNING/ERROR")
-    p.add_argument("--page-size", type=int, default=200, help="Размер страницы MOEX (securities.limit)")
-    p.add_argument("--timeout", type=int, default=30, help="Timeout HTTP (сек)")
-    p.add_argument("--retries", type=int, default=4, help="Количество ретраев")
-    p.add_argument("--backoff", type=float, default=0.7, help="Backoff база (сек)")
-    p.add_argument("--save-raw", action="store_true", help="Сохранять RAW ответы MOEX (для отладки)")
-    p.add_argument("--raw-dir", default="raw", help="Папка для RAW ответов (если --save-raw)")
+    p.add_argument("--timeout", type=int, default=30, help="HTTP timeout seconds")
+    p.add_argument("--retries", type=int, default=4, help="HTTP retries")
+    p.add_argument("--backoff", type=float, default=0.7, help="Backoff base seconds")
+    p.add_argument("--save-raw", action="store_true", help="Save RAW JSON responses")
+    p.add_argument("--raw-dir", default="raw", help="RAW directory")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
 
-    log_path = setup_logging(Path(args.log_dir), args.log_file, args.log_level)
+    log_path = setup_logging(args.log_dir, args.log_file, args.log_level, clear_previous=True, also_console=True)
     logger = logging.getLogger("Moex_API")
 
-    stats = FetchStats(started_utc=utc_now_iso())
+    logger.info("START | utc=%s | log=%s", utc_now_iso(), log_path.resolve())
 
-    t0 = time.perf_counter()
-    logger.info("START | utc=%s | log=%s", stats.started_utc, log_path.resolve())
+    cache = SQLiteCache(args.db, logger=logging.getLogger("SQLiteCache"))
+    asof_date = utc_today_str()
 
     session = requests.Session()
     session.headers.update({
@@ -316,34 +203,56 @@ def main() -> int:
     })
 
     try:
-        df = fetch_all_bonds(
-            session=session,
-            logger=logger,
-            stats=stats,
-            page_size=args.page_size,
-            timeout=args.timeout,
-            retries=args.retries,
-            backoff=args.backoff,
-            save_raw=bool(args.save_raw),
-            raw_dir=Path(args.raw_dir) if args.save_raw else None,
-        )
+        with RunTimer("total", logger=logger) as tt:
+            if (not args.force_refresh) and cache.has_snapshot(asof_date):
+                info = cache.get_snapshot_info(asof_date)
+                logger.info("CACHE HIT | date=%s | rows=%s | created_utc=%s",
+                            asof_date, info.rows if info else "?", info.created_utc if info else "?")
+                df = cache.load_bonds(asof_date)
 
-        stats.finished_utc = utc_now_iso()
+                # восстановим типы дат (они хранятся как TEXT)
+                for c in ("issuedate", "matdate"):
+                    if c in df.columns:
+                        df[c] = pd.to_datetime(df[c], errors="coerce")
 
-        logger.info("Итог: rows=%d | pages=%d | http_calls=%d", stats.rows, stats.pages, stats.http_calls)
-        if df.empty:
-            logger.warning("ВНИМАНИЕ: DF пустой. Проверь доступность ISS или параметры.")
-        else:
-            if "BOARDID" in df.columns:
-                logger.info("Уникальных BOARDID: %d", df["BOARDID"].nunique(dropna=True))
-            if "SECID" in df.columns:
-                logger.info("Уникальных SECID: %d", df["SECID"].nunique(dropna=True))
+                source = "sqlite_cache"
+                http_calls = 0
 
-        save_to_excel(df, Path(args.out), logger, stats)
+            else:
+                logger.info("CACHE MISS | date=%s | force_refresh=%s", asof_date, args.force_refresh)
+                stats = FetchStats()
+                df = fetch_bonds_from_moex(
+                    session=session,
+                    logger=logger,
+                    stats=stats,
+                    timeout=args.timeout,
+                    retries=args.retries,
+                    backoff=args.backoff,
+                    save_raw=bool(args.save_raw),
+                    raw_dir=Path(args.raw_dir),
+                )
+                source = "moex_iss"
+                http_calls = stats.http_calls
 
-        elapsed = time.perf_counter() - t0
-        logger.info("FINISH | utc=%s | elapsed=%.3fs", stats.finished_utc, elapsed)
-        print(f"\nГотово. Время исполнения: {elapsed:.3f} сек\n")
+                cache.save_bonds_snapshot(
+                    asof_date_utc=asof_date,
+                    created_utc=utc_now_iso(),
+                    df=df,
+                )
+
+            meta = {
+                "generated_utc": utc_now_iso(),
+                "asof_date_utc": asof_date,
+                "source": source,
+                "rows": int(len(df)),
+                "http_calls": int(http_calls),
+                "db": str(Path(args.db).resolve()),
+            }
+
+            save_to_excel(df, Path(args.out), logger, meta=meta)
+
+        logger.info("FINISH | elapsed=%.3fs", tt.elapsed)
+        print(f"\nГотово. Время исполнения: {tt.elapsed:.3f} сек\n")
         return 0
 
     except Exception:

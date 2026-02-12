@@ -1,8 +1,6 @@
-2026-02-12 18:24:23,165 | INFO    | Moex_API | START | utc=2026-02-12T15:24:23+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
-2026-02-12 18:24:25,257 | INFO    | Moex_API | Страница 1 | start=0 | строк=3040 | всего=3040
-2026-02-12 18:24:25,371 | ERROR   | Moex_API | Похоже, пагинация не работает: повтор первой записи ('SU26249RMFS1', 'PACT') при start=200. Останавливаюсь.
-2026-02-12 18:24:25,421 | INFO    | Moex_API | Итог: rows=3040 | pages=1 | http_calls=2
-2026-02-12 18:24:25,421 | INFO    | Moex_API | Уникальных BOARDID: 7
-2026-02-12 18:24:25,421 | INFO    | Moex_API | Уникальных SECID: 2954
-2026-02-12 18:24:27,590 | INFO    | Moex_API | Excel сохранён: C:\Users\user\Documents\Инвестиции\Vibe\Moex_Bonds.xlsx | rows=3040
-2026-02-12 18:24:27,590 | INFO    | Moex_API | FINISH | utc=2026-02-12T15:24:25+00:00 | elapsed=4.434s
+2026-02-12 18:45:57,277 | INFO    | Moex_API | START | utc=2026-02-12T15:45:57+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
+2026-02-12 18:45:57,281 | INFO    | Moex_API | TIMER START | total
+2026-02-12 18:45:57,281 | INFO    | Moex_API | CACHE HIT | date=2026-02-12 | rows=3040 | created_utc=2026-02-12T15:45:49+00:00
+2026-02-12 18:45:59,795 | INFO    | Moex_API | Excel saved: C:\Users\user\Documents\Инвестиции\Vibe\Moex_Bonds.xlsx | rows=3040
+2026-02-12 18:45:59,795 | INFO    | Moex_API | TIMER END   | total | elapsed=2.526s
+2026-02-12 18:45:59,795 | INFO    | Moex_API | FINISH | elapsed=2.526s
