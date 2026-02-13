@@ -1,34 +1,23 @@
-2026-02-13 13:56:57 | INFO    | Moex_API | START | utc=2026-02-13T10:56:57+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
-2026-02-13 13:56:57 | INFO    | SQLiteCache | emitents schema upgraded (added extra columns)
-2026-02-13 13:56:57 | INFO    | SQLiteCache | SQLiteCache initialized | db=moex_cache.sqlite
-2026-02-13 13:56:57 | INFO    | Moex_API | TIMER START | total
-2026-02-13 13:56:58 | INFO    | Moex_API | CACHE HIT | bonds_list | date=2026-02-13 | rows=2950
-2026-02-13 13:56:59 | INFO    | Moex_API | Excel saved: Moex_Bonds.xlsx | rows=2950
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL sample | k=10 | seed=42 | force_refresh_detail=False | workers=8 | rps=8.0
-2026-02-13 13:56:59 | INFO    | Moex_API | TIMER START | detail_fetch
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 1/10 | RU000A10D9M6
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 2/10 | RU000A102SM7
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 3/10 | RU000A0JX2B5
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 4/10 | RU000A107AS1
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 5/10 | RU000A106RT5
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 6/10 | RU000A106AQ7
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 7/10 | RU000A103PX8
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 8/10 | RU000A102G35
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 9/10 | RU000A10DXM9
-2026-02-13 13:56:59 | INFO    | Moex_API | DETAIL queued 10/10 | RU000A10BWV6
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | WARNING | Moex_API | DETAIL task failed | err=SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 9952 and this is thread id 11068.
-2026-02-13 13:56:59 | INFO    | Moex_API | TIMER END | detail_fetch | elapsed=0.037s
-2026-02-13 13:56:59 | INFO    | Moex_API | REQUESTS summary since start | total=0 | errors=0
-2026-02-13 13:56:59 | INFO    | Moex_API | Detail Excel saved: Moex_Bonds_Detail.xlsx | summary=10 | pivot=0 | desc=0 | events=0 | coupons=0 | offers=0 | amort=0 | emitents=0
-2026-02-13 13:56:59 | INFO    | Moex_API | TIMER END | total | elapsed=1.843s
-2026-02-13 13:56:59 | INFO    | SQLiteCache | SQLiteCache closed
-2026-02-13 13:56:59 | INFO    | Moex_API | FINISH | elapsed=1.857s
+2026-02-13 14:17:03 | INFO    | Moex_API | START | utc=2026-02-13T11:17:03+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
+2026-02-13 14:17:03 | INFO    | SQLiteCache | SQLiteCache initialized | db=moex_cache.sqlite
+2026-02-13 14:17:03 | INFO    | Moex_API | TIMER START | total
+2026-02-13 14:17:03 | INFO    | Moex_API | CACHE HIT | bonds_list | date=2026-02-13 | rows=2950
+2026-02-13 14:17:05 | INFO    | Moex_API | Excel saved: Moex_Bonds.xlsx | rows=2950
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL sample | k=10 | seed=42 | force_refresh_detail=False | workers=8 | rps=8.0 | emitent_ttl_days=90
+2026-02-13 14:17:05 | INFO    | Moex_API | TIMER START | detail_fetch
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 1/10 | RU000A103PX8
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 2/10 | RU000A0JX2B5
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 3/10 | RU000A106RT5
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 4/10 | RU000A102G35
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 5/10 | RU000A107AS1
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 6/10 | RU000A10D9M6
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 7/10 | RU000A102SM7
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 8/10 | RU000A10DXM9
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 9/10 | RU000A106AQ7
+2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 10/10 | RU000A10BWV6
+2026-02-13 14:17:05 | INFO    | Moex_API | TIMER END | detail_fetch | elapsed=0.145s
+2026-02-13 14:17:05 | INFO    | Moex_API | REQUESTS summary since start | total=0 | errors=0
+2026-02-13 14:17:06 | INFO    | Moex_API | Detail Excel saved: Moex_Bonds_Detail.xlsx | summary=10 | pivot=10 | desc=367 | events=0 | coupons=274 | offers=0 | amort=26 | emitents=10
+2026-02-13 14:17:06 | INFO    | Moex_API | TIMER END | total | elapsed=2.623s
+2026-02-13 14:17:06 | INFO    | SQLiteCache | SQLiteCache closed
+2026-02-13 14:17:06 | INFO    | Moex_API | FINISH | elapsed=2.634s

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -34,7 +36,7 @@ def _safe_json_loads(s: str) -> Any:
 def _cols(conn: sqlite3.Connection, table: str) -> set[str]:
     cur = conn.cursor()
     cur.execute(f"PRAGMA table_info({table});")
-    return {r[1] for r in cur.fetchall()}  # r[1] = name
+    return {r[1] for r in cur.fetchall()}
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -48,7 +50,6 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 @dataclass(frozen=True)
 class RequestLogRow:
-    # То, что логирует Moex_API.py на каждый HTTP запрос
     url: str
     params_json: str
     status: Optional[int]
@@ -60,44 +61,99 @@ class RequestLogRow:
 
 class SQLiteCache:
     """
-    Контракт класса задаётся Moex_API.py.
+    Thread-safe cache через thread-local соединения.
 
-    Должны существовать:
-      - get_bonds_list / set_bonds_list
-      - get_bond_raw / set_bond_raw
-      - get_emitent / upsert_emitent
-      - log_request / requests_summary
-
-    + добавлены purge_* для TTL.
+    ВАЖНО: схема/миграции делаются в __init__ на одном соединении,
+    дальше каждый поток работает со своим connection.
     """
 
     def __init__(self, db_path: str = "moex_cache.sqlite", logger=None):
         self.logger = logger
-        self.conn = sqlite3.connect(db_path)
-        self.conn.row_factory = sqlite3.Row
-        self._apply_pragmas()
-        self._ensure_schema()
+        self.db_path = db_path
+
+        self._tls = threading.local()
+        self._conns_lock = threading.Lock()
+        self._conns: List[sqlite3.Connection] = []
+
+        # schema / migrations on main connection
+        conn = self._connect()
+        self._ensure_schema(conn)
+        conn.commit()
+
         if self.logger:
             self.logger.info(f"SQLiteCache initialized | db={db_path}")
 
-    # -------------------------
-    # Init / schema / migration
-    # -------------------------
-    def _apply_pragmas(self) -> None:
-        cur = self.conn.cursor()
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
         try:
             cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute("PRAGMA synchronous=NORMAL;")
             cur.execute("PRAGMA temp_store=MEMORY;")
             cur.execute("PRAGMA foreign_keys=ON;")
-            cur.execute("PRAGMA busy_timeout=5000;")
+            cur.execute("PRAGMA busy_timeout=8000;")
         except Exception:
             pass
 
-    def _ensure_schema(self) -> None:
-        cur = self.conn.cursor()
+        with self._conns_lock:
+            self._conns.append(conn)
+        return conn
 
-        # ---- bonds_list (daily) ----
+    def _get_conn(self) -> sqlite3.Connection:
+        conn = getattr(self._tls, "conn", None)
+        if conn is None:
+            conn = self._connect()
+            self._tls.conn = conn
+        return conn
+
+    # -------------------------
+    # execute helpers (lock/retry on "database is locked")
+    # -------------------------
+    def _execute(self, sql: str, params: tuple = (), commit: bool = False) -> sqlite3.Cursor:
+        conn = self._get_conn()
+        last = None
+        for attempt in range(1, 6):
+            try:
+                cur = conn.cursor()
+                cur.execute(sql, params)
+                if commit:
+                    conn.commit()
+                return cur
+            except sqlite3.OperationalError as e:
+                last = e
+                msg = str(e).lower()
+                if "locked" in msg or "busy" in msg:
+                    time.sleep(min(0.4, 0.05 * attempt))
+                    continue
+                raise
+        raise last  # type: ignore[misc]
+
+    def _executemany(self, sql: str, seq_params: list[tuple], commit: bool = False) -> sqlite3.Cursor:
+        conn = self._get_conn()
+        last = None
+        for attempt in range(1, 6):
+            try:
+                cur = conn.cursor()
+                cur.executemany(sql, seq_params)
+                if commit:
+                    conn.commit()
+                return cur
+            except sqlite3.OperationalError as e:
+                last = e
+                msg = str(e).lower()
+                if "locked" in msg or "busy" in msg:
+                    time.sleep(min(0.4, 0.05 * attempt))
+                    continue
+                raise
+        raise last  # type: ignore[misc]
+
+    # -------------------------
+    # schema / migration
+    # -------------------------
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        cur = conn.cursor()
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS bonds_list (
@@ -108,13 +164,9 @@ class SQLiteCache:
             """
         )
         cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_bonds_list_created
-            ON bonds_list(created_utc)
-            """
+            "CREATE INDEX IF NOT EXISTS idx_bonds_list_created ON bonds_list(created_utc)"
         )
 
-        # ---- bond_raw ----
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS bond_raw (
@@ -133,19 +185,12 @@ class SQLiteCache:
             """
         )
         cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_bond_raw_lookup
-            ON bond_raw(secid, kind, asof_date)
-            """
+            "CREATE INDEX IF NOT EXISTS idx_bond_raw_lookup ON bond_raw(secid, kind, asof_date)"
         )
         cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_bond_raw_created
-            ON bond_raw(created_utc)
-            """
+            "CREATE INDEX IF NOT EXISTS idx_bond_raw_created ON bond_raw(created_utc)"
         )
 
-        # ---- emitents ---- (расширили поля)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS emitents (
@@ -167,13 +212,9 @@ class SQLiteCache:
             """
         )
         cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_emitents_updated
-            ON emitents(updated_utc)
-            """
+            "CREATE INDEX IF NOT EXISTS idx_emitents_updated ON emitents(updated_utc)"
         )
 
-        # ---- requests_log ----
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS requests_log (
@@ -189,27 +230,19 @@ class SQLiteCache:
             """
         )
         cur.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_requests_log_created
-            ON requests_log(created_utc)
-            """
+            "CREATE INDEX IF NOT EXISTS idx_requests_log_created ON requests_log(created_utc)"
         )
 
-        self.conn.commit()
+        conn.commit()
 
-        # миграции старых схем
-        self._migrate_bonds_list_if_needed()
-        self._migrate_bond_raw_if_needed()
-        self._migrate_emitents_if_needed()
+        self._migrate_bonds_list_if_needed(conn)
+        self._migrate_bond_raw_if_needed(conn)
+        self._migrate_emitents_if_needed(conn)
 
-    def _migrate_bonds_list_if_needed(self) -> None:
-        """
-        Если bonds_list уже существует, но колонка payload_json называется иначе,
-        пересоздаём таблицу и переносим данные best-effort.
-        """
-        if not _table_exists(self.conn, "bonds_list"):
+    def _migrate_bonds_list_if_needed(self, conn: sqlite3.Connection) -> None:
+        if not _table_exists(conn, "bonds_list"):
             return
-        have = _cols(self.conn, "bonds_list")
+        have = _cols(conn, "bonds_list")
         want = {"asof_date", "payload_json", "created_utc"}
         if want.issubset(have):
             return
@@ -219,9 +252,9 @@ class SQLiteCache:
                 f"Schema mismatch: bonds_list columns={sorted(have)} -> recreate/migrate"
             )
 
-        cur = self.conn.cursor()
+        cur = conn.cursor()
         cur.execute("ALTER TABLE bonds_list RENAME TO bonds_list_old;")
-        self.conn.commit()
+        conn.commit()
 
         cur.execute(
             """
@@ -235,21 +268,11 @@ class SQLiteCache:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_bonds_list_created ON bonds_list(created_utc)"
         )
-        self.conn.commit()
+        conn.commit()
 
-        old = _cols(self.conn, "bonds_list_old")
-
-        payload_col = None
-        for cand in ("payload_json", "payload", "data", "json", "value", "bonds_json"):
-            if cand in old:
-                payload_col = cand
-                break
-
-        created_col = None
-        for cand in ("created_utc", "created_at", "created", "ts", "timestamp"):
-            if cand in old:
-                created_col = cand
-                break
+        old = _cols(conn, "bonds_list_old")
+        payload_col = next((c for c in ("payload_json", "payload", "data", "json", "value") if c in old), None)
+        created_col = next((c for c in ("created_utc", "created_at", "created", "ts", "timestamp") if c in old), None)
 
         now = _utc_iso()
         if "asof_date" in old and payload_col:
@@ -275,19 +298,15 @@ class SQLiteCache:
                     """,
                     (now,),
                 )
-            self.conn.commit()
+            conn.commit()
 
         cur.execute("DROP TABLE IF EXISTS bonds_list_old;")
-        self.conn.commit()
+        conn.commit()
 
-    def _migrate_bond_raw_if_needed(self) -> None:
-        """
-        Если у пользователя была старая schema bond_raw, делаем rebuild.
-        created_utc NOT NULL -> COALESCE(created_col, now).
-        """
-        if not _table_exists(self.conn, "bond_raw"):
+    def _migrate_bond_raw_if_needed(self, conn: sqlite3.Connection) -> None:
+        if not _table_exists(conn, "bond_raw"):
             return
-        have = _cols(self.conn, "bond_raw")
+        have = _cols(conn, "bond_raw")
         want = {
             "id",
             "secid",
@@ -309,9 +328,9 @@ class SQLiteCache:
                 f"Schema mismatch: bond_raw columns={sorted(have)} -> recreate/migrate"
             )
 
-        cur = self.conn.cursor()
+        cur = conn.cursor()
         cur.execute("ALTER TABLE bond_raw RENAME TO bond_raw_old;")
-        self.conn.commit()
+        conn.commit()
 
         cur.execute(
             """
@@ -336,32 +355,20 @@ class SQLiteCache:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_bond_raw_created ON bond_raw(created_utc)"
         )
-        self.conn.commit()
+        conn.commit()
 
-        old = _cols(self.conn, "bond_raw_old")
+        old = _cols(conn, "bond_raw_old")
+        response_col = next((c for c in ("response_text", "payload", "payload_json") if c in old), None)
+        created_col = next((c for c in ("created_utc", "created_at") if c in old), None)
 
-        response_col = None
-        for cand in ("response_text", "payload", "payload_json"):
-            if cand in old:
-                response_col = cand
-                break
-
-        created_col = None
-        for cand in ("created_utc", "created_at"):
-            if cand in old:
-                created_col = cand
-                break
-
-        can_copy_keys = {"secid", "kind", "asof_date"}.issubset(old)
+        can_copy = {"secid", "kind", "asof_date"}.issubset(old)
         now = _utc_iso()
-        if can_copy_keys and response_col:
+        if can_copy and response_col:
             if created_col:
                 cur.execute(
                     f"""
                     INSERT INTO bond_raw(secid, kind, asof_date, response_text, created_utc)
-                    SELECT secid,
-                           kind,
-                           asof_date,
+                    SELECT secid, kind, asof_date,
                            {response_col} AS response_text,
                            COALESCE({created_col}, ?) AS created_utc
                     FROM bond_raw_old
@@ -372,29 +379,22 @@ class SQLiteCache:
                 cur.execute(
                     f"""
                     INSERT INTO bond_raw(secid, kind, asof_date, response_text, created_utc)
-                    SELECT secid,
-                           kind,
-                           asof_date,
+                    SELECT secid, kind, asof_date,
                            {response_col} AS response_text,
                            ? AS created_utc
                     FROM bond_raw_old
                     """,
                     (now,),
                 )
-            self.conn.commit()
+            conn.commit()
 
         cur.execute("DROP TABLE IF EXISTS bond_raw_old;")
-        self.conn.commit()
+        conn.commit()
 
-    def _migrate_emitents_if_needed(self) -> None:
-        """
-        Добавляем новые колонки в emitents, если база была старой.
-        """
-        if not _table_exists(self.conn, "emitents"):
+    def _migrate_emitents_if_needed(self, conn: sqlite3.Connection) -> None:
+        if not _table_exists(conn, "emitents"):
             return
-        have = _cols(self.conn, "emitents")
-
-        # если старый emitents без новых полей — ALTER TABLE ADD COLUMN
+        have = _cols(conn, "emitents")
         desired = [
             ("kpp", "TEXT"),
             ("okved", "TEXT"),
@@ -403,30 +403,23 @@ class SQLiteCache:
             ("site", "TEXT"),
             ("email", "TEXT"),
         ]
-
-        cur = self.conn.cursor()
+        cur = conn.cursor()
         changed = False
         for col, typ in desired:
             if col not in have:
                 cur.execute(f"ALTER TABLE emitents ADD COLUMN {col} {typ}")
                 changed = True
-
         if changed:
-            self.conn.commit()
+            conn.commit()
             if self.logger:
                 self.logger.info("emitents schema upgraded (added extra columns)")
 
     # -------------------------
-    # bonds list daily cache
+    # bonds list
     # -------------------------
     def get_bonds_list(self, asof_date: str) -> Optional[List[dict]]:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            SELECT payload_json
-            FROM bonds_list
-            WHERE asof_date=?
-            """,
+        cur = self._execute(
+            "SELECT payload_json FROM bonds_list WHERE asof_date=?",
             (asof_date,),
         )
         row = cur.fetchone()
@@ -436,8 +429,7 @@ class SQLiteCache:
         return data if isinstance(data, list) else None
 
     def set_bonds_list(self, bonds: List[dict], asof_date: str) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
+        self._execute(
             """
             INSERT INTO bonds_list(asof_date, payload_json, created_utc)
             VALUES(?, ?, ?)
@@ -446,15 +438,14 @@ class SQLiteCache:
                 created_utc=excluded.created_utc
             """,
             (asof_date, _safe_json_dumps(bonds), _utc_iso()),
+            commit=True,
         )
-        self.conn.commit()
 
     # -------------------------
-    # bond_raw (detail raw store)
+    # bond_raw
     # -------------------------
     def get_bond_raw(self, secid: str, kind: str, asof_date: str) -> Optional[Dict[str, Any]]:
-        cur = self.conn.cursor()
-        cur.execute(
+        cur = self._execute(
             """
             SELECT *
             FROM bond_raw
@@ -480,8 +471,7 @@ class SQLiteCache:
         size_bytes: Optional[int],
         response_text: Optional[str],
     ) -> int:
-        cur = self.conn.cursor()
-        cur.execute(
+        cur = self._execute(
             """
             INSERT INTO bond_raw(
                 secid, kind, asof_date,
@@ -503,8 +493,8 @@ class SQLiteCache:
                 response_text,
                 _utc_iso(),
             ),
+            commit=True,
         )
-        self.conn.commit()
         return int(cur.lastrowid)
 
     # -------------------------
@@ -526,9 +516,9 @@ class SQLiteCache:
         site: Optional[str] = None,
         email: Optional[str] = None,
         raw_json: Optional[str],
+        updated_utc: Optional[str] = None,
     ) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
+        self._execute(
             """
             INSERT INTO emitents(
                 emitter_id,
@@ -568,19 +558,14 @@ class SQLiteCache:
                 site,
                 email,
                 raw_json,
-                _utc_iso(),
+                updated_utc or _utc_iso(),
             ),
+            commit=True,
         )
-        self.conn.commit()
 
     def get_emitent(self, emitter_id: int) -> Optional[Dict[str, Any]]:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            SELECT *
-            FROM emitents
-            WHERE emitter_id=?
-            """,
+        cur = self._execute(
+            "SELECT * FROM emitents WHERE emitter_id=?",
             (int(emitter_id),),
         )
         row = cur.fetchone()
@@ -590,8 +575,7 @@ class SQLiteCache:
     # requests log
     # -------------------------
     def log_request(self, row: RequestLogRow) -> int:
-        cur = self.conn.cursor()
-        cur.execute(
+        cur = self._execute(
             """
             INSERT INTO requests_log(url, params_json, status, elapsed_ms, size_bytes, created_utc, error)
             VALUES(?, ?, ?, ?, ?, ?, ?)
@@ -605,23 +589,18 @@ class SQLiteCache:
                 row.created_utc,
                 row.error,
             ),
+            commit=True,
         )
-        self.conn.commit()
         return int(cur.lastrowid)
 
     def requests_summary(self, since_created_utc: str) -> Dict[str, int]:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            SELECT COUNT(*) AS n
-            FROM requests_log
-            WHERE created_utc >= ?
-            """,
+        cur = self._execute(
+            "SELECT COUNT(*) AS n FROM requests_log WHERE created_utc >= ?",
             (since_created_utc,),
         )
         total = int(cur.fetchone()["n"])
 
-        cur.execute(
+        cur = self._execute(
             """
             SELECT COUNT(*) AS n
             FROM requests_log
@@ -631,7 +610,6 @@ class SQLiteCache:
             (since_created_utc,),
         )
         errors = int(cur.fetchone()["n"])
-
         return {"total": total, "errors": errors}
 
     # -------------------------
@@ -641,51 +619,41 @@ class SQLiteCache:
         if int(keep_days) <= 0:
             return 0
         cutoff = _utc_iso_days_ago(int(keep_days))
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM bond_raw WHERE created_utc < ?", (cutoff,))
-        n = cur.rowcount if cur.rowcount is not None else 0
-        self.conn.commit()
-        return int(n)
+        cur = self._execute("DELETE FROM bond_raw WHERE created_utc < ?", (cutoff,), commit=True)
+        return int(cur.rowcount or 0)
 
     def purge_requests_log(self, keep_days: int) -> int:
         if int(keep_days) <= 0:
             return 0
         cutoff = _utc_iso_days_ago(int(keep_days))
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM requests_log WHERE created_utc < ?", (cutoff,))
-        n = cur.rowcount if cur.rowcount is not None else 0
-        self.conn.commit()
-        return int(n)
+        cur = self._execute("DELETE FROM requests_log WHERE created_utc < ?", (cutoff,), commit=True)
+        return int(cur.rowcount or 0)
 
     def purge_bonds_list(self, keep_days: int) -> int:
         if int(keep_days) <= 0:
             return 0
         cutoff = _utc_iso_days_ago(int(keep_days))
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM bonds_list WHERE created_utc < ?", (cutoff,))
-        n = cur.rowcount if cur.rowcount is not None else 0
-        self.conn.commit()
-        return int(n)
+        cur = self._execute("DELETE FROM bonds_list WHERE created_utc < ?", (cutoff,), commit=True)
+        return int(cur.rowcount or 0)
 
     def purge_emitents(self, keep_days: int) -> int:
-        """
-        Обычно эмитенты почти статичны, поэтому purge лучше делать редко/осторожно.
-        """
         if int(keep_days) <= 0:
             return 0
         cutoff = _utc_iso_days_ago(int(keep_days))
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM emitents WHERE updated_utc < ?", (cutoff,))
-        n = cur.rowcount if cur.rowcount is not None else 0
-        self.conn.commit()
-        return int(n)
+        cur = self._execute("DELETE FROM emitents WHERE updated_utc < ?", (cutoff,), commit=True)
+        return int(cur.rowcount or 0)
 
     # -------------------------
     # close
     # -------------------------
     def close(self) -> None:
-        try:
-            self.conn.close()
-        finally:
-            if self.logger:
-                self.logger.info("SQLiteCache closed")
+        with self._conns_lock:
+            conns = list(self._conns)
+            self._conns.clear()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if self.logger:
+            self.logger.info("SQLiteCache closed")
