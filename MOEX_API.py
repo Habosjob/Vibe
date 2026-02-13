@@ -387,6 +387,7 @@ def _discover_working_endpoints(session: requests.Session, sample_secid: str, lo
 
 def _normalize_block_frame(secid: str, block_name: str, block_df: pd.DataFrame) -> pd.DataFrame:
     enriched = block_df.copy()
+    enriched = enriched.drop(columns=["secid", "block_name"], errors="ignore")
     enriched.insert(0, "secid", secid)
     enriched.insert(1, "block_name", block_name)
     non_meta_cols = [column for column in enriched.columns if column not in {"secid", "block_name"}]
