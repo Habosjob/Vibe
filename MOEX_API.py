@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import csv
 import logging
 import sqlite3
 import time
@@ -123,9 +124,42 @@ def persist_raw_response(csv_data: str) -> None:
 
 
 def save_excel(csv_data: str) -> int:
-    dataframe = pd.read_csv(io.StringIO(csv_data))
+    dataframe = pd.read_csv(io.StringIO(_prepare_csv_for_pandas(csv_data)))
     dataframe.to_excel(EXCEL_PATH, index=False)
     return len(dataframe)
+
+
+def _prepare_csv_for_pandas(csv_data: str) -> str:
+    lines = [line for line in csv_data.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("CSV data is empty")
+
+    delimiter = ","
+    if sum(";" in line for line in lines[:10]) > sum("," in line for line in lines[:10]):
+        delimiter = ";"
+
+    parsed_rows: list[list[str]] = []
+    for line in lines:
+        parsed_rows.append(next(csv.reader([line], delimiter=delimiter)))
+
+    header_index = next(
+        (index for index, row in enumerate(parsed_rows) if len(row) > 1),
+        None,
+    )
+    if header_index is None:
+        raise ValueError("Could not find CSV header in response")
+
+    expected_width = len(parsed_rows[header_index])
+    filtered_lines = [
+        lines[index]
+        for index in range(header_index, len(lines))
+        if len(parsed_rows[index]) == expected_width
+    ]
+
+    if len(filtered_lines) < 2:
+        raise ValueError("Could not parse tabular CSV data from response")
+
+    return "\n".join(filtered_lines)
 
 
 def main() -> int:
