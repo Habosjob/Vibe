@@ -17,7 +17,6 @@ import requests
 from logs import setup_logger, ensure_logs_dir, Timer
 from SQL import SQLiteCache, RequestLogRow
 
-
 BASE = "https://iss.moex.com/iss"
 
 
@@ -27,6 +26,34 @@ def today_str() -> str:
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _ensure_single_secid(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Гарантирует, что в df есть ровно ОДНА колонка 'SECID' (1-dimensional),
+    иначе groupby('SECID') может падать: "Grouper ... not 1-dimensional".
+    """
+    if df is None or df.empty:
+        return df
+
+    cols = list(df.columns)
+    secid_idx = [i for i, c in enumerate(cols) if c == "SECID"]
+    if len(secid_idx) <= 1:
+        return df
+
+    sec_cols = df.loc[:, ["SECID"]]  # вернёт DataFrame, если SECID дублируется
+    secid_series = None
+    for j in range(sec_cols.shape[1]):
+        s = sec_cols.iloc[:, j]
+        if secid_series is None:
+            secid_series = s
+        else:
+            secid_series = secid_series.fillna(s)
+
+    out = df.copy()
+    out = out.loc[:, [c for c in out.columns if c != "SECID"]]
+    out.insert(0, "SECID", secid_series)
+    return out
 
 
 @dataclass
@@ -60,7 +87,6 @@ class IssClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff_base = backoff_base
-
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -70,7 +96,6 @@ class IssClient:
         )
 
     def _sleep_for_retry(self, attempt: int, resp: Optional[requests.Response]) -> None:
-        # Respect Retry-After for 429 if present
         if resp is not None:
             ra = resp.headers.get("Retry-After")
             if ra:
@@ -80,7 +105,7 @@ class IssClient:
                     return
                 except Exception:
                     pass
-        # exponential backoff + jitter
+
         base = self.backoff_base * (2 ** (attempt - 1))
         jitter = random.random() * 0.25 * base
         time.sleep(min(30.0, base + jitter))
@@ -103,7 +128,6 @@ class IssClient:
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
                 size_bytes = len((text or "").encode("utf-8", errors="ignore"))
 
-                # requests_log per attempt
                 self.cache.log_request(
                     RequestLogRow(
                         url=str(resp.url),
@@ -117,7 +141,9 @@ class IssClient:
                 )
 
                 if status in retry_statuses:
-                    self.logger.warning(f"HTTP {status} retryable | attempt {attempt}/{self.max_retries} | {resp.url}")
+                    self.logger.warning(
+                        f"HTTP {status} retryable | attempt {attempt}/{self.max_retries} | {resp.url}"
+                    )
                     if attempt < self.max_retries:
                         self._sleep_for_retry(attempt, resp)
                         continue
@@ -136,7 +162,6 @@ class IssClient:
             except Exception as e:
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
                 last_err = repr(e)
-
                 self.cache.log_request(
                     RequestLogRow(
                         url=url,
@@ -148,8 +173,9 @@ class IssClient:
                         error=last_err,
                     )
                 )
-
-                self.logger.warning(f"HTTP exception retryable | attempt {attempt}/{self.max_retries} | {url} | {last_err}")
+                self.logger.warning(
+                    f"HTTP exception retryable | attempt {attempt}/{self.max_retries} | {url} | {last_err}"
+                )
                 if attempt < self.max_retries:
                     self._sleep_for_retry(attempt, resp)
                     continue
@@ -165,7 +191,15 @@ class IssClient:
                     headers=None,
                 )
 
-        return HttpResult(status=None, elapsed_ms=None, size_bytes=None, text=None, url=url, params=params, error=last_err)
+        return HttpResult(
+            status=None,
+            elapsed_ms=None,
+            size_bytes=None,
+            text=None,
+            url=url,
+            params=params,
+            error=last_err,
+        )
 
 
 def parse_iss_json_tables(payload_text: str) -> Dict[str, pd.DataFrame]:
@@ -180,10 +214,6 @@ def parse_iss_json_tables(payload_text: str) -> Dict[str, pd.DataFrame]:
             out[block] = pd.DataFrame(data, columns=cols)
     return out
 
-
-# ---------------------------
-# Bonds list (daily cache) with anti-loop paging
-# ---------------------------
 
 def _hash_page_secids(secids: List[str]) -> str:
     h = hashlib.sha256()
@@ -201,31 +231,29 @@ def fetch_all_traded_bonds(
     min_new_ratio_stop: float = 0.02,
     boardgroup: int = 58,
 ) -> List[dict]:
-    """
-    Безопасный сбор списка "торгуемых облигаций" через boardgroup.
-
-    Защиты:
-    - boardgroup endpoint (уменьшает "всё подряд")
-    - дедуп по SECID
-    - стоп при повторе страницы (hash по SECID)
-    - стоп при низкой доле новых SECID 3 страницы подряд
-    """
     columns = [
-        "SECID", "ISIN", "REGNUMBER",
-        "SHORTNAME", "NAME",
+        "SECID",
+        "ISIN",
+        "REGNUMBER",
+        "SHORTNAME",
+        "NAME",
         "EMITTER_ID",
-        "TYPE", "GROUP",
+        "TYPE",
+        "GROUP",
         "PRIMARY_BOARDID",
         "LISTLEVEL",
-        "ISSUEDATE", "MATDATE",
-        "FACEVALUE", "FACEUNIT",
-        "COUPONPERCENT", "COUPONVALUE", "COUPONPERIOD",
+        "ISSUEDATE",
+        "MATDATE",
+        "FACEVALUE",
+        "FACEUNIT",
+        "COUPONPERCENT",
+        "COUPONVALUE",
+        "COUPONPERIOD",
     ]
 
     all_rows: List[dict] = []
     seen_secids: set[str] = set()
     seen_page_hashes: set[str] = set()
-
     start = 0
     page = 0
     low_new_streak = 0
@@ -284,9 +312,9 @@ def fetch_all_traded_bonds(
 
             total = len(all_rows)
             new_ratio = new / max(1, len(rows))
-
             logger.info(
-                f"Page {page} | start={start} | rows={len(rows)} | new={new} | new_ratio={new_ratio:.3f} | total_unique={total}"
+                f"Page {page} | start={start} | rows={len(rows)} | new={new} | "
+                f"new_ratio={new_ratio:.3f} | total_unique={total}"
             )
 
             if new_ratio < min_new_ratio_stop:
@@ -296,7 +324,8 @@ def fetch_all_traded_bonds(
 
             if low_new_streak >= 3:
                 logger.warning(
-                    f"STOP low new_ratio streak | streak={low_new_streak} | last_new_ratio={new_ratio:.3f} | total_unique={total}"
+                    f"STOP low new_ratio streak | streak={low_new_streak} | "
+                    f"last_new_ratio={new_ratio:.3f} | total_unique={total}"
                 )
                 break
 
@@ -320,10 +349,6 @@ def get_bonds_list_daily(cache: SQLiteCache, client: IssClient, logger, force_re
     logger.info(f"CACHE SAVE | bonds_list | date={d} | rows={len(bonds)}")
     return bonds
 
-
-# ---------------------------
-# TTL for detail endpoints
-# ---------------------------
 
 def fetch_bondization_ttl(cache: SQLiteCache, client: IssClient, logger, secid: str, force_refresh: bool) -> Dict[str, pd.DataFrame]:
     d = today_str()
@@ -356,6 +381,7 @@ def fetch_bondization_ttl(cache: SQLiteCache, client: IssClient, logger, secid: 
     if res.status != 200 or not res.text:
         logger.warning(f"bondization failed | {secid} | status={res.status} | err={res.error}")
         return {}
+
     return parse_iss_json_tables(res.text)
 
 
@@ -409,7 +435,11 @@ def try_fetch_emitent(cache: SQLiteCache, client: IssClient, logger, emitter_id:
             try:
                 obj = json.loads(raw_exist["response_text"])
                 for block, content in obj.items():
-                    if isinstance(content, dict) and isinstance(content.get("columns"), list) and isinstance(content.get("data"), list):
+                    if (
+                        isinstance(content, dict)
+                        and isinstance(content.get("columns"), list)
+                        and isinstance(content.get("data"), list)
+                    ):
                         df = pd.DataFrame(content["data"], columns=content["columns"])
                         if df.empty:
                             continue
@@ -419,6 +449,7 @@ def try_fetch_emitent(cache: SQLiteCache, client: IssClient, logger, emitter_id:
                         short_title = row.get("SHORT_TITLE") or row.get("short_title")
                         ogrn = row.get("OGRN") or row.get("ogrn")
                         okpo = row.get("OKPO") or row.get("okpo")
+
                         cache.upsert_emitent(
                             emitter_id=emitter_id,
                             inn=str(inn) if inn else None,
@@ -454,7 +485,11 @@ def try_fetch_emitent(cache: SQLiteCache, client: IssClient, logger, emitter_id:
     try:
         obj = json.loads(res.text)
         for block, content in obj.items():
-            if isinstance(content, dict) and isinstance(content.get("columns"), list) and isinstance(content.get("data"), list):
+            if (
+                isinstance(content, dict)
+                and isinstance(content.get("columns"), list)
+                and isinstance(content.get("data"), list)
+            ):
                 df = pd.DataFrame(content["data"], columns=content["columns"])
                 if df.empty:
                     continue
@@ -464,6 +499,7 @@ def try_fetch_emitent(cache: SQLiteCache, client: IssClient, logger, emitter_id:
                 short_title = row.get("SHORT_TITLE") or row.get("short_title")
                 ogrn = row.get("OGRN") or row.get("ogrn")
                 okpo = row.get("OKPO") or row.get("okpo")
+
                 cache.upsert_emitent(
                     emitter_id=emitter_id,
                     inn=str(inn) if inn else None,
@@ -481,46 +517,59 @@ def try_fetch_emitent(cache: SQLiteCache, client: IssClient, logger, emitter_id:
     return None
 
 
-# ---------------------------
-# Excel helpers
-# ---------------------------
-
 def build_pivot_description(description_df: pd.DataFrame, emitents_df: pd.DataFrame) -> pd.DataFrame:
     if description_df.empty:
         base = pd.DataFrame(columns=["SECID"])
     else:
         df = description_df.copy()
         df.columns = [str(c).upper() for c in df.columns]
+        df = _ensure_single_secid(df)
+
         if "SECID" not in df.columns:
             df["SECID"] = None
 
         key_col = "NAME" if "NAME" in df.columns else ("TITLE" if "TITLE" in df.columns else None)
+
         if key_col is None or "VALUE" not in df.columns:
-            base = pd.DataFrame({"SECID": sorted(df["SECID"].dropna().unique().tolist())})
+            base = pd.DataFrame({"SECID": sorted(df["SECID"].dropna().astype(str).unique().tolist())})
         else:
             wide = df.pivot_table(index="SECID", columns=key_col, values="VALUE", aggfunc="first")
-            wide.reset_index(inplace=True)
+
+            if wide.index.name == "SECID" and "SECID" in wide.columns:
+                wide = wide.drop(columns=["SECID"])
+            wide = wide.reset_index()
+
             wide.columns = [str(c) for c in wide.columns]
             base = wide
 
     if emitents_df is not None and not emitents_df.empty:
         e = emitents_df.copy()
         e.columns = [str(c).upper() for c in e.columns]
+        e = _ensure_single_secid(e)
+
         if "SECID" in e.columns:
             keep = [c for c in ["SECID", "EMITTER_ID", "INN", "TITLE", "SHORT_TITLE", "OGRN", "OKPO"] if c in e.columns]
             if keep:
                 base = base.merge(e[keep].drop_duplicates(), on="SECID", how="left")
+
     return base
 
 
 def _parse_date_safe(x: Any) -> Optional[pd.Timestamp]:
+    """
+    ВАЖНО: возвращаем tz-aware UTC Timestamp, чтобы сравнения работали
+    (иначе падает tz-naive vs tz-aware).
+    """
     if x is None:
         return None
     s = str(x).strip()
     if not s or s.lower() in ("nan", "none"):
         return None
     try:
-        return pd.to_datetime(s, errors="coerce")
+        ts = pd.to_datetime(s, errors="coerce", utc=True)
+        if pd.isna(ts):
+            return None
+        return ts
     except Exception:
         return None
 
@@ -528,36 +577,43 @@ def _parse_date_safe(x: Any) -> Optional[pd.Timestamp]:
 def build_summary(sample_bonds: pd.DataFrame, emitents_df: pd.DataFrame, offers_df: pd.DataFrame, coupons_df: pd.DataFrame) -> pd.DataFrame:
     out = sample_bonds.copy()
     out.columns = [str(c).upper() for c in out.columns]
+    out = _ensure_single_secid(out)
 
     if emitents_df is not None and not emitents_df.empty:
         e = emitents_df.copy()
         e.columns = [str(c).upper() for c in e.columns]
+        e = _ensure_single_secid(e)
+
         keep = [c for c in ["SECID", "EMITTER_ID", "INN", "TITLE", "SHORT_TITLE", "OGRN", "OKPO"] if c in e.columns]
         if keep:
             out = out.merge(e[keep].drop_duplicates(), on="SECID", how="left")
 
-    next_offer = {}
+    next_offer: Dict[str, str] = {}
     if offers_df is not None and not offers_df.empty:
         df = offers_df.copy()
         df.columns = [str(c).upper() for c in df.columns]
+        df = _ensure_single_secid(df)
+
         date_col = "OFFERDATE" if "OFFERDATE" in df.columns else ("DATE" if "DATE" in df.columns else None)
         if "SECID" in df.columns and date_col:
             df["_DT"] = df[date_col].apply(_parse_date_safe)
-            now = pd.Timestamp.utcnow()
+            now = pd.Timestamp.now(tz="UTC")
             df = df[df["_DT"].notna()]
             for secid, g in df.groupby("SECID"):
                 future = g[g["_DT"] >= now].sort_values("_DT")
                 pick = future.iloc[0] if len(future) else g.sort_values("_DT").iloc[-1]
                 next_offer[str(secid)] = pick["_DT"].date().isoformat()
 
-    next_coupon = {}
+    next_coupon: Dict[str, str] = {}
     if coupons_df is not None and not coupons_df.empty:
         df = coupons_df.copy()
         df.columns = [str(c).upper() for c in df.columns]
+        df = _ensure_single_secid(df)
+
         date_col = "COUPONDATE" if "COUPONDATE" in df.columns else ("DATE" if "DATE" in df.columns else None)
         if "SECID" in df.columns and date_col:
             df["_DT"] = df[date_col].apply(_parse_date_safe)
-            now = pd.Timestamp.utcnow()
+            now = pd.Timestamp.now(tz="UTC")
             df = df[df["_DT"].notna()]
             for secid, g in df.groupby("SECID"):
                 future = g[g["_DT"] >= now].sort_values("_DT")
@@ -569,13 +625,25 @@ def build_summary(sample_bonds: pd.DataFrame, emitents_df: pd.DataFrame, offers_
         out["NEXT_COUPON_DATE"] = out["SECID"].astype(str).map(next_coupon)
 
     preferred = [
-        "SECID", "ISIN", "REGNUMBER", "SHORTNAME", "NAME",
-        "EMITTER_ID", "INN", "TITLE",
-        "ISSUEDATE", "MATDATE",
-        "FACEVALUE", "FACEUNIT",
-        "COUPONPERCENT", "COUPONVALUE", "COUPONPERIOD",
-        "NEXT_OFFER_DATE", "NEXT_COUPON_DATE",
-        "LISTLEVEL", "PRIMARY_BOARDID",
+        "SECID",
+        "ISIN",
+        "REGNUMBER",
+        "SHORTNAME",
+        "NAME",
+        "EMITTER_ID",
+        "INN",
+        "TITLE",
+        "ISSUEDATE",
+        "MATDATE",
+        "FACEVALUE",
+        "FACEUNIT",
+        "COUPONPERCENT",
+        "COUPONVALUE",
+        "COUPONPERIOD",
+        "NEXT_OFFER_DATE",
+        "NEXT_COUPON_DATE",
+        "LISTLEVEL",
+        "PRIMARY_BOARDID",
     ]
     cols = [c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]
     return out[cols]
@@ -643,10 +711,6 @@ def save_excel_detail(
     )
 
 
-# ---------------------------
-# CLI
-# ---------------------------
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="MOEX ISS bonds + detail + SQLite cache")
     p.add_argument("--sample-size", type=int, default=10, help="How many random bonds to sample for detail")
@@ -657,7 +721,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--retries", type=int, default=5, help="HTTP retries for 429/5xx")
     p.add_argument("--backoff", type=float, default=0.8, help="Backoff base seconds")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    # если boardgroup у тебя отличается — можно переопределить
     p.add_argument("--boardgroup", type=int, default=58, help="MOEX bonds boardgroup id for list endpoint")
     return p.parse_args()
 
@@ -667,8 +730,21 @@ def main():
 
     lp = ensure_logs_dir("logs")
     import logging
-    logger = setup_logger("Moex_API", lp.logfile, level=getattr(logging, args.log_level), clear=True, also_console=True)
-    cache_logger = setup_logger("SQLiteCache", lp.logfile, level=getattr(logging, args.log_level), clear=False, also_console=False)
+
+    logger = setup_logger(
+        "Moex_API",
+        lp.logfile,
+        level=getattr(logging, args.log_level),
+        clear=True,
+        also_console=True,
+    )
+    cache_logger = setup_logger(
+        "SQLiteCache",
+        lp.logfile,
+        level=getattr(logging, args.log_level),
+        clear=False,
+        also_console=False,
+    )
 
     start_utc = _utc_iso()
     logger.info(f"START | utc={start_utc} | log={lp.logfile.resolve()}")
@@ -679,12 +755,9 @@ def main():
     t0 = time.perf_counter()
     try:
         with Timer(logger, "total"):
-            # 1) bonds list (daily cache)
             bonds = get_bonds_list_daily(cache, client, logger, force_refresh=args.force_refresh_bonds)
-            # сохраняем общий excel
             save_excel_bonds_list(bonds, "Moex_Bonds.xlsx", logger)
 
-            # 2) sample N random
             df_bonds = pd.DataFrame(bonds)
             if df_bonds.empty or "SECID" not in df_bonds.columns:
                 logger.warning("No bonds fetched or missing SECID, stop.")
@@ -699,12 +772,13 @@ def main():
 
             rnd = random.Random(int(args.seed))
             sample_secids = rnd.sample(secids, k)
-            logger.info(f"DETAIL sample | k={k} | seed={args.seed} | force_refresh_detail={args.force_refresh_detail}")
+            logger.info(
+                f"DETAIL sample | k={k} | seed={args.seed} | force_refresh_detail={args.force_refresh_detail}"
+            )
 
             sample_df = df_bonds[df_bonds["SECID"].astype(str).isin(sample_secids)].copy()
             sample_df = sample_df.sort_values("SECID").reset_index(drop=True)
 
-            # 3) fetch details + emitents
             desc_rows = []
             ev_rows = []
             cp_rows = []
@@ -736,7 +810,6 @@ def main():
                             x["SECID"] = secid
                             sink.append(x)
 
-                    # emitent
                     emitter_id = None
                     try:
                         r = sample_df[sample_df["SECID"].astype(str) == str(secid)].iloc[0].to_dict()
@@ -752,7 +825,9 @@ def main():
                             emitter_id_int = None
 
                     if emitter_id_int:
-                        e = try_fetch_emitent(cache, client, logger, emitter_id_int, force_refresh=args.force_refresh_detail)
+                        e = try_fetch_emitent(
+                            cache, client, logger, emitter_id_int, force_refresh=args.force_refresh_detail
+                        )
                         if e:
                             em_rows.append(
                                 {
@@ -771,7 +846,6 @@ def main():
                     else:
                         em_rows.append({"SECID": secid, "EMITTER_ID": None})
 
-            # requests summary
             summ = cache.requests_summary(start_utc)
             logger.info(f"REQUESTS summary since start | total={summ['total']} | errors={summ['errors']}")
 
@@ -786,7 +860,7 @@ def main():
                 cols = list(desc_df.columns)
                 if "SECID" in cols:
                     cols = ["SECID"] + [c for c in cols if c != "SECID"]
-                    desc_df = desc_df[cols]
+                desc_df = desc_df[cols]
 
             save_excel_detail(
                 bonds_sample=sample_df,

@@ -1,5 +1,43 @@
-2026-02-13 09:00:43 | INFO    | Moex_API | START | utc=2026-02-13T06:00:43+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
-2026-02-13 09:00:43 | INFO    | SQLiteCache | SQLiteCache initialized
-2026-02-13 09:00:43 | INFO    | Moex_API | TIMER START | total
-2026-02-13 09:00:43 | INFO    | Moex_API | TIMER END | total | elapsed=0.001s
-2026-02-13 09:00:43 | INFO    | SQLiteCache | SQLiteCache closed
+2026-02-13 09:50:27 | INFO    | Moex_API | START | utc=2026-02-13T06:50:27+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
+2026-02-13 09:50:27 | INFO    | SQLiteCache | SQLiteCache initialized | db=moex_cache.sqlite
+2026-02-13 09:50:27 | INFO    | Moex_API | TIMER START | total
+2026-02-13 09:50:27 | INFO    | Moex_API | CACHE HIT | bonds_list | date=2026-02-13 | rows=2950
+2026-02-13 09:50:28 | INFO    | Moex_API | Excel saved: Moex_Bonds.xlsx | rows=2950
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL sample | k=10 | seed=42 | force_refresh_detail=False
+2026-02-13 09:50:28 | INFO    | Moex_API | TIMER START | detail_fetch
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 1/10 | RU000A10D9M6
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A10D9M6 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A10D9M6 | date=2026-02-13 | bytes=11183
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 2/10 | RU000A102SM7
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A102SM7 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A102SM7 | date=2026-02-13 | bytes=14343
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 3/10 | RU000A0JX2B5
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A0JX2B5 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A0JX2B5 | date=2026-02-13 | bytes=5733
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 4/10 | RU000A107AS1
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A107AS1 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A107AS1 | date=2026-02-13 | bytes=1291
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 5/10 | RU000A106RT5
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A106RT5 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A106RT5 | date=2026-02-13 | bytes=4490
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 6/10 | RU000A106AQ7
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A106AQ7 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A106AQ7 | date=2026-02-13 | bytes=1317
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 7/10 | RU000A103PX8
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A103PX8 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A103PX8 | date=2026-02-13 | bytes=4755
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 8/10 | RU000A102G35
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A102G35 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A102G35 | date=2026-02-13 | bytes=6941
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 9/10 | RU000A10DXM9
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A10DXM9 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A10DXM9 | date=2026-02-13 | bytes=6814
+2026-02-13 09:50:28 | INFO    | Moex_API | DETAIL 10/10 | RU000A10BWV6
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | description | RU000A10BWV6 | date=2026-02-13
+2026-02-13 09:50:28 | INFO    | Moex_API | TTL HIT | bondization | RU000A10BWV6 | date=2026-02-13 | bytes=805
+2026-02-13 09:50:28 | INFO    | Moex_API | TIMER END | detail_fetch | elapsed=0.143s
+2026-02-13 09:50:28 | INFO    | Moex_API | REQUESTS summary since start | total=0 | errors=0
+2026-02-13 09:50:29 | INFO    | Moex_API | Detail Excel saved: Moex_Bonds_Detail.xlsx | summary=10 | pivot=10 | desc=367 | events=0 | coupons=274 | offers=0 | amort=26 | emitents=10
+2026-02-13 09:50:29 | INFO    | Moex_API | TIMER END | total | elapsed=2.566s
+2026-02-13 09:50:29 | INFO    | SQLiteCache | SQLiteCache closed
+2026-02-13 09:50:29 | INFO    | Moex_API | FINISH | elapsed=2.575s
