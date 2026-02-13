@@ -82,6 +82,23 @@ def get_cached_data(target_date: str) -> str:
     return row[0]
 
 
+def get_latest_cached_data() -> tuple[str, str]:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        row = connection.execute(
+            """
+            SELECT fetch_date, csv_data
+            FROM bonds_cache
+            ORDER BY fetch_date DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    if row is None:
+        raise CacheMissError("No cached data found")
+
+    return row[0], row[1]
+
+
 def save_to_cache(target_date: str, csv_data: str) -> None:
     with sqlite3.connect(CACHE_DB_PATH) as connection:
         connection.execute(
@@ -128,9 +145,26 @@ def main() -> int:
         except CacheMissError:
             data_source = "network"
             logger.info("Cache miss for %s. Fetching from MOEX...", today)
-            csv_data = fetch_moex_csv()
-            save_to_cache(today, csv_data)
-            logger.info("Data fetched and cached")
+            try:
+                csv_data = fetch_moex_csv()
+                save_to_cache(today, csv_data)
+                logger.info("Data fetched and cached")
+            except requests.RequestException as error:
+                try:
+                    cached_date, csv_data = get_latest_cached_data()
+                except CacheMissError:
+                    elapsed = time.perf_counter() - start_time
+                    logger.error("MOEX is unavailable (%s) and cache is empty", error)
+                    logger.info("Execution time before failure: %.3f seconds", elapsed)
+                    print("MOEX_API failed: MOEX unavailable and cache is empty")
+                    return 1
+
+                data_source = f"cache_fallback:{cached_date}"
+                logger.warning(
+                    "MOEX is unavailable (%s). Falling back to cached data from %s",
+                    error,
+                    cached_date,
+                )
 
         persist_raw_response(csv_data)
         row_count = save_excel(csv_data)
@@ -140,14 +174,16 @@ def main() -> int:
         logger.info("Saved %s rows to %s", row_count, EXCEL_PATH)
         logger.info("Raw response saved to %s", RAW_RESPONSE_PATH)
         logger.info("Execution time: %.3f seconds", elapsed)
+        print("MOEX_API completed successfully")
         return 0
 
     except Exception as error:
         elapsed = time.perf_counter() - start_time
-        logger.exception("Script failed: %s", error)
+        logger.error("Script failed: %s", error)
         logger.info("Execution time before failure: %.3f seconds", elapsed)
+        print(f"MOEX_API failed: {error}")
         return 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
