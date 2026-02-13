@@ -1,114 +1,119 @@
-# -*- coding: utf-8 -*-
+# logs.py
 from __future__ import annotations
 
-import json
 import logging
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 
-@dataclass
-class RunTimer:
-    """Контекстный таймер для измерения времени выполнения блоков."""
-    name: str = "run"
-    logger: Optional[logging.Logger] = None
-    t0: float = 0.0
-    elapsed: float = 0.0
+@dataclass(frozen=True)
+class LogPaths:
+    logs_dir: Path
+    logfile: Path
 
-    def __enter__(self) -> "RunTimer":
-        self.t0 = time.perf_counter()
-        if self.logger:
-            self.logger.info("TIMER START | %s", self.name)
-        return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.elapsed = time.perf_counter() - self.t0
-        if self.logger:
-            self.logger.info("TIMER END   | %s | elapsed=%.3fs", self.name, self.elapsed)
+def ensure_logs_dir(logs_dir: str | Path = "logs") -> LogPaths:
+    logs_path = Path(logs_dir)
+    logs_path.mkdir(parents=True, exist_ok=True)
+    logfile = logs_path / "Moex_API.log"
+    return LogPaths(logs_dir=logs_path, logfile=logfile)
+
+
+def clear_log_file(logfile: str | Path) -> None:
+    p = Path(logfile)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # newline="\n" важно, чтобы не было CR-only
+    with p.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("")
+
+
+class SafeFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        try:
+            return super().format(record)
+        except Exception:
+            return f"{record.levelname} {record.name}: {record.getMessage()}"
+
+
+def setup_logger(
+    name: str,
+    log_file: str | Path = "logs/Moex_API.log",
+    level: int = logging.INFO,
+    clear: bool = True,
+    also_console: bool = True,
+) -> logging.Logger:
+    """
+    Единая точка настройки логов.
+    Важно: terminator = "\\n" на обоих handler'ах, чтобы GitHub не склеивал в 1 строку.
+    """
+    log_file = Path(log_file)
+    if clear:
+        clear_log_file(log_file)
+
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.propagate = False
+
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+
+    fmt = SafeFormatter(
+        fmt="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    fh = RotatingFileHandler(
+        log_file,
+        mode="a",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+        delay=False,
+    )
+    fh.setLevel(level)
+    fh.setFormatter(fmt)
+    try:
+        fh.terminator = "\n"
+    except Exception:
+        pass
+    logger.addHandler(fh)
+
+    if also_console:
+        ch = logging.StreamHandler(stream=sys.stdout)
+        ch.setLevel(level)
+        ch.setFormatter(fmt)
+        try:
+            ch.terminator = "\n"
+        except Exception:
+            pass
+        logger.addHandler(ch)
+
+    return logger
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def utc_today_str() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+class Timer:
+    def __init__(self, logger: logging.Logger, label: str):
+        self.logger = logger
+        self.label = label
+        self._t0: Optional[float] = None
 
+    def __enter__(self):
+        import time
+        self._t0 = time.perf_counter()
+        self.logger.info(f"TIMER START | {self.label}")
+        return self
 
-def setup_logging(
-    log_dir: str | Path = "logs",
-    log_file: str = "Moex_API.log",
-    level: str = "INFO",
-    clear_previous: bool = True,
-    also_console: bool = True,
-) -> Path:
-    """
-    Настраивает логирование.
-    Важно: выставляем terminator="\\n", чтобы GitHub/Windows не склеивали лог в 1 строку.
-    """
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / log_file
-
-    if clear_previous and log_path.exists():
-        log_path.unlink()
-
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
-    fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
-
-    root = logging.getLogger()
-    root.setLevel(numeric_level)
-
-    # очистим старые хендлеры (актуально при перезапуске в одной сессии)
-    root.handlers.clear()
-
-    file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
-    file_handler.setFormatter(fmt)
-    file_handler.terminator = "\n"
-    root.addHandler(file_handler)
-
-    if also_console:
-        console = logging.StreamHandler(sys.stdout)
-        console.setFormatter(fmt)
-        console.terminator = "\n"
-        root.addHandler(console)
-
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    return log_path
-
-
-def safe_filename(s: str) -> str:
-    keep = []
-    for ch in s:
-        if ch.isalnum() or ch in ("-", "_", "."):
-            keep.append(ch)
-        else:
-            keep.append("_")
-    return "".join(keep)
-
-
-def dump_json(
-    payload: Dict[str, Any],
-    out_dir: str | Path,
-    tag: str,
-    logger: Optional[logging.Logger] = None,
-) -> Path:
-    """Разово сохраняет JSON на диск (удобно для RAW дебага)."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = safe_filename(f"{ts}_{tag}.json")
-    p = out_dir / fname
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    if logger:
-        logger.debug("RAW saved: %s", p.resolve())
-    return p
-
-
-def json_dumps_compact(obj: Any) -> str:
-    """Компактный JSON для логов/SQLite."""
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    def __exit__(self, exc_type, exc, tb):
+        import time
+        if self._t0 is None:
+            return
+        elapsed = time.perf_counter() - self._t0
+        self.logger.info(f"TIMER END | {self.label} | elapsed={elapsed:.3f}s")

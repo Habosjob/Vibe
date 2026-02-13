@@ -1,22 +1,5 @@
-2026-02-12 19:30:04,707 | INFO    | Moex_API | START | utc=2026-02-12T16:30:04+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
-2026-02-12 19:30:04,711 | INFO    | SQLiteCache | DB migration: 2 -> 3
-2026-02-12 19:30:04,732 | INFO    | Moex_API | TIMER START | total
-2026-02-12 19:30:04,735 | INFO    | Moex_API | CACHE HIT | date=2026-02-12 | rows=3040 | created_utc=2026-02-12T15:45:49+00:00
-2026-02-12 19:30:07,395 | INFO    | Moex_API | Excel saved: C:\Users\user\Documents\Инвестиции\Vibe\Moex_Bonds.xlsx | rows=3040
-2026-02-12 19:30:07,405 | INFO    | Moex_API | DETAIL sample | k=10 | seed=42
-2026-02-12 19:30:07,405 | INFO    | Moex_API | TIMER START | detail_fetch
-2026-02-12 19:30:07,409 | INFO    | Moex_API | DETAIL 1/10 | RU000A10D3U2
-2026-02-12 19:30:07,915 | INFO    | Moex_API | DETAIL 2/10 | RU000A102RE6
-2026-02-12 19:30:08,011 | INFO    | Moex_API | DETAIL 3/10 | RU000A0JX2B5
-2026-02-12 19:30:08,115 | INFO    | Moex_API | DETAIL 4/10 | RU000A1077U6
-2026-02-12 19:30:08,210 | INFO    | Moex_API | DETAIL 5/10 | RU000A106P06
-2026-02-12 19:30:08,318 | INFO    | Moex_API | DETAIL 6/10 | RU000A106946
-2026-02-12 19:30:08,415 | INFO    | Moex_API | DETAIL 7/10 | RU000A103P33
-2026-02-12 19:30:08,499 | INFO    | Moex_API | DETAIL 8/10 | RU000A102FS1
-2026-02-12 19:30:08,622 | INFO    | Moex_API | DETAIL 9/10 | RU000A10DQK7
-2026-02-12 19:30:08,719 | INFO    | Moex_API | DETAIL 10/10 | RU000A10BT34
-2026-02-12 19:30:08,799 | INFO    | Moex_API | TIMER END   | detail_fetch | elapsed=1.406s
-2026-02-12 19:30:08,847 | INFO    | Moex_API | REQUESTS summary since start | total=20 | errors=0
-2026-02-12 19:30:09,908 | INFO    | Moex_API | Detail Excel saved: C:\Users\user\Documents\Инвестиции\Vibe\Moex_Bonds_Detail.xlsx | desc=373 | events=540 | coupons=135 | offers=6 | amort=22
-2026-02-12 19:30:09,908 | INFO    | Moex_API | TIMER END   | total | elapsed=5.189s
-2026-02-12 19:30:09,908 | INFO    | Moex_API | FINISH | elapsed=5.189s
+2026-02-13 09:00:43 | INFO    | Moex_API | START | utc=2026-02-13T06:00:43+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
+2026-02-13 09:00:43 | INFO    | SQLiteCache | SQLiteCache initialized
+2026-02-13 09:00:43 | INFO    | Moex_API | TIMER START | total
+2026-02-13 09:00:43 | INFO    | Moex_API | TIMER END | total | elapsed=0.001s
+2026-02-13 09:00:43 | INFO    | SQLiteCache | SQLiteCache closed
