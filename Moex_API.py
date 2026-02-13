@@ -274,8 +274,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--detail-all", action="store_true", help="Process ALL bonds (uses checkpoint/progress)")
     p.add_argument("--run-id", default=None, help="Run identifier for detail_progress (default: YYYY-MM-DD)")
     p.add_argument("--checkpoint-every", type=int, default=50, help="Log/save checkpoint each N processed secids")
-    p.add_argument("--error-retries", type=int, default=2, help=\"Max auto-retries for secids with status=error in detail_progress\")
-    p.add_argument("--error-retry-delay", type=int, default=60, help=\"Retry delay (seconds) before re-processing status=error\")
+    p.add_argument("--error-retries", type=int, default=2, help="Max auto-retries for secids with status=error in detail_progress")
+    p.add_argument("--error-retry-delay", type=int, default=60, help="Retry delay (seconds) before re-processing status=error")
 
     # static
     p.add_argument("--static-size", type=int, default=10, help="How many static bonds to always include")
@@ -473,6 +473,19 @@ def build_detail_excel_from_cache(
     pivot_df = build_pivot_description(description_df, emitents_df)
     summary_df = build_summary(sample_df, emitents_df)
 
+    def _to_excel_chunked(writer, df: pd.DataFrame, base_name: str, max_rows: int = 900_000) -> None:
+        """Write big DataFrames into multiple sheets to avoid Excel row limits."""
+        if df is None:
+            return
+        if len(df) <= max_rows:
+            df.to_excel(writer, index=False, sheet_name=base_name)
+            return
+        parts = (len(df) + max_rows - 1) // max_rows
+        for i in range(parts):
+            chunk = df.iloc[i * max_rows : (i + 1) * max_rows]
+            name = f"{base_name}_{i+1}"
+            chunk.to_excel(writer, index=False, sheet_name=name)
+
     out_path = str(Path(out_path))
     with pd.ExcelWriter(out_path, engine="openpyxl", mode="w") as w:
         meta = pd.DataFrame(
@@ -492,21 +505,52 @@ def build_detail_excel_from_cache(
             ]
         )
         meta.to_excel(w, index=False, sheet_name="meta")
-        summary_df.to_excel(w, index=False, sheet_name="summary")
-        sample_df.to_excel(w, index=False, sheet_name="sample_bonds")
-        emitents_df.to_excel(w, index=False, sheet_name="emitents")
-        pivot_df.to_excel(w, index=False, sheet_name="pivot_description")
-        description_df.to_excel(w, index=False, sheet_name="description")
-        events_df.to_excel(w, index=False, sheet_name="events")
-        coupons_df.to_excel(w, index=False, sheet_name="coupons")
-        offers_df.to_excel(w, index=False, sheet_name="offers")
-        amort_df.to_excel(w, index=False, sheet_name="amortizations")
+        _to_excel_chunked(w, summary_df, "summary")
+        _to_excel_chunked(w, sample_df, "sample_bonds")
+        _to_excel_chunked(w, emitents_df, "emitents")
+        _to_excel_chunked(w, pivot_df, "pivot_description")
+        _to_excel_chunked(w, description_df, "description")
+        _to_excel_chunked(w, events_df, "events")
+        _to_excel_chunked(w, coupons_df, "coupons")
+        _to_excel_chunked(w, offers_df, "offers")
+        _to_excel_chunked(w, amort_df, "amortizations")
 
     logger.info(
         f"Detail Excel saved: {out_path} | secids={len(secids)} | "
         f"desc={len(description_df)} | events={len(events_df)} | coupons={len(coupons_df)} | "
         f"offers={len(offers_df)} | amort={len(amort_df)} | emitents={len(emitents_df)} | pivot={len(pivot_df)}"
     )
+
+
+
+def dump_parse_errors(cache: SQLCache, logger: logging.Logger, out_csv: str = "Parse_Errors.csv", limit: int = 5000) -> None:
+    """Dump parse_errors table to a CSV so you can inspect it without a DB browser."""
+    try:
+        cur = cache._execute(
+            """
+            SELECT url, content_type, snippet, created_utc
+            FROM parse_errors
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            logger.info("parse_errors dump | no rows")
+            return
+
+        # UTF-8 with BOM so Excel on Windows opens it correctly
+        import csv as _csv
+        with open(out_csv, "w", encoding="utf-8-sig", newline="") as f:
+            w = _csv.writer(f, delimiter=";")
+            w.writerow(["url", "content_type", "snippet", "created_utc"])
+            for r in rows:
+                w.writerow([r["url"], r.get("content_type") or "", r.get("snippet") or "", r.get("created_utc") or ""])
+
+        logger.info(f"parse_errors dump | rows={len(rows)} | file={out_csv}")
+    except Exception as e:
+        logger.warning(f"parse_errors dump failed | err={e}")
 
 
 def main():
@@ -654,6 +698,9 @@ def main():
             logger.info(f"REQUESTS summary since start | total={summ['total']} | errors={summ['errors']}")
 
     finally:
+        # dump parse diagnostics for easy viewing
+        dump_parse_errors(cache, logger)
+
         cache.close()
         logger.info("FINISH")
 

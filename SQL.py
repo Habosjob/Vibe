@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import gzip
 import sqlite3
 import threading
 import time
@@ -157,6 +158,8 @@ class SQLiteCache:
                 elapsed_ms INTEGER,
                 size_bytes INTEGER,
                 response_text TEXT,
+            response_gzip BLOB,
+            response_is_gzip INTEGER NOT NULL DEFAULT 0,
                 created_utc TEXT NOT NULL
             )
             """
@@ -360,6 +363,8 @@ class SQLiteCache:
                 elapsed_ms INTEGER,
                 size_bytes INTEGER,
                 response_text TEXT,
+            response_gzip BLOB,
+            response_is_gzip INTEGER NOT NULL DEFAULT 0,
                 created_utc TEXT NOT NULL
             )
             """
@@ -502,30 +507,51 @@ class SQLiteCache:
             (secid, kind, asof_date),
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            if d.get('response_is_gzip') == 1 and d.get('response_gzip') and not d.get('response_text'):
+                d['response_text'] = gzip.decompress(d['response_gzip']).decode('utf-8', errors='replace')
+        except Exception:
+            # keep as-is
+            pass
+        return d
 
-    def set_bond_raw(
+    def set_bond_raw\(
         self,
-        *,
+        \*,
         secid: str,
         kind: str,
         asof_date: str,
         url: str,
-        params: Optional[dict],
-        status: Optional[int],
-        elapsed_ms: Optional[int],
-        size_bytes: Optional[int],
-        response_text: Optional[str],
-    ) -> int:
+        params: Optional\[dict\],
+        status: Optional\[int\],
+        elapsed_ms: Optional\[int\],
+        size_bytes: Optional\[int\],
+        response_text: Optional\[str\],
+    \) -> int:
+        # auto-gzip big payloads to keep SQLite small
+        response_gzip = None
+        response_is_gzip = 0
+        if response_text is not None and len(response_text) > 200_000:
+            try:
+                response_gzip = gzip.compress(response_text.encode('utf-8'))
+                response_text = None
+                response_is_gzip = 1
+            except Exception:
+                response_gzip = None
+                response_is_gzip = 0
         cur = self._execute(
             """
             INSERT INTO bond_raw(
                 secid, kind, asof_date,
                 url, params_json, status,
                 elapsed_ms, size_bytes, response_text,
+                response_gzip, response_is_gzip,
                 created_utc
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 secid,
@@ -537,6 +563,8 @@ class SQLiteCache:
                 elapsed_ms,
                 size_bytes,
                 response_text,
+                response_gzip,
+                response_is_gzip,
                 utc_iso(),
             ),
             commit=True,
