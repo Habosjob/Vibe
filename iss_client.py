@@ -10,7 +10,7 @@ from typing import Optional
 
 import requests
 
-from SQL import SQLiteCache, RequestLogRow
+from SQL import SQLiteCache, RequestLogRow, utc_iso
 
 
 @dataclass
@@ -60,8 +60,6 @@ class IssClient:
         self.max_retries = max_retries
         self.backoff_base = backoff_base
         self.rate_limiter = rate_limiter
-
-        # thread-local session (важно для ThreadPool)
         self._tls = threading.local()
 
     def _get_session(self) -> requests.Session:
@@ -70,7 +68,7 @@ class IssClient:
             s = requests.Session()
             s.headers.update(
                 {
-                    "User-Agent": "Vibe-MOEX-ISS/1.4",
+                    "User-Agent": "Vibe-MOEX-ISS/1.6",
                     "Accept": "application/json,text/plain,*/*",
                 }
             )
@@ -121,7 +119,7 @@ class IssClient:
                         status=status,
                         elapsed_ms=elapsed_ms,
                         size_bytes=size_bytes,
-                        created_utc=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                        created_utc=utc_iso(),
                         error=None,
                     )
                 )
@@ -155,7 +153,7 @@ class IssClient:
                         status=None,
                         elapsed_ms=elapsed_ms,
                         size_bytes=0,
-                        created_utc=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                        created_utc=utc_iso(),
                         error=last_err,
                     )
                 )

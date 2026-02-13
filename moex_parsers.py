@@ -92,18 +92,3 @@ def description_to_kv(description_df: pd.DataFrame) -> Dict[str, str]:
             continue
         out[k.upper()] = vs
     return out
-
-
-def parse_date_utc_safe(x: Any) -> Optional[pd.Timestamp]:
-    if x is None:
-        return None
-    s = str(x).strip()
-    if not s or s.lower() in ("nan", "none"):
-        return None
-    try:
-        ts = pd.to_datetime(s, errors="coerce", utc=True)
-        if pd.isna(ts):
-            return None
-        return ts
-    except Exception:
-        return None

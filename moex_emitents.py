@@ -1,7 +1,6 @@
 # moex_emitents.py
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 
@@ -9,11 +8,7 @@ import pandas as pd
 
 from SQL import SQLiteCache
 from iss_client import IssClient
-from moex_parsers import (
-    parse_iss_json_tables_safe,
-    pick_first,
-    description_to_kv,
-)
+from moex_parsers import parse_iss_json_tables_safe, pick_first, description_to_kv
 
 
 def _utc_now() -> datetime:
@@ -75,51 +70,42 @@ def try_fetch_emitent(
         )
 
     # /emitents/{id}.json
-    params = {"iss.meta": "off", "lang": "ru"}
-    res = client.get(f"/emitents/{emitter_id}.json", params=params)
+    res = client.get(f"/emitents/{emitter_id}.json", params={"iss.meta": "off", "lang": "ru"})
     if res.status == 200 and res.text:
         ct = (res.headers or {}).get("Content-Type", "")
         tables = parse_iss_json_tables_safe(res.text, logger=logger, url=res.url, content_type=ct, snippet_chars=snippet_chars)
         for _, df in tables.items():
             if df is None or df.empty:
                 continue
-            row = df.iloc[0].to_dict()
-            upsert_from_row(row, res.text)
+            upsert_from_row(df.iloc[0].to_dict(), res.text)
             got = cache.get_emitent(emitter_id)
             if got and (got.get("inn") or got.get("title")):
                 return got
 
-    logger.warning(f"emitent incomplete/failed | emitter_id={emitter_id} | status={res.status} | err={res.error}")
-
     # fallback from securities description
     if secid_hint:
-        try:
-            # дергаем description напрямую тут через /securities/{secid}.json
-            r2 = client.get(f"/securities/{secid_hint}.json", params={"iss.meta": "off", "lang": "ru"})
-            if r2.status == 200 and r2.text:
-                ct = (r2.headers or {}).get("Content-Type", "")
-                tables = parse_iss_json_tables_safe(r2.text, logger=logger, url=r2.url, content_type=ct, snippet_chars=snippet_chars)
-                desc = tables.get("description", pd.DataFrame())
-                kv = description_to_kv(desc)
-                row2: Dict[str, Any] = {
-                    "INN": pick_first(kv, ["ИНН", "INN", "EMITENT_INN", "EMITTER_INN"]),
-                    "TITLE": pick_first(kv, ["ЭМИТЕНТ", "EMITENT", "EMITTER", "FULLNAME", "FULL_NAME", "NAME"]),
-                    "SHORT_TITLE": pick_first(kv, ["КРАТКОЕ НАИМЕНОВАНИЕ", "SHORTNAME", "SHORT_NAME"]),
-                    "OGRN": pick_first(kv, ["ОГРН", "OGRN"]),
-                    "OKPO": pick_first(kv, ["ОКПО", "OKPO"]),
-                    "KPP": pick_first(kv, ["КПП", "KPP"]),
-                    "OKVED": pick_first(kv, ["ОКВЭД", "OKVED"]),
-                    "ADDRESS": pick_first(kv, ["АДРЕС", "ADDRESS", "LEGAL_ADDRESS"]),
-                    "PHONE": pick_first(kv, ["ТЕЛЕФОН", "PHONE"]),
-                    "SITE": pick_first(kv, ["САЙТ", "SITE", "WWW", "URL"]),
-                    "EMAIL": pick_first(kv, ["EMAIL", "E-MAIL", "ПОЧТА"]),
-                }
-                upsert_from_row(row2, raw_json=None)
-                got = cache.get_emitent(emitter_id)
-                if got and (got.get("inn") or got.get("title")):
-                    logger.info(f"emitent fallback success from description | emitter_id={emitter_id} | secid={secid_hint}")
-                    return got
-        except Exception as e:
-            logger.warning(f"emitent fallback failed | emitter_id={emitter_id} | secid={secid_hint} | err={e}")
+        r2 = client.get(f"/securities/{secid_hint}.json", params={"iss.meta": "off", "lang": "ru"})
+        if r2.status == 200 and r2.text:
+            ct2 = (r2.headers or {}).get("Content-Type", "")
+            tables2 = parse_iss_json_tables_safe(r2.text, logger=logger, url=r2.url, content_type=ct2, snippet_chars=snippet_chars)
+            desc = tables2.get("description", pd.DataFrame())
+            kv = description_to_kv(desc)
+            row2: Dict[str, Any] = {
+                "INN": pick_first(kv, ["ИНН", "INN", "EMITENT_INN", "EMITTER_INN"]),
+                "TITLE": pick_first(kv, ["ЭМИТЕНТ", "EMITENT", "EMITTER", "FULLNAME", "FULL_NAME", "NAME"]),
+                "SHORT_TITLE": pick_first(kv, ["КРАТКОЕ НАИМЕНОВАНИЕ", "SHORTNAME", "SHORT_NAME"]),
+                "OGRN": pick_first(kv, ["ОГРН", "OGRN"]),
+                "OKPO": pick_first(kv, ["ОКПО", "OKPO"]),
+                "KPP": pick_first(kv, ["КПП", "KPP"]),
+                "OKVED": pick_first(kv, ["ОКВЭД", "OKVED"]),
+                "ADDRESS": pick_first(kv, ["АДРЕС", "ADDRESS", "LEGAL_ADDRESS"]),
+                "PHONE": pick_first(kv, ["ТЕЛЕФОН", "PHONE"]),
+                "SITE": pick_first(kv, ["САЙТ", "SITE", "WWW", "URL"]),
+                "EMAIL": pick_first(kv, ["EMAIL", "E-MAIL", "ПОЧТА"]),
+            }
+            upsert_from_row(row2, raw_json=None)
+            got = cache.get_emitent(emitter_id)
+            if got and (got.get("inn") or got.get("title")):
+                return got
 
     return cache.get_emitent(emitter_id)

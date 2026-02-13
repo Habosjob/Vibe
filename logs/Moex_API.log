@@ -1,23 +1,15 @@
-2026-02-13 14:17:03 | INFO    | Moex_API | START | utc=2026-02-13T11:17:03+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
-2026-02-13 14:17:03 | INFO    | SQLiteCache | SQLiteCache initialized | db=moex_cache.sqlite
-2026-02-13 14:17:03 | INFO    | Moex_API | TIMER START | total
-2026-02-13 14:17:03 | INFO    | Moex_API | CACHE HIT | bonds_list | date=2026-02-13 | rows=2950
-2026-02-13 14:17:05 | INFO    | Moex_API | Excel saved: Moex_Bonds.xlsx | rows=2950
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL sample | k=10 | seed=42 | force_refresh_detail=False | workers=8 | rps=8.0 | emitent_ttl_days=90
-2026-02-13 14:17:05 | INFO    | Moex_API | TIMER START | detail_fetch
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 1/10 | RU000A103PX8
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 2/10 | RU000A0JX2B5
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 3/10 | RU000A106RT5
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 4/10 | RU000A102G35
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 5/10 | RU000A107AS1
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 6/10 | RU000A10D9M6
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 7/10 | RU000A102SM7
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 8/10 | RU000A10DXM9
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 9/10 | RU000A106AQ7
-2026-02-13 14:17:05 | INFO    | Moex_API | DETAIL done 10/10 | RU000A10BWV6
-2026-02-13 14:17:05 | INFO    | Moex_API | TIMER END | detail_fetch | elapsed=0.145s
-2026-02-13 14:17:05 | INFO    | Moex_API | REQUESTS summary since start | total=0 | errors=0
-2026-02-13 14:17:06 | INFO    | Moex_API | Detail Excel saved: Moex_Bonds_Detail.xlsx | summary=10 | pivot=10 | desc=367 | events=0 | coupons=274 | offers=0 | amort=26 | emitents=10
-2026-02-13 14:17:06 | INFO    | Moex_API | TIMER END | total | elapsed=2.623s
-2026-02-13 14:17:06 | INFO    | SQLiteCache | SQLiteCache closed
-2026-02-13 14:17:06 | INFO    | Moex_API | FINISH | elapsed=2.634s
+2026-02-13 14:42:35 | INFO    | Moex_API | START | utc=2026-02-13T11:42:35+00:00 | log=C:\Users\user\Documents\Инвестиции\Vibe\logs\Moex_API.log
+2026-02-13 14:42:35 | INFO    | SQLiteCache | SQLiteCache initialized | db=moex_cache.sqlite
+2026-02-13 14:42:35 | INFO    | Moex_API | TIMER START | total
+2026-02-13 14:42:35 | INFO    | Moex_API | CACHE HIT | bonds_list | date=2026-02-13 | rows=2950
+2026-02-13 14:42:35 | INFO    | Moex_API | DETAIL plan | run_id=2026-02-13 | detail_all=False | secids=20 | static=10 | random=10
+2026-02-13 14:42:35 | INFO    | Moex_API | TIMER START | detail_collect
+2026-02-13 14:42:35 | INFO    | Moex_API | TIMER END | detail_collect | elapsed=0.001s
+2026-02-13 14:42:35 | INFO    | Moex_API | DETAIL progress done | run_id=2026-02-13 | {'pending': 0, 'done': 20, 'error': 0, 'total': 20}
+2026-02-13 14:42:35 | INFO    | Moex_API | TIMER START | excel_build
+2026-02-13 14:42:36 | INFO    | Moex_API | Detail Excel saved: Moex_Bonds_Detail.xlsx | secids=20 | desc=719 | events=0 | coupons=384 | offers=1 | amort=43 | emitents=0 | pivot=20
+2026-02-13 14:42:36 | INFO    | Moex_API | TIMER END | excel_build | elapsed=1.337s
+2026-02-13 14:42:36 | INFO    | Moex_API | REQUESTS summary since start | total=0 | errors=0
+2026-02-13 14:42:36 | INFO    | Moex_API | TIMER END | total | elapsed=1.386s
+2026-02-13 14:42:36 | INFO    | SQLiteCache | SQLiteCache closed
+2026-02-13 14:42:36 | INFO    | Moex_API | FINISH
