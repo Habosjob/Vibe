@@ -37,16 +37,23 @@ def parse_iss_json_tables_safe(
     url: str = "",
     content_type: str = "",
     snippet_chars: int = 800,
+    cache: Any = None,  # expects cache.log_parse_error(url, content_type, snippet)
 ) -> Dict[str, pd.DataFrame]:
     try:
         obj = json.loads(payload_text)
     except Exception as e:
+        snip = (payload_text or "")[: max(0, int(snippet_chars))]
         if logger:
-            snip = (payload_text or "")[: max(0, int(snippet_chars))]
             logger.warning(
                 f"ISS parse failed | err={e} | content_type={content_type!r} | url={url}\n"
                 f"ISS response snippet:\n{snip}"
             )
+        if cache is not None:
+            try:
+                cache.log_parse_error(url=url, content_type=content_type, snippet=snip)
+            except Exception:
+                # never break main flow due to diagnostics
+                pass
         return {}
 
     out: Dict[str, pd.DataFrame] = {}

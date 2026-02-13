@@ -68,7 +68,7 @@ class IssClient:
             s = requests.Session()
             s.headers.update(
                 {
-                    "User-Agent": "Vibe-MOEX-ISS/1.6",
+                    "User-Agent": "Vibe-MOEX-ISS/1.7",
                     "Accept": "application/json,text/plain,*/*",
                 }
             )
@@ -81,14 +81,28 @@ class IssClient:
             if ra:
                 try:
                     sec = float(ra)
-                    time.sleep(min(60.0, max(0.0, sec)))
+                    time.sleep(max(0.0, min(30.0, sec)))
                     return
                 except Exception:
                     pass
 
-        base = self.backoff_base * (2 ** (attempt - 1))
-        jitter = random.random() * 0.25 * base
+        # exponential backoff + jitter
+        base = float(self.backoff_base) * (2 ** max(0, attempt - 1))
+        jitter = random.uniform(0.0, 0.4)
         time.sleep(min(30.0, base + jitter))
+
+    @staticmethod
+    def _iss_payload_status_is_error(text: str) -> bool:
+        """MOEX ISS sometimes returns HTTP 200 with JSON like {'status':'error', ...}."""
+        if not text:
+            return False
+        try:
+            obj = json.loads(text)
+        except Exception:
+            return False
+        if isinstance(obj, dict) and str(obj.get("status") or "").lower() == "error":
+            return True
+        return False
 
     def get(self, path: str, params: dict | None = None) -> HttpResult:
         params = params or {}
@@ -112,6 +126,7 @@ class IssClient:
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
                 size_bytes = len((text or "").encode("utf-8", errors="ignore"))
 
+                # log request (always)
                 self.cache.log_request(
                     RequestLogRow(
                         url=str(resp.url),
@@ -123,6 +138,14 @@ class IssClient:
                         error=None,
                     )
                 )
+
+                # Retry when ISS returns application-level error with HTTP 200
+                if status == 200 and self._iss_payload_status_is_error(text) and attempt < self.max_retries:
+                    self.logger.warning(
+                        f"ISS payload status=error | retrying | attempt {attempt}/{self.max_retries} | {resp.url}"
+                    )
+                    self._sleep_for_retry(attempt, resp)
+                    continue
 
                 if status in retry_statuses and attempt < self.max_retries:
                     self.logger.warning(
@@ -146,35 +169,26 @@ class IssClient:
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
                 last_err = repr(e)
 
-                self.cache.log_request(
-                    RequestLogRow(
-                        url=url,
-                        params_json=json.dumps(params, ensure_ascii=False, sort_keys=True),
-                        status=None,
-                        elapsed_ms=elapsed_ms,
-                        size_bytes=0,
-                        created_utc=utc_iso(),
-                        error=last_err,
+                # log as error (best-effort)
+                try:
+                    self.cache.log_request(
+                        RequestLogRow(
+                            url=url,
+                            params_json=json.dumps(params, ensure_ascii=False, sort_keys=True),
+                            status=None,
+                            elapsed_ms=elapsed_ms,
+                            size_bytes=None,
+                            created_utc=utc_iso(),
+                            error=last_err,
+                        )
                     )
-                )
+                except Exception:
+                    pass
 
-                self.logger.warning(
-                    f"HTTP exception retryable | attempt {attempt}/{self.max_retries} | {url} | {last_err}"
-                )
                 if attempt < self.max_retries:
+                    self.logger.warning(f"HTTP exception retryable | attempt {attempt}/{self.max_retries} | {url} | err={last_err}")
                     self._sleep_for_retry(attempt, resp)
                     continue
-
-                return HttpResult(
-                    status=None,
-                    elapsed_ms=elapsed_ms,
-                    size_bytes=0,
-                    text=None,
-                    url=url,
-                    params=params,
-                    error=last_err,
-                    headers=None,
-                )
 
         return HttpResult(
             status=None,

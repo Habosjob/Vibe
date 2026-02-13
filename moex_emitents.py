@@ -73,7 +73,7 @@ def try_fetch_emitent(
     res = client.get(f"/emitents/{emitter_id}.json", params={"iss.meta": "off", "lang": "ru"})
     if res.status == 200 and res.text:
         ct = (res.headers or {}).get("Content-Type", "")
-        tables = parse_iss_json_tables_safe(res.text, logger=logger, url=res.url, content_type=ct, snippet_chars=snippet_chars)
+        tables = parse_iss_json_tables_safe(res.text, logger=logger, url=res.url, content_type=ct, snippet_chars=snippet_chars, cache=cache)
         for _, df in tables.items():
             if df is None or df.empty:
                 continue
@@ -87,7 +87,7 @@ def try_fetch_emitent(
         r2 = client.get(f"/securities/{secid_hint}.json", params={"iss.meta": "off", "lang": "ru"})
         if r2.status == 200 and r2.text:
             ct2 = (r2.headers or {}).get("Content-Type", "")
-            tables2 = parse_iss_json_tables_safe(r2.text, logger=logger, url=r2.url, content_type=ct2, snippet_chars=snippet_chars)
+            tables2 = parse_iss_json_tables_safe(r2.text, logger=logger, url=r2.url, content_type=ct2, snippet_chars=snippet_chars, cache=cache)
             desc = tables2.get("description", pd.DataFrame())
             kv = description_to_kv(desc)
             row2: Dict[str, Any] = {

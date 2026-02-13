@@ -8,17 +8,26 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bonds.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bonds_Detail.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/SQL.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/iss_client.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_cache.sqlite
+https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_emitents.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_excel.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_parsers.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/static_secids.txt
 
 ------------------------------------------------------------
 Директория: __pycache__/
 ------------------------------------------------------------
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/SQL.cpython-311.pyc
+https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/iss_client.cpython-311.pyc
 https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/logs.cpython-311.pyc
+https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/moex_emitents.cpython-311.pyc
+https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/moex_excel.cpython-311.pyc
+https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/moex_parsers.cpython-311.pyc
 
 ------------------------------------------------------------
 Директория: logs/

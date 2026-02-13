@@ -19,6 +19,11 @@ def utc_iso_days_ago(days: int) -> str:
     return dt.isoformat(timespec="seconds")
 
 
+def utc_iso_seconds_ago(seconds: int) -> str:
+    dt = datetime.now(timezone.utc) - timedelta(seconds=int(seconds))
+    return dt.isoformat(timespec="seconds")
+
+
 def safe_json_dumps(obj: Any) -> str:
     try:
         return json.dumps(obj, ensure_ascii=False, sort_keys=True)
@@ -215,8 +220,25 @@ class SQLiteCache:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_detail_progress_status ON detail_progress(run_id, status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_detail_progress_updated ON detail_progress(updated_utc)")
 
+        # --- NEW: parse diagnostics ---
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS parse_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT,
+                content_type TEXT,
+                snippet TEXT,
+                created_utc TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_parse_errors_created ON parse_errors(created_utc)")
+
         conn.commit()
 
+        self._migrate_bonds_list_if_needed(conn)
+        self._migrate_bond_raw_if_needed(conn)
+        self._migrate_requests_log_if_needed(conn)
         self._migrate_emitents_if_needed(conn)
 
     def _migrate_emitents_if_needed(self, conn: sqlite3.Connection) -> None:
@@ -245,6 +267,205 @@ class SQLiteCache:
     # -------------------------
     # bonds list
     # -------------------------
+    def _migrate_bonds_list_if_needed(self, conn: sqlite3.Connection) -> None:
+        if not table_exists(conn, "bonds_list"):
+            return
+        have = cols(conn, "bonds_list")
+        if "payload_json" in have and "created_utc" in have:
+            return
+
+        cur = conn.cursor()
+
+        # Best-effort: try to map legacy column names into payload_json
+        legacy_payload_col = None
+        for cand in ("payload_json", "payload", "payload_text", "json", "data"):
+            if cand in have:
+                legacy_payload_col = cand
+                break
+
+        if "created_utc" not in have:
+            # add created_utc if missing
+            try:
+                cur.execute("ALTER TABLE bonds_list ADD COLUMN created_utc TEXT")
+            except Exception:
+                pass
+
+        if "payload_json" not in have:
+            try:
+                cur.execute("ALTER TABLE bonds_list ADD COLUMN payload_json TEXT")
+            except Exception:
+                pass
+
+        if legacy_payload_col and legacy_payload_col != "payload_json":
+            try:
+                cur.execute(f"UPDATE bonds_list SET payload_json = COALESCE(payload_json, {legacy_payload_col})")
+            except Exception:
+                pass
+
+        # fill any remaining NULLs
+        try:
+            cur.execute("UPDATE bonds_list SET payload_json = COALESCE(payload_json, '{}')")
+        except Exception:
+            pass
+        try:
+            cur.execute("UPDATE bonds_list SET created_utc = COALESCE(created_utc, ?)", (utc_iso(),))
+        except Exception:
+            pass
+
+        conn.commit()
+
+    def _migrate_bond_raw_if_needed(self, conn: sqlite3.Connection) -> None:
+        if not table_exists(conn, "bond_raw"):
+            return
+        have = cols(conn, "bond_raw")
+        # if schema is already ok
+        if "id" in have and "response_text" in have and "created_utc" in have:
+            return
+
+        cur = conn.cursor()
+
+        # If id missing, safest is a rebuild preserving rowid order.
+        needs_rebuild = "id" not in have
+        if not needs_rebuild:
+            # add missing columns via ALTER TABLE
+            for col, decl in [
+                ("url", "TEXT"),
+                ("params_json", "TEXT"),
+                ("status", "INTEGER"),
+                ("elapsed_ms", "INTEGER"),
+                ("size_bytes", "INTEGER"),
+                ("response_text", "TEXT"),
+                ("created_utc", "TEXT"),
+            ]:
+                if col not in have:
+                    try:
+                        cur.execute(f"ALTER TABLE bond_raw ADD COLUMN {col} {decl}")
+                    except Exception:
+                        pass
+            conn.commit()
+            return
+
+        # rebuild table
+        cur.execute("ALTER TABLE bond_raw RENAME TO bond_raw_old")
+        cur.execute(
+            """
+            CREATE TABLE bond_raw (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                secid TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                asof_date TEXT NOT NULL,
+                url TEXT,
+                params_json TEXT,
+                status INTEGER,
+                elapsed_ms INTEGER,
+                size_bytes INTEGER,
+                response_text TEXT,
+                created_utc TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_bond_raw_lookup ON bond_raw(secid, kind, asof_date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_bond_raw_created ON bond_raw(created_utc)")
+
+        # copy best-effort
+        have_old = cols(conn, "bond_raw_old")
+        # minimal required
+        secid_col = "secid" if "secid" in have_old else "SECID"
+        kind_col = "kind" if "kind" in have_old else "KIND"
+        asof_col = "asof_date" if "asof_date" in have_old else ("asof_" if "asof_" in have_old else "ASOF_DATE")
+        created_col = "created_utc" if "created_utc" in have_old else None
+
+        def pick(cands):
+            for c in cands:
+                if c in have_old:
+                    return c
+            return None
+
+        url_col = pick(["url", "URL"])
+        params_col = pick(["params_json", "PARAMS_JSON", "params"])
+        status_col = pick(["status", "STATUS"])
+        elapsed_col = pick(["elapsed_ms", "ELAPSED_MS"])
+        size_col = pick(["size_bytes", "SIZE_BYTES"])
+        resp_col = pick(["response_text", "payload_text", "payload", "RESPONSE_TEXT"])
+
+        select_parts = [
+            f"{secid_col} AS secid",
+            f"{kind_col} AS kind",
+            f"{asof_col} AS asof_date",
+            f"{url_col} AS url" if url_col else "NULL AS url",
+            f"{params_col} AS params_json" if params_col else "NULL AS params_json",
+            f"{status_col} AS status" if status_col else "NULL AS status",
+            f"{elapsed_col} AS elapsed_ms" if elapsed_col else "NULL AS elapsed_ms",
+            f"{size_col} AS size_bytes" if size_col else "NULL AS size_bytes",
+            f"{resp_col} AS response_text" if resp_col else "NULL AS response_text",
+            f"{created_col} AS created_utc" if created_col else f"'{utc_iso()}' AS created_utc",
+        ]
+
+        cur.execute(
+            f"""
+            INSERT INTO bond_raw(secid, kind, asof_date, url, params_json, status, elapsed_ms, size_bytes, response_text, created_utc)
+            SELECT {', '.join(select_parts)}
+            FROM bond_raw_old
+            """
+        )
+
+        cur.execute("DROP TABLE bond_raw_old")
+        conn.commit()
+
+    def _migrate_requests_log_if_needed(self, conn: sqlite3.Connection) -> None:
+        if not table_exists(conn, "requests_log"):
+            return
+        have = cols(conn, "requests_log")
+        # ensure id exists (older versions might not)
+        if "id" in have:
+            return
+
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE requests_log RENAME TO requests_log_old")
+        cur.execute(
+            """
+            CREATE TABLE requests_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                params_json TEXT NOT NULL,
+                status INTEGER,
+                elapsed_ms INTEGER,
+                size_bytes INTEGER,
+                created_utc TEXT NOT NULL,
+                error TEXT
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_requests_log_created ON requests_log(created_utc)")
+
+        have_old = cols(conn, "requests_log_old")
+        def col(name):
+            return name if name in have_old else None
+        url_col = col("url") or col("URL")
+        params_col = col("params_json") or col("PARAMS_JSON")
+        status_col = col("status") or col("STATUS")
+        elapsed_col = col("elapsed_ms") or col("ELAPSED_MS")
+        size_col = col("size_bytes") or col("SIZE_BYTES")
+        created_col = col("created_utc") or col("CREATED_UTC")
+        error_col = col("error") or col("ERROR")
+
+        cur.execute(
+            f"""
+            INSERT INTO requests_log(url, params_json, status, elapsed_ms, size_bytes, created_utc, error)
+            SELECT
+                {url_col or "''"},
+                {params_col or "'{}'"},
+                {status_col or "NULL"},
+                {elapsed_col or "NULL"},
+                {size_col or "NULL"},
+                {created_col or f"'{utc_iso()}'"},
+                {error_col or "NULL"}
+            FROM requests_log_old
+            """
+        )
+        cur.execute("DROP TABLE requests_log_old")
+        conn.commit()
+
     def get_bonds_list(self, asof_date: str) -> Optional[List[dict]]:
         cur = self._execute("SELECT payload_json FROM bonds_list WHERE asof_date=?", (asof_date,))
         row = cur.fetchone()
@@ -415,6 +636,17 @@ class SQLiteCache:
         )
         return int(cur.lastrowid)
 
+    def log_parse_error(self, url: str, content_type: str, snippet: str) -> int:
+        cur = self._execute(
+            """
+            INSERT INTO parse_errors(url, content_type, snippet, created_utc)
+            VALUES(?, ?, ?, ?)
+            """,
+            (str(url or ""), str(content_type or ""), str(snippet or "")[:8000], utc_iso()),
+            commit=True,
+        )
+        return int(cur.lastrowid)
+
     def requests_summary(self, since_created_utc: str) -> Dict[str, int]:
         cur = self._execute("SELECT COUNT(*) AS n FROM requests_log WHERE created_utc >= ?", (since_created_utc,))
         total = int(cur.fetchone()["n"])
@@ -451,20 +683,41 @@ class SQLiteCache:
         self._get_conn().commit()
         return int(cur.rowcount or 0)
 
-    def progress_take_batch(self, run_id: str, batch: int) -> List[str]:
+    def progress_take_batch(
+        self,
+        run_id: str,
+        batch: int,
+        *,
+        include_errors: bool = False,
+        max_attempts: int = 2,
+        error_retry_after_sec: int = 60,
+    ) -> List[str]:
         """
         Берём batch secid со статусом pending.
+        Если include_errors=True — также берём status='error' с attempts < max_attempts
+        и только если последняя ошибка была достаточно давно (error_retry_after_sec).
         """
-        cur = self._execute(
-            """
+        params = [run_id]
+        where = "run_id=? AND status='pending'"
+
+        if include_errors and int(max_attempts) > 0:
+            cutoff = utc_iso_seconds_ago(int(error_retry_after_sec)) if int(error_retry_after_sec) > 0 else None
+            if cutoff:
+                where = where + " OR (run_id=? AND status='error' AND attempts < ? AND updated_utc <= ?)"
+                params.extend([run_id, int(max_attempts), cutoff])
+            else:
+                where = where + " OR (run_id=? AND status='error' AND attempts < ?)"
+                params.extend([run_id, int(max_attempts)])
+
+        sql = f"""
             SELECT secid
             FROM detail_progress
-            WHERE run_id=? AND status='pending'
-            ORDER BY secid
+            WHERE {where}
+            ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, secid
             LIMIT ?
-            """,
-            (run_id, int(batch)),
-        )
+            """
+        params.append(int(batch))
+        cur = self._execute(sql, tuple(params))
         return [r["secid"] for r in cur.fetchall()]
 
     def progress_mark_done(self, run_id: str, secid: str) -> None:

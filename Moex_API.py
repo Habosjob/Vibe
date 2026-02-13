@@ -14,7 +14,7 @@ import pandas as pd
 from logs import setup_logger, ensure_logs_dir, Timer
 from SQL import SQLiteCache, utc_iso
 from iss_client import IssClient, RateLimiter
-from moex_parsers import parse_iss_json_tables_safe
+from moex_parsers import parse_iss_json_tables_safe, description_to_kv
 from moex_emitents import try_fetch_emitent
 from moex_excel import build_pivot_description, build_summary
 
@@ -104,7 +104,7 @@ def fetch_all_traded_bonds(
                 break
 
             ct = (res.headers or {}).get("Content-Type", "")
-            tables = parse_iss_json_tables_safe(res.text, logger=logger, url=res.url, content_type=ct, snippet_chars=snippet_chars)
+            tables = parse_iss_json_tables_safe(res.text, logger=logger, url=res.url, content_type=ct, snippet_chars=snippet_chars, cache=client.cache)
 
             sec = tables.get("securities")
             if sec is None or sec.empty:
@@ -157,11 +157,16 @@ def get_bonds_list_daily(cache: SQLiteCache, client: IssClient, logger, force_re
     if not force_refresh:
         cached = cache.get_bonds_list(d)
         if cached is not None:
-            logger.info(f"CACHE HIT | bonds_list | date={d} | rows={len(cached)}")
-            return cached
+            # self-heal: cached bonds list from old schema may miss important columns (e.g. EMITTER_ID)
+            need_cols = {"SECID", "EMITTER_ID"}
+            if cached and not all(any(k in r for k in need_cols) for r in cached[:5]):
+                logger.warning("SELF-HEAL bonds_list (cache schema too old) | forcing refresh")
+            else:
+                logger.info(f"CACHE HIT | bonds_list | date={d} | rows={len(cached)}")
+                return cached
 
     logger.info(f"CACHE MISS | bonds_list | date={d} | force_refresh={force_refresh}")
-    bonds = fetch_all_traded_bonds(client, logger, boardgroup=boardgroup, snippet_chars=snippet_chars)
+    bonds = fetch_all_traded_bonds(client, logger, boardgroup=boardgroup, snippet_chars=snippet_chars, cache=cache)
     cache.set_bonds_list(bonds, d)
     logger.info(f"CACHE SAVE | bonds_list | date={d} | rows={len(bonds)}")
     return bonds
@@ -185,7 +190,7 @@ def fetch_description_selfheal(
     if not force_refresh:
         existing = cache.get_bond_raw(secid, "description", d)
         if existing and int(existing.get("status") or 0) == 200 and existing.get("response_text"):
-            tables = parse_iss_json_tables_safe(existing["response_text"], logger=logger, url="", content_type="", snippet_chars=snippet_chars)
+            tables = parse_iss_json_tables_safe(existing["response_text"], logger=logger, url="", content_type="", snippet_chars=snippet_chars, cache=client.cache)
             df = tables.get("description", pd.DataFrame())
             if df is not None and not df.empty:
                 return df
@@ -207,7 +212,7 @@ def fetch_description_selfheal(
         return pd.DataFrame()
 
     ct = (res.headers or {}).get("Content-Type", "")
-    tables = parse_iss_json_tables_safe(res.text, logger=logger, url=res.url, content_type=ct, snippet_chars=snippet_chars)
+    tables = parse_iss_json_tables_safe(res.text, logger=logger, url=res.url, content_type=ct, snippet_chars=snippet_chars, cache=client.cache)
     return tables.get("description", pd.DataFrame())
 
 
@@ -225,7 +230,7 @@ def fetch_bondization_selfheal(
     if not force_refresh:
         existing = cache.get_bond_raw(secid, "bondization", d)
         if existing and int(existing.get("status") or 0) == 200 and existing.get("response_text"):
-            tables = parse_iss_json_tables_safe(existing["response_text"], logger=logger, url="", content_type="", snippet_chars=snippet_chars)
+            tables = parse_iss_json_tables_safe(existing["response_text"], logger=logger, url="", content_type="", snippet_chars=snippet_chars, cache=client.cache)
             # если совсем пусто — self-heal
             if tables:
                 return tables
@@ -253,7 +258,7 @@ def fetch_bondization_selfheal(
         return {}
 
     ct = (res.headers or {}).get("Content-Type", "")
-    return parse_iss_json_tables_safe(res.text, logger=logger, url=res.url, content_type=ct, snippet_chars=snippet_chars)
+    return parse_iss_json_tables_safe(res.text, logger=logger, url=res.url, content_type=ct, snippet_chars=snippet_chars, cache=client.cache)
 
 
 def parse_args() -> argparse.Namespace:
@@ -269,6 +274,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--detail-all", action="store_true", help="Process ALL bonds (uses checkpoint/progress)")
     p.add_argument("--run-id", default=None, help="Run identifier for detail_progress (default: YYYY-MM-DD)")
     p.add_argument("--checkpoint-every", type=int, default=50, help="Log/save checkpoint each N processed secids")
+    p.add_argument("--error-retries", type=int, default=2, help=\"Max auto-retries for secids with status=error in detail_progress\")
+    p.add_argument("--error-retry-delay", type=int, default=60, help=\"Retry delay (seconds) before re-processing status=error\")
 
     # static
     p.add_argument("--static-size", type=int, default=10, help="How many static bonds to always include")
@@ -318,11 +325,11 @@ def process_one_secid(
     """
     c = {"desc": 0, "events": 0, "coupons": 0, "offers": 0, "amort": 0, "emitent": 0}
 
-    desc = fetch_description_selfheal(cache, client, logger, secid, force_refresh=force_refresh, snippet_chars=snippet_chars)
+    desc = fetch_description_selfheal(cache, client, logger, secid, force_refresh=force_refresh, snippet_chars=snippet_chars, cache=cache)
     if desc is not None and not desc.empty:
         c["desc"] = len(desc)
 
-    bz = fetch_bondization_selfheal(cache, client, logger, secid, force_refresh=force_refresh, snippet_chars=snippet_chars)
+    bz = fetch_bondization_selfheal(cache, client, logger, secid, force_refresh=force_refresh, snippet_chars=snippet_chars, cache=cache)
     for k, key in [("events", "events"), ("coupons", "coupons"), ("offers", "offers"), ("amort", "amortizations")]:
         df = bz.get(key)
         if df is not None and not df.empty:
@@ -336,6 +343,15 @@ def process_one_secid(
             emitter_id_int = int(emitter_id)
     except Exception:
         emitter_id_int = None
+
+    if emitter_id_int is None and desc is not None and not desc.empty:
+        try:
+            kv = description_to_kv(desc)
+            v = kv.get("EMITTER_ID") or kv.get("EMITTERID")
+            if v and str(v).strip().lower() not in ("nan", "none"):
+                emitter_id_int = int(float(v))
+        except Exception:
+            pass
 
     if emitter_id_int:
         e = try_fetch_emitent(
@@ -378,9 +394,25 @@ def build_detail_excel_from_cache(
         try:
             r = sample_df[sample_df["SECID"].astype(str) == str(secid)].iloc[0].to_dict()
             emitter_id = r.get("EMITTER_ID")
-            if emitter_id is None:
+
+            # fallback from cached description if bonds_list schema had no EMITTER_ID
+            if emitter_id is None or str(emitter_id).strip().lower() in ("", "nan", "none"):
+                try:
+                    raw_desc = cache.get_bond_raw(secid, "description", d)
+                    if raw_desc and raw_desc.get("response_text"):
+                        t = parse_iss_json_tables_safe(raw_desc["response_text"], logger=logger, url=str(raw_desc.get("url") or ""), content_type="", snippet_chars=snippet_chars, cache=cache)
+                        dd = t.get("description")
+                        kv = description_to_kv(dd)
+                        v = kv.get("EMITTER_ID") or kv.get("EMITTERID")
+                        if v and str(v).strip().lower() not in ("nan", "none"):
+                            emitter_id = int(float(v))
+                except Exception:
+                    pass
+
+            if emitter_id is None or str(emitter_id).strip() == "":
                 continue
-            e = cache.get_emitent(int(emitter_id))
+
+            e = cache.get_emitent(int(float(emitter_id)))
             if not e:
                 continue
             em_rows.append(
@@ -415,7 +447,7 @@ def build_detail_excel_from_cache(
     for secid in secids:
         raw_desc = cache.get_bond_raw(secid, "description", d)
         if raw_desc and raw_desc.get("response_text"):
-            tables = parse_iss_json_tables_safe(raw_desc["response_text"], logger=logger, url="", content_type="", snippet_chars=snippet_chars)
+            tables = parse_iss_json_tables_safe(raw_desc["response_text"], logger=logger, url=str(raw_desc.get("url") or ""), content_type="", snippet_chars=snippet_chars, cache=cache)
             df = tables.get("description")
             if df is not None and not df.empty:
                 x = df.copy()
@@ -424,7 +456,7 @@ def build_detail_excel_from_cache(
 
         raw_bz = cache.get_bond_raw(secid, "bondization", d)
         if raw_bz and raw_bz.get("response_text"):
-            tables = parse_iss_json_tables_safe(raw_bz["response_text"], logger=logger, url="", content_type="", snippet_chars=snippet_chars)
+            tables = parse_iss_json_tables_safe(raw_bz["response_text"], logger=logger, url=str(raw_bz.get("url") or ""), content_type="", snippet_chars=snippet_chars, cache=cache)
             for block, sink in [("events", ev_rows_all), ("coupons", cp_rows_all), ("offers", of_rows_all), ("amortizations", am_rows_all)]:
                 df = tables.get(block)
                 if df is not None and not df.empty:
@@ -560,7 +592,13 @@ def main():
             processed = 0
             with Timer(logger, "detail_collect"):
                 while True:
-                    batch_secids = cache.progress_take_batch(run_id, batch=max(1, min(200, args.detail_workers * 10)))
+                    batch_secids = cache.progress_take_batch(
+                        run_id,
+                        batch=max(1, min(200, args.detail_workers * 10)),
+                        include_errors=True,
+                        max_attempts=int(args.error_retries),
+                        error_retry_after_sec=int(args.error_retry_delay),
+                    )
                     if not batch_secids:
                         break
 
