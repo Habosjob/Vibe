@@ -8,7 +8,7 @@ import logging
 import random
 import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -34,10 +34,14 @@ RAW_RESPONSE_PATH = LOGS_DIR / "raw_response_latest.csv"
 LOG_PATH = LOGS_DIR / "moex_api.log"
 EXCEL_PATH = BASE_DIR / "Moex_Bonds.xlsx"
 DETAILS_EXCEL_PATH = BASE_DIR / "Moex_Bonds_Details.xlsx"
+FINISH_EXCEL_PATH = BASE_DIR / "Moex_Bonds_Finish.xlsx"
 DETAILS_PARQUET_DIR = BASE_DIR / "details_parquet"
 DETAILS_TTL_HOURS = 24
-DETAILS_POOL_SIZE = 6
+DETAILS_WORKER_PROCESSES = 2
 RANDOM_SECID_SAMPLE_SIZE = 10
+CB_FAILURE_THRESHOLD = 3
+CB_COOLDOWN_SECONDS = 180
+HEALTH_RETENTION_DAYS = 14
 
 STATIC_SECIDS = [
     "RU000A1021G3",
@@ -166,15 +170,42 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS endpoint_circuit_breaker (
+                endpoint TEXT PRIMARY KEY,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'closed',
+                opened_at TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS endpoint_health_mv (
+                window TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                total_requests INTEGER NOT NULL,
+                error_requests INTEGER NOT NULL,
+                error_rate REAL NOT NULL,
+                avg_latency_ms REAL,
+                p95_latency_ms REAL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(window, endpoint)
+            )
+            """
+        )
         connection.commit()
 
 
 def cleanup_details_cache() -> None:
     cutoff = (datetime.now() - timedelta(hours=DETAILS_TTL_HOURS)).isoformat(timespec="seconds")
+    health_cutoff = (datetime.now() - timedelta(days=HEALTH_RETENTION_DAYS)).isoformat(timespec="seconds")
     with sqlite3.connect(CACHE_DB_PATH) as connection:
         connection.execute("DELETE FROM details_cache WHERE fetched_at < ?", (cutoff,))
         connection.execute("DELETE FROM details_rows WHERE fetched_at < ?", (cutoff,))
-        connection.execute("DELETE FROM endpoint_health_history WHERE checked_at < ?", (cutoff,))
+        connection.execute("DELETE FROM endpoint_health_history WHERE checked_at < ?", (health_cutoff,))
         connection.commit()
 
 
@@ -299,6 +330,118 @@ def _save_endpoint_health(endpoint_name: str, secid: str, status: str, source: s
         connection.commit()
 
 
+
+
+def _is_circuit_open(endpoint_name: str) -> bool:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        row = connection.execute(
+            "SELECT state, opened_at FROM endpoint_circuit_breaker WHERE endpoint = ?",
+            (endpoint_name,),
+        ).fetchone()
+
+    if row is None:
+        return False
+
+    state, opened_at = row
+    if state != "open" or not opened_at:
+        return False
+
+    opened_at_dt = datetime.fromisoformat(opened_at)
+    if (datetime.now() - opened_at_dt).total_seconds() >= CB_COOLDOWN_SECONDS:
+        with sqlite3.connect(CACHE_DB_PATH) as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO endpoint_circuit_breaker(endpoint, failure_count, state, opened_at, updated_at)
+                VALUES (?, 0, 'half_open', NULL, ?)
+                """,
+                (endpoint_name, datetime.now().isoformat(timespec="seconds")),
+            )
+            connection.commit()
+        return False
+
+    return True
+
+
+def _update_circuit_breaker(endpoint_name: str, is_success: bool) -> None:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        row = connection.execute(
+            "SELECT failure_count, state FROM endpoint_circuit_breaker WHERE endpoint = ?",
+            (endpoint_name,),
+        ).fetchone()
+
+        failure_count = 0 if row is None else row[0]
+        state = "closed" if row is None else row[1]
+
+        now = datetime.now().isoformat(timespec="seconds")
+        if is_success:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO endpoint_circuit_breaker(endpoint, failure_count, state, opened_at, updated_at)
+                VALUES (?, 0, 'closed', NULL, ?)
+                """,
+                (endpoint_name, now),
+            )
+        else:
+            failure_count += 1
+            new_state = "open" if failure_count >= CB_FAILURE_THRESHOLD else state
+            opened_at = now if new_state == "open" else None
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO endpoint_circuit_breaker(endpoint, failure_count, state, opened_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (endpoint_name, failure_count, new_state, opened_at, now),
+            )
+        connection.commit()
+
+
+def refresh_endpoint_health_mv() -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    windows = {"1d": datetime.now() - timedelta(days=1), "7d": datetime.now() - timedelta(days=7)}
+
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        for window_name, cutoff in windows.items():
+            df = pd.read_sql_query(
+                """
+                SELECT endpoint, status, latency_ms
+                FROM endpoint_health_history
+                WHERE checked_at >= ?
+                """,
+                connection,
+                params=(cutoff.isoformat(timespec="seconds"),),
+            )
+            if df.empty:
+                continue
+
+            rows = []
+            for endpoint, group in df.groupby("endpoint"):
+                total = len(group)
+                errors = int((group["status"] != "ok").sum())
+                latencies = group["latency_ms"].dropna()
+                rows.append(
+                    (
+                        window_name,
+                        endpoint,
+                        total,
+                        errors,
+                        errors / total if total else 0.0,
+                        float(latencies.mean()) if not latencies.empty else None,
+                        float(latencies.quantile(0.95)) if not latencies.empty else None,
+                        now,
+                    )
+                )
+
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO endpoint_health_mv(
+                    window, endpoint, total_requests, error_requests, error_rate, avg_latency_ms, p95_latency_ms, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        connection.commit()
+
 def _get_cached_endpoint_payload(endpoint_name: str, secid: str) -> dict | None:
     cutoff = (datetime.now() - timedelta(hours=DETAILS_TTL_HOURS)).isoformat(timespec="seconds")
     with sqlite3.connect(CACHE_DB_PATH) as connection:
@@ -360,6 +503,9 @@ def _save_endpoint_payload(endpoint_name: str, secid: str, payload: dict) -> Non
 def _discover_working_endpoints(session: requests.Session, sample_secid: str, logger: logging.Logger) -> list[tuple[str, str]]:
     working_endpoints: list[tuple[str, str]] = []
     for endpoint_name, endpoint_url in DETAILS_ENDPOINTS:
+        if _is_circuit_open(endpoint_name):
+            logger.warning("Endpoint %s skipped during discovery: circuit breaker is open", endpoint_name)
+            continue
         try:
             payload, latency_ms, status_code = _fetch_endpoint_payload(session, endpoint_name, sample_secid, endpoint_url)
             blocks = _extract_blocks(payload)
@@ -394,16 +540,17 @@ def _normalize_block_frame(secid: str, block_name: str, block_df: pd.DataFrame) 
     return enriched[["secid", "block_name", *non_meta_cols]]
 
 
-def _fetch_details_task(session: requests.Session, secid: str, endpoint_name: str, endpoint_url: str) -> tuple[str, str, str, dict | None]:
-    cached_payload = _get_cached_endpoint_payload(endpoint_name, secid)
-    if cached_payload is not None:
-        return secid, endpoint_name, "cache", cached_payload
-
-    payload, latency_ms, status_code = _fetch_endpoint_payload(session, endpoint_name, secid, endpoint_url)
-    _save_endpoint_payload(endpoint_name, secid, payload)
-    blocks = list(_extract_blocks(payload).keys())
-    _save_endpoint_health(endpoint_name, secid, "ok", "network", status_code, latency_ms, blocks, None)
-    return secid, endpoint_name, "network", payload
+def _fetch_details_worker(secid: str, endpoints: list[tuple[str, str]]) -> list[tuple[str, str, dict | None, float | None, int | None, str | None]]:
+    session = build_retry_session()
+    results: list[tuple[str, str, dict | None, float | None, int | None, str | None]] = []
+    for endpoint_name, endpoint_url in endpoints:
+        try:
+            payload, latency_ms, status_code = _fetch_endpoint_payload(session, endpoint_name, secid, endpoint_url)
+            results.append((endpoint_name, secid, payload, latency_ms, status_code, None))
+        except Exception as error:  # noqa: BLE001
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+            results.append((endpoint_name, secid, None, None, status_code, str(error)))
+    return results
 
 
 def _build_sheet_name(endpoint_name: str, block_name: str) -> str:
@@ -424,7 +571,34 @@ def _autosize_worksheet(worksheet) -> None:
         worksheet.column_dimensions[column].width = min(max(12, max_length + 2), 60)
 
 
-def _write_details_excel(endpoint_frames: dict[str, dict[str, pd.DataFrame]]) -> int:
+def _build_enrichment_frame(endpoint_frames: dict[str, dict[str, pd.DataFrame]]) -> pd.DataFrame:
+    secid_features: dict[str, dict[str, str | int | float]] = {}
+    for endpoint_name, block_frames in endpoint_frames.items():
+        for block_name, frame in block_frames.items():
+            if frame.empty:
+                continue
+            for secid, group in frame.groupby("secid"):
+                secid_features.setdefault(secid, {})
+                secid_features[secid][f"{endpoint_name}_{block_name}_rows"] = len(group)
+                for col in group.columns:
+                    if col in {"secid", "block_name"}:
+                        continue
+                    values = [str(v) for v in group[col].dropna().tolist() if str(v).strip()]
+                    if not values:
+                        continue
+                    unique_values = list(dict.fromkeys(values))
+                    secid_features[secid][f"{endpoint_name}_{block_name}_{col}"] = " | ".join(unique_values[:5])
+
+    if not secid_features:
+        return pd.DataFrame(columns=["secid"])
+
+    rows = [{"secid": secid, **features} for secid, features in secid_features.items()]
+    enrichment = pd.DataFrame(rows)
+    enrichment = enrichment.loc[:, ~enrichment.columns.duplicated()].copy()
+    return enrichment
+
+
+def _write_details_excel(endpoint_frames: dict[str, dict[str, pd.DataFrame]], enrichment_df: pd.DataFrame) -> int:
     mode = "a" if DETAILS_EXCEL_PATH.exists() else "w"
     writer_kwargs = {"engine": "openpyxl", "mode": mode}
     if mode == "a":
@@ -440,23 +614,17 @@ def _write_details_excel(endpoint_frames: dict[str, dict[str, pd.DataFrame]]) ->
                     continue
                 sheet_name = _build_sheet_name(endpoint_name, block_name)
                 clean_frame.to_excel(writer, sheet_name=sheet_name, index=False)
-                summary_rows.append(
-                    {
-                        "endpoint": endpoint_name,
-                        "block_name": block_name,
-                        "rows": len(clean_frame),
-                        "sheet": sheet_name,
-                    }
-                )
+                summary_rows.append({"endpoint": endpoint_name, "block_name": block_name, "rows": len(clean_frame), "sheet": sheet_name})
                 sheet_count += 1
 
+        enrichment_df.to_excel(writer, sheet_name="details_transposed", index=False)
         summary_df = pd.DataFrame(summary_rows).sort_values(["endpoint", "block_name"]) if summary_rows else pd.DataFrame(columns=["endpoint", "block_name", "rows", "sheet"])
         summary_df.to_excel(writer, sheet_name="summary", index=False)
 
         for worksheet in writer.book.worksheets:
             _autosize_worksheet(worksheet)
 
-    return sheet_count
+    return sheet_count + 1
 
 
 def _update_details_parquet(endpoint_frames: dict[str, dict[str, pd.DataFrame]]) -> int:
@@ -469,10 +637,7 @@ def _update_details_parquet(endpoint_frames: dict[str, dict[str, pd.DataFrame]])
             if frame.empty:
                 continue
             prepared = frame.copy()
-            prepared["_row_hash"] = prepared.apply(
-                lambda row: hashlib.sha1(json.dumps(row.to_dict(), sort_keys=True, default=str).encode("utf-8")).hexdigest(),
-                axis=1,
-            )
+            prepared["_row_hash"] = prepared.apply(lambda row: hashlib.sha1(json.dumps(row.to_dict(), sort_keys=True, default=str).encode("utf-8")).hexdigest(), axis=1)
             prepared["_updated_at"] = datetime.now().isoformat(timespec="seconds")
             prepared["block_name"] = block_name
             flat_frames.append(prepared)
@@ -495,65 +660,98 @@ def _update_details_parquet(endpoint_frames: dict[str, dict[str, pd.DataFrame]])
     return updated_files
 
 
-def fetch_and_save_bond_details(dataframe: pd.DataFrame, logger: logging.Logger, session: requests.Session) -> tuple[int, int, int]:
+def _merge_base_with_enrichment(base_df: pd.DataFrame, enrichment_df: pd.DataFrame) -> pd.DataFrame:
+    secid_column = next((c for c in ["SECID", "secid", "SecID"] if c in base_df.columns), None)
+    if secid_column is None:
+        return base_df.copy()
+
+    prepared = base_df.copy()
+    prepared["secid"] = prepared[secid_column].astype(str)
+    merged = prepared.merge(enrichment_df, on="secid", how="left")
+    merged = merged.drop(columns=["secid"]) if secid_column != "secid" else merged
+    merged = merged.loc[:, ~merged.columns.duplicated()].copy()
+    return merged
+
+
+def _persist_finish_to_sqlite(finish_df: pd.DataFrame) -> None:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        finish_df.to_sql("bonds_enriched", connection, if_exists="replace", index=False)
+
+
+def fetch_and_save_bond_details(dataframe: pd.DataFrame, logger: logging.Logger, session: requests.Session) -> tuple[int, int, int, int]:
     cleanup_details_cache()
     secids = _pick_secids(dataframe)
     if not secids:
         logger.warning("Could not determine SECID list. Skipping details export")
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
     working_endpoints = _discover_working_endpoints(session, secids[0], logger)
     if not working_endpoints:
         logger.warning("No working details endpoints found. Skipping details export")
-        return len(secids), 0, 0
+        return len(secids), 0, 0, 0
 
-    endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {
-        name: {} for name, _ in working_endpoints
-    }
+    endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {name: {} for name, _ in working_endpoints}
 
-    futures = []
-    with ThreadPoolExecutor(max_workers=DETAILS_POOL_SIZE) as executor:
-        for secid in secids:
-            for endpoint_name, endpoint_url in working_endpoints:
-                futures.append(executor.submit(_fetch_details_task, session, secid, endpoint_name, endpoint_url))
+    for secid in secids:
+        for endpoint_name, endpoint_url in working_endpoints:
+            cached_payload = _get_cached_endpoint_payload(endpoint_name, secid)
+            if cached_payload is None:
+                continue
+            blocks = _extract_blocks(cached_payload)
+            logger.info("Details %s for %s loaded from cache", endpoint_name, secid)
+            _save_endpoint_health(endpoint_name, secid, "ok", "cache", None, 0.0, list(blocks.keys()), None)
+            for block_name, block_df in blocks.items():
+                if not block_df.empty:
+                    endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
+
+    pending_secids = []
+    for secid in secids:
+        if any(_get_cached_endpoint_payload(endpoint_name, secid) is None for endpoint_name, _ in working_endpoints):
+            pending_secids.append(secid)
+
+    with ProcessPoolExecutor(max_workers=DETAILS_WORKER_PROCESSES) as executor:
+        futures = []
+        for secid in pending_secids:
+            allowed_endpoints = [(n, u) for n, u in working_endpoints if not _is_circuit_open(n)]
+            if not allowed_endpoints:
+                logger.warning("All endpoints are blocked by circuit breaker for %s", secid)
+                continue
+            futures.append(executor.submit(_fetch_details_worker, secid, allowed_endpoints))
 
         for future in as_completed(futures):
-            try:
-                secid, endpoint_name, source, payload = future.result()
-            except requests.RequestException as error:
-                logger.warning("Details request failed: %s", error)
-                continue
-            except Exception as error:  # noqa: BLE001
-                logger.warning("Details loading failed: %s", error)
-                continue
-
-            if payload is None:
-                continue
-
-            blocks = _extract_blocks(payload)
-            if not blocks:
-                continue
-
-            logger.info("Details %s for %s loaded from %s", endpoint_name, secid, source)
-            for block_name, block_df in blocks.items():
-                if block_df.empty:
+            for endpoint_name, secid, payload, latency_ms, status_code, error_text in future.result():
+                if payload is None:
+                    _save_endpoint_health(endpoint_name, secid, "error", "network", status_code, latency_ms, None, error_text)
+                    _update_circuit_breaker(endpoint_name, is_success=False)
+                    logger.warning("Details %s for %s failed: %s", endpoint_name, secid, error_text)
                     continue
-                normalized = _normalize_block_frame(secid, block_name, block_df)
-                endpoint_frames[endpoint_name].setdefault(block_name, []).append(normalized)
+
+                _update_circuit_breaker(endpoint_name, is_success=True)
+                _save_endpoint_payload(endpoint_name, secid, payload)
+                blocks = _extract_blocks(payload)
+                _save_endpoint_health(endpoint_name, secid, "ok", "network", status_code, latency_ms, list(blocks.keys()), None)
+                logger.info("Details %s for %s loaded from network", endpoint_name, secid)
+                for block_name, block_df in blocks.items():
+                    if not block_df.empty:
+                        endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
 
     merged_frames: dict[str, dict[str, pd.DataFrame]] = {}
     for endpoint_name, blocks in endpoint_frames.items():
         merged_frames[endpoint_name] = {}
         for block_name, frames in blocks.items():
             valid_frames = [frame.dropna(axis=1, how="all") for frame in frames if not frame.empty]
-            if not valid_frames:
-                continue
-            merged = pd.concat(valid_frames, ignore_index=True, sort=False)
-            merged_frames[endpoint_name][block_name] = merged
+            if valid_frames:
+                merged_frames[endpoint_name][block_name] = pd.concat(valid_frames, ignore_index=True, sort=False)
 
-    excel_sheets = _write_details_excel(merged_frames)
+    enrichment_df = _build_enrichment_frame(merged_frames)
+    excel_sheets = _write_details_excel(merged_frames, enrichment_df)
     parquet_files = _update_details_parquet(merged_frames)
-    return len(secids), excel_sheets, parquet_files
+
+    finish_df = _merge_base_with_enrichment(dataframe, enrichment_df)
+    finish_df.to_excel(FINISH_EXCEL_PATH, index=False)
+    _persist_finish_to_sqlite(finish_df)
+    refresh_endpoint_health_mv()
+    return len(secids), excel_sheets, parquet_files, len(finish_df)
 
 
 def _prepare_csv_for_pandas(csv_data: str) -> tuple[str, str]:
@@ -638,7 +836,7 @@ def main() -> int:
         row_count = len(dataframe)
 
         details_started_at = time.perf_counter()
-        secids_count, details_sheets, parquet_files = fetch_and_save_bond_details(dataframe, logger, session)
+        secids_count, details_sheets, parquet_files, finish_rows = fetch_and_save_bond_details(dataframe, logger, session)
         details_elapsed = time.perf_counter() - details_started_at
 
         persist_raw_response(csv_data)
@@ -656,6 +854,7 @@ def main() -> int:
             DETAILS_EXCEL_PATH,
         )
         logger.info("Updated %s parquet detail files in %s", parquet_files, DETAILS_PARQUET_DIR)
+        logger.info("Saved enriched finish dataset with %s rows to %s", finish_rows, FINISH_EXCEL_PATH)
         logger.info("Raw response saved to %s", RAW_RESPONSE_PATH)
         logger.info("Execution time: %.3f seconds", elapsed)
         print("MOEX_API completed successfully")
