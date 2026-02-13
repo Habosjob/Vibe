@@ -339,8 +339,10 @@ def fetch_and_save_bond_details(dataframe: pd.DataFrame, logger: logging.Logger)
                 if block_df.empty:
                     continue
                 enriched = block_df.copy()
-                enriched.insert(0, "block_name", block_name)
-                enriched.insert(0, "secid", secid)
+                enriched["secid"] = secid
+                enriched["block_name"] = block_name
+                ordered_columns = ["secid", "block_name", *[column for column in enriched.columns if column not in {"secid", "block_name"}]]
+                enriched = enriched[ordered_columns]
                 endpoint_frames[endpoint_name].append(enriched)
 
     non_empty_endpoints = sum(1 for frames in endpoint_frames.values() if frames)
