@@ -9,7 +9,7 @@ import os
 import random
 import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -1104,14 +1104,15 @@ class StageProgressView:
         )
 
 
-def _print_details_progress(completed: int, total: int, eta_seconds: int, stage_started_at: float) -> None:
+def _print_details_progress(completed: int, total: int, eta_seconds: int | None, stage_started_at: float) -> None:
     percent = (completed / total * 100) if total else 100.0
     elapsed = time.perf_counter() - stage_started_at
     avg_per_item = elapsed / completed if completed else 0.0
+    eta_text = f"{eta_seconds} сек" if eta_seconds is not None else "расчёт после первых результатов"
     print(
         "\r"
         f"   ↳ details: прогресс {percent:5.1f}% | выполнено {completed}/{total} | "
-        f"до окончания ~ {eta_seconds} сек | ср. шаг {avg_per_item:.2f} сек",
+        f"до окончания ~ {eta_text} | ср. шаг {avg_per_item:.2f} сек",
         end="",
         flush=True,
     )
@@ -1262,57 +1263,66 @@ def fetch_and_save_bond_details(
         completed = 0
         total = len(futures)
         progress_started_at = time.perf_counter()
-        for future in as_completed(futures):
-            completed += 1
-            elapsed = time.perf_counter() - progress_started_at
-            avg_seconds = elapsed / completed if completed else 0.0
-            remaining = max(total - completed, 0)
-            eta_seconds = int(avg_seconds * remaining)
-            _print_details_progress(completed, total, eta_seconds, stage_started_at=stage_started_at or progress_started_at)
-            for endpoint_name, secid, payload, latency_ms, status_code, error_text in future.result():
-                if payload is None:
-                    stale_cached_record = _get_latest_endpoint_record(endpoint_name, secid)
-                    if stale_cached_record is not None:
-                        stale_payload, stale_fetched_at = stale_cached_record
-                        stale_blocks = _extract_blocks(stale_payload)
-                        _save_endpoint_health(endpoint_name, secid, "ok", "stale_cache", status_code, latency_ms, list(stale_blocks.keys()), error_text)
-                        _save_watermark(endpoint_name, secid, stale_fetched_at)
-                        logger.warning(
-                            "Details %s for %s loaded from stale cache (%s) after network error: %s",
-                            endpoint_name,
-                            secid,
-                            stale_fetched_at,
-                            error_text,
-                        )
-                        for block_name, block_df in stale_blocks.items():
-                            if not block_df.empty:
-                                endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
+        pending_futures = set(futures)
+        if total:
+            _print_details_progress(0, total, None, stage_started_at=stage_started_at or progress_started_at)
+        while pending_futures:
+            done_futures, pending_futures = wait(pending_futures, timeout=2.0, return_when=FIRST_COMPLETED)
+            if not done_futures:
+                _print_details_progress(completed, total, None, stage_started_at=stage_started_at or progress_started_at)
+                continue
+
+            for future in done_futures:
+                completed += 1
+                elapsed = time.perf_counter() - progress_started_at
+                avg_seconds = elapsed / completed if completed else 0.0
+                remaining = max(total - completed, 0)
+                eta_seconds = int(avg_seconds * remaining)
+                _print_details_progress(completed, total, eta_seconds, stage_started_at=stage_started_at or progress_started_at)
+                for endpoint_name, secid, payload, latency_ms, status_code, error_text in future.result():
+                    if payload is None:
+                        stale_cached_record = _get_latest_endpoint_record(endpoint_name, secid)
+                        if stale_cached_record is not None:
+                            stale_payload, stale_fetched_at = stale_cached_record
+                            stale_blocks = _extract_blocks(stale_payload)
+                            _save_endpoint_health(endpoint_name, secid, "ok", "stale_cache", status_code, latency_ms, list(stale_blocks.keys()), error_text)
+                            _save_watermark(endpoint_name, secid, stale_fetched_at)
+                            logger.warning(
+                                "Details %s for %s loaded from stale cache (%s) after network error: %s",
+                                endpoint_name,
+                                secid,
+                                stale_fetched_at,
+                                error_text,
+                            )
+                            for block_name, block_df in stale_blocks.items():
+                                if not block_df.empty:
+                                    endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
+                            continue
+
+                        _save_endpoint_health(endpoint_name, secid, "error", "network", status_code, latency_ms, None, error_text)
+                        _update_circuit_breaker(endpoint_name, is_success=False)
+                        logger.warning("Details %s for %s failed: %s", endpoint_name, secid, error_text)
                         continue
 
-                    _save_endpoint_health(endpoint_name, secid, "error", "network", status_code, latency_ms, None, error_text)
-                    _update_circuit_breaker(endpoint_name, is_success=False)
-                    logger.warning("Details %s for %s failed: %s", endpoint_name, secid, error_text)
-                    continue
+                    _update_circuit_breaker(endpoint_name, is_success=True)
+                    network_fetched_at = datetime.now().isoformat(timespec="seconds")
+                    if _watermark_exists(endpoint_name, secid, network_fetched_at):
+                        logger.info("Skip details update for %s:%s by watermark %s", endpoint_name, secid, network_fetched_at)
+                        continue
 
-                _update_circuit_breaker(endpoint_name, is_success=True)
-                network_fetched_at = datetime.now().isoformat(timespec="seconds")
-                if _watermark_exists(endpoint_name, secid, network_fetched_at):
-                    logger.info("Skip details update for %s:%s by watermark %s", endpoint_name, secid, network_fetched_at)
-                    continue
-
-                persisted_fetched_at = _save_endpoint_payload(
-                    endpoint_name,
-                    secid,
-                    payload,
-                    fetched_at=network_fetched_at,
-                )
-                blocks = _extract_blocks(payload)
-                _save_endpoint_health(endpoint_name, secid, "ok", "network", status_code, latency_ms, list(blocks.keys()), None)
-                _save_watermark(endpoint_name, secid, persisted_fetched_at)
-                logger.info("Details %s for %s loaded from network", endpoint_name, secid)
-                for block_name, block_df in blocks.items():
-                    if not block_df.empty:
-                        endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
+                    persisted_fetched_at = _save_endpoint_payload(
+                        endpoint_name,
+                        secid,
+                        payload,
+                        fetched_at=network_fetched_at,
+                    )
+                    blocks = _extract_blocks(payload)
+                    _save_endpoint_health(endpoint_name, secid, "ok", "network", status_code, latency_ms, list(blocks.keys()), None)
+                    _save_watermark(endpoint_name, secid, persisted_fetched_at)
+                    logger.info("Details %s for %s loaded from network", endpoint_name, secid)
+                    for block_name, block_df in blocks.items():
+                        if not block_df.empty:
+                            endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
 
     merged_frames: dict[str, dict[str, pd.DataFrame]] = {}
     for endpoint_name, blocks in endpoint_frames.items():
@@ -1511,21 +1521,9 @@ def _check_sla_degradation(stage: str, duration_ms: float, logger: logging.Logge
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MOEX bonds ETL pipeline")
     parser.add_argument(
-        "--details-worker-processes",
-        type=int,
-        default=None,
-        help="Worker process count for details fetching. Overrides DETAILS_WORKER_PROCESSES env.",
-    )
-    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug artifacts (Moex_Bonds.xlsx and Moex_Bonds_Details.xlsx)",
-    )
-    parser.add_argument(
-        "--service",
-        choices=["all", "rates-ingest", "details-enricher", "quotes-snapshotter"],
-        default="all",
-        help="Run full pipeline or a dedicated microservice-style stage.",
     )
     return parser.parse_args()
 
@@ -1630,27 +1628,14 @@ def main() -> int:
     logger = setup_logging()
     init_db()
     session = build_retry_session()
-    details_worker_processes = _resolve_details_worker_processes(args.details_worker_processes, logger)
+    details_worker_processes = _resolve_details_worker_processes(None, logger)
 
     start_time = time.perf_counter()
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
-    stage_view = StageProgressView(total_stages=len(PIPELINE_STAGE_ORDER), started_at=start_time) if args.service == "all" else None
+    stage_view = StageProgressView(total_stages=len(PIPELINE_STAGE_ORDER), started_at=start_time)
     logger.info("MOEX API script started")
 
     try:
-        if args.service == "rates-ingest":
-            run_rates_ingest(session, logger, run_id=run_id, debug=args.debug, stage_view=None)
-            return 0
-
-        if args.service == "details-enricher":
-            dataframe, data_source, export_date = run_rates_ingest(session, logger, run_id=run_id, debug=args.debug, stage_view=None)
-            run_details_enricher(dataframe, session, logger, run_id=run_id, source=data_source, export_date=export_date, details_worker_processes=details_worker_processes, debug=args.debug, stage_view=None)
-            return 0
-
-        if args.service == "quotes-snapshotter":
-            run_quotes_snapshotter(session, logger, run_id=run_id, source="snapshotter", stage_view=None)
-            return 0
-
         dataframe, data_source, export_date = run_rates_ingest(session, logger, run_id=run_id, debug=args.debug, stage_view=stage_view)
         secids_count, details_sheets, parquet_files, finish_rows, finish_batch_path = run_details_enricher(
             dataframe,
