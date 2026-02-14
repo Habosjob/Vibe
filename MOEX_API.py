@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import random
 import sqlite3
 import time
@@ -35,13 +36,16 @@ LOG_PATH = LOGS_DIR / "moex_api.log"
 EXCEL_PATH = BASE_DIR / "Moex_Bonds.xlsx"
 DETAILS_EXCEL_PATH = BASE_DIR / "Moex_Bonds_Details.xlsx"
 FINISH_EXCEL_PATH = BASE_DIR / "Moex_Bonds_Finish.xlsx"
+FINISH_BATCH_DIR = BASE_DIR / "finish_batches"
 DETAILS_PARQUET_DIR = BASE_DIR / "details_parquet"
 DETAILS_TTL_HOURS = 24
 DETAILS_WORKER_PROCESSES = 2
 RANDOM_SECID_SAMPLE_SIZE = 10
+DETAILS_SAMPLE_ONLY = os.getenv("DETAILS_SAMPLE_ONLY", "0") == "1"
 CB_FAILURE_THRESHOLD = 3
 CB_COOLDOWN_SECONDS = 180
 HEALTH_RETENTION_DAYS = 14
+ROW_COUNT_SPIKE_THRESHOLD = 0.30
 
 STATIC_SECIDS = [
     "RU000A1021G3",
@@ -196,6 +200,43 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dq_run_history (
+                run_id TEXT PRIMARY KEY,
+                run_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                row_count INTEGER NOT NULL,
+                empty_secid_ratio REAL NOT NULL,
+                empty_isin_ratio REAL NOT NULL,
+                row_count_delta_ratio REAL,
+                notes TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bonds_enriched_incremental (
+                batch_id TEXT NOT NULL,
+                export_date TEXT NOT NULL,
+                exported_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                row_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_endpoint_health_history_checked_endpoint ON endpoint_health_history(checked_at, endpoint)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_details_rows_endpoint_secid_block ON details_rows(endpoint, secid, block_name)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dq_run_history_run_at ON dq_run_history(run_at)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bonds_enriched_incremental_export_date_batch ON bonds_enriched_incremental(export_date, batch_id)"
+        )
         connection.commit()
 
 
@@ -287,10 +328,11 @@ def _pick_secids(dataframe: pd.DataFrame, random_sample_size: int = RANDOM_SECID
             unique_secids = sorted(set(series[series != ""]))
             if not unique_secids:
                 return STATIC_SECIDS.copy()
-            rng = random.Random(date.today().isoformat())
-            random_part = unique_secids if len(unique_secids) <= random_sample_size else rng.sample(unique_secids, random_sample_size)
-            merged = sorted(set(random_part + STATIC_SECIDS))
-            return merged
+            if DETAILS_SAMPLE_ONLY:
+                rng = random.Random(date.today().isoformat())
+                random_part = unique_secids if len(unique_secids) <= random_sample_size else rng.sample(unique_secids, random_sample_size)
+                return sorted(set(random_part + STATIC_SECIDS))
+            return unique_secids
     return STATIC_SECIDS.copy()
 
 
@@ -666,29 +708,130 @@ def _merge_base_with_enrichment(base_df: pd.DataFrame, enrichment_df: pd.DataFra
         return base_df.copy()
 
     prepared = base_df.copy()
-    prepared["secid"] = prepared[secid_column].astype(str)
-    merged = prepared.merge(enrichment_df, on="secid", how="left")
+    prepared["secid"] = prepared[secid_column].astype(str).str.strip().str.upper()
+    normalized_enrichment = enrichment_df.copy()
+    if "secid" in normalized_enrichment.columns:
+        normalized_enrichment["secid"] = normalized_enrichment["secid"].astype(str).str.strip().str.upper()
+
+    merged = prepared.merge(normalized_enrichment, on="secid", how="left")
     merged = merged.drop(columns=["secid"]) if secid_column != "secid" else merged
     merged = merged.loc[:, ~merged.columns.duplicated()].copy()
     return merged
 
 
-def _persist_finish_to_sqlite(finish_df: pd.DataFrame) -> None:
+def _persist_finish_to_sqlite(finish_df: pd.DataFrame, batch_id: str, export_date: str, source: str) -> None:
+    exported_at = datetime.now().isoformat(timespec="seconds")
     with sqlite3.connect(CACHE_DB_PATH) as connection:
         finish_df.to_sql("bonds_enriched", connection, if_exists="replace", index=False)
 
+        payload_rows = [
+            (
+                batch_id,
+                export_date,
+                exported_at,
+                source,
+                json.dumps(row, ensure_ascii=False, default=str),
+            )
+            for row in finish_df.to_dict(orient="records")
+        ]
+        connection.execute("DELETE FROM bonds_enriched_incremental WHERE batch_id = ?", (batch_id,))
+        connection.executemany(
+            """
+            INSERT INTO bonds_enriched_incremental(batch_id, export_date, exported_at, source, row_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            payload_rows,
+        )
+        connection.commit()
 
-def fetch_and_save_bond_details(dataframe: pd.DataFrame, logger: logging.Logger, session: requests.Session) -> tuple[int, int, int, int]:
+
+def _export_finish_incremental(finish_df: pd.DataFrame, export_date: str, batch_id: str) -> Path:
+    FINISH_BATCH_DIR.mkdir(parents=True, exist_ok=True)
+    batch_path = FINISH_BATCH_DIR / f"Moex_Bonds_Finish_{export_date}_{batch_id}.xlsx"
+    finish_df.to_excel(batch_path, index=False)
+    finish_df.to_excel(FINISH_EXCEL_PATH, index=False)
+    return batch_path
+
+
+def _run_data_quality_checks(dataframe: pd.DataFrame, run_id: str, source: str, logger: logging.Logger) -> list[str]:
+    row_count = len(dataframe)
+    secid_col = next((c for c in ["SECID", "secid", "SecID"] if c in dataframe.columns), None)
+    isin_col = next((c for c in ["ISIN", "isin"] if c in dataframe.columns), None)
+
+    empty_secid_ratio = 1.0
+    empty_isin_ratio = 1.0
+    if secid_col:
+        secid_values = dataframe[secid_col].astype(str).str.strip()
+        empty_secid_ratio = float((secid_values == "").mean())
+    if isin_col:
+        isin_values = dataframe[isin_col].astype(str).str.strip()
+        empty_isin_ratio = float((isin_values == "").mean())
+
+    notes: list[str] = []
+    row_count_delta_ratio = None
+
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        prev = connection.execute(
+            """
+            SELECT row_count
+            FROM dq_run_history
+            ORDER BY run_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+        if prev and prev[0]:
+            previous_count = int(prev[0])
+            row_count_delta_ratio = abs(row_count - previous_count) / previous_count
+            if row_count_delta_ratio >= ROW_COUNT_SPIKE_THRESHOLD:
+                notes.append(
+                    f"Резкое изменение row_count: {previous_count} -> {row_count} ({row_count_delta_ratio:.1%})"
+                )
+
+        if empty_secid_ratio > 0.01:
+            notes.append(f"Высокая доля пустого SECID: {empty_secid_ratio:.2%}")
+        if empty_isin_ratio > 0.05:
+            notes.append(f"Высокая доля пустого ISIN: {empty_isin_ratio:.2%}")
+
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO dq_run_history(
+                run_id, run_at, source, row_count, empty_secid_ratio, empty_isin_ratio, row_count_delta_ratio, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                datetime.now().isoformat(timespec="seconds"),
+                source,
+                row_count,
+                empty_secid_ratio,
+                empty_isin_ratio,
+                row_count_delta_ratio,
+                " | ".join(notes),
+            ),
+        )
+        connection.commit()
+
+    for note in notes:
+        logger.warning("DQ check: %s", note)
+    if not notes:
+        logger.info("DQ check: ok (row_count=%s, empty SECID %.2f%%, empty ISIN %.2f%%)", row_count, empty_secid_ratio * 100, empty_isin_ratio * 100)
+
+    return notes
+
+
+def fetch_and_save_bond_details(dataframe: pd.DataFrame, logger: logging.Logger, session: requests.Session, export_date: str, source: str) -> tuple[int, int, int, int, Path]:
     cleanup_details_cache()
     secids = _pick_secids(dataframe)
     if not secids:
         logger.warning("Could not determine SECID list. Skipping details export")
-        return 0, 0, 0, 0
+        return 0, 0, 0, 0, FINISH_EXCEL_PATH
 
     working_endpoints = _discover_working_endpoints(session, secids[0], logger)
     if not working_endpoints:
         logger.warning("No working details endpoints found. Skipping details export")
-        return len(secids), 0, 0, 0
+        return len(secids), 0, 0, 0, FINISH_EXCEL_PATH
 
     endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {name: {} for name, _ in working_endpoints}
 
@@ -748,10 +891,11 @@ def fetch_and_save_bond_details(dataframe: pd.DataFrame, logger: logging.Logger,
     parquet_files = _update_details_parquet(merged_frames)
 
     finish_df = _merge_base_with_enrichment(dataframe, enrichment_df)
-    finish_df.to_excel(FINISH_EXCEL_PATH, index=False)
-    _persist_finish_to_sqlite(finish_df)
+    batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
+    batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
+    _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
     refresh_endpoint_health_mv()
-    return len(secids), excel_sheets, parquet_files, len(finish_df)
+    return len(secids), excel_sheets, parquet_files, len(finish_df), batch_path
 
 
 def _prepare_csv_for_pandas(csv_data: str) -> tuple[str, str]:
@@ -835,8 +979,17 @@ def main() -> int:
         excel_elapsed = time.perf_counter() - excel_started_at
         row_count = len(dataframe)
 
+        run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
+        dq_notes = _run_data_quality_checks(dataframe, run_id=run_id, source=data_source, logger=logger)
+
         details_started_at = time.perf_counter()
-        secids_count, details_sheets, parquet_files, finish_rows = fetch_and_save_bond_details(dataframe, logger, session)
+        secids_count, details_sheets, parquet_files, finish_rows, finish_batch_path = fetch_and_save_bond_details(
+            dataframe,
+            logger,
+            session,
+            export_date=today,
+            source=data_source,
+        )
         details_elapsed = time.perf_counter() - details_started_at
 
         persist_raw_response(csv_data)
@@ -855,6 +1008,8 @@ def main() -> int:
         )
         logger.info("Updated %s parquet detail files in %s", parquet_files, DETAILS_PARQUET_DIR)
         logger.info("Saved enriched finish dataset with %s rows to %s", finish_rows, FINISH_EXCEL_PATH)
+        logger.info("Saved incremental finish batch to %s", finish_batch_path)
+        logger.info("DQ warnings count: %s", len(dq_notes))
         logger.info("Raw response saved to %s", RAW_RESPONSE_PATH)
         logger.info("Execution time: %.3f seconds", elapsed)
         print("MOEX_API completed successfully")
