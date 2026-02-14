@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import argparse
-import hashlib
 import io
 import json
 import logging
@@ -10,7 +9,7 @@ import os
 import random
 import sqlite3
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -45,7 +44,7 @@ FINISH_EXCEL_PATH = BASE_DIR / "Moex_Bonds_Finish.xlsx"
 FINISH_BATCH_DIR = BASE_DIR / "finish_batches"
 DETAILS_PARQUET_DIR = BASE_DIR / "details_parquet"
 DETAILS_TTL_HOURS = 24
-DEFAULT_DETAILS_WORKER_PROCESSES = 2
+DEFAULT_DETAILS_WORKER_PROCESSES = min(16, max(4, (os.cpu_count() or 2) * 2))
 RANDOM_SECID_SAMPLE_SIZE = 10
 DETAILS_SAMPLE_ONLY = os.getenv("DETAILS_SAMPLE_ONLY", "0") == "1"
 CB_FAILURE_THRESHOLD = 3
@@ -125,6 +124,7 @@ def setup_logging() -> logging.Logger:
     file_handler.setFormatter(formatter)
 
     stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.WARNING)
     stream_handler.setFormatter(formatter)
 
     logger.addHandler(file_handler)
@@ -272,6 +272,24 @@ def init_db() -> None:
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_dq_metrics_daily_mv_run_day ON dq_metrics_daily_mv(run_day)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS etl_stage_sla (
+                run_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT NOT NULL,
+                duration_ms REAL NOT NULL,
+                status TEXT NOT NULL,
+                source TEXT,
+                details TEXT,
+                PRIMARY KEY(run_id, stage)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_etl_stage_sla_stage_finished ON etl_stage_sla(stage, finished_at)"
         )
         connection.execute(
             """
@@ -827,9 +845,10 @@ def _update_details_parquet(endpoint_frames: dict[str, dict[str, pd.DataFrame]])
             if frame.empty:
                 continue
             prepared = frame.copy()
-            prepared["_row_hash"] = prepared.apply(lambda row: hashlib.sha1(json.dumps(row.to_dict(), sort_keys=True, default=str).encode("utf-8")).hexdigest(), axis=1)
-            prepared["_updated_at"] = datetime.now().isoformat(timespec="seconds")
             prepared["block_name"] = block_name
+            hash_series = pd.util.hash_pandas_object(prepared.fillna(""), index=False).astype(str)
+            prepared["_row_hash"] = hash_series
+            prepared["_updated_at"] = datetime.now().isoformat(timespec="seconds")
             flat_frames.append(prepared)
 
         if not flat_frames:
@@ -949,9 +968,13 @@ def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging
 
     while True:
         url = f"{MOEX_INTRADAY_QUOTES_URL}&start={offset}"
-        response = session.get(url, timeout=20)
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response = session.get(url, timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as error:
+            logger.warning("Intraday snapshot skipped due to MOEX error: %s", error)
+            return 0
         marketdata = payload.get("marketdata", {}) if isinstance(payload, dict) else {}
         columns = marketdata.get("columns", []) if isinstance(marketdata, dict) else []
         data = marketdata.get("data", []) if isinstance(marketdata, dict) else []
@@ -997,8 +1020,7 @@ def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging
 
 def _print_details_progress(completed: int, total: int, eta_seconds: int) -> None:
     percent = (completed / total * 100) if total else 100.0
-    line = f"Details progress: {completed}/{total} ({percent:.1f}%), ETA {eta_seconds}s"
-    print(f"\r{line}", end="", flush=True)
+    print(f"\rProgress: {percent:5.1f}%", end="", flush=True)
     if completed >= total:
         print()
 
@@ -1133,7 +1155,7 @@ def fetch_and_save_bond_details(
 
     pending_secids = list(pending_by_secid.keys())
 
-    with ProcessPoolExecutor(max_workers=details_worker_processes) as executor:
+    with ThreadPoolExecutor(max_workers=details_worker_processes) as executor:
         futures = []
         for secid in pending_secids:
             allowed_endpoints = [(n, u) for n, u in pending_by_secid[secid] if not _is_circuit_open(n)]
@@ -1321,6 +1343,58 @@ def _build_daily_dq_report(logger: logging.Logger, report_day: date) -> Path:
     return report_path
 
 
+
+
+def _save_sla_stage_timer(run_id: str, stage: str, started_at: datetime, finished_at: datetime, status: str, source: str | None = None, details: str | None = None) -> float:
+    duration_ms = max((finished_at - started_at).total_seconds() * 1000, 0.0)
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO etl_stage_sla(run_id, stage, started_at, finished_at, duration_ms, status, source, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                stage,
+                started_at.isoformat(timespec="seconds"),
+                finished_at.isoformat(timespec="seconds"),
+                duration_ms,
+                status,
+                source,
+                details,
+            ),
+        )
+        connection.commit()
+    return duration_ms
+
+
+def _check_sla_degradation(stage: str, duration_ms: float, logger: logging.Logger) -> None:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        row = connection.execute(
+            """
+            SELECT AVG(duration_ms), COUNT(*)
+            FROM (
+                SELECT duration_ms
+                FROM etl_stage_sla
+                WHERE stage = ? AND status = 'ok'
+                ORDER BY finished_at DESC
+                LIMIT 30
+            )
+            """,
+            (stage,),
+        ).fetchone()
+
+    baseline_ms = float(row[0]) if row and row[0] is not None else None
+    samples = int(row[1]) if row and row[1] is not None else 0
+    if baseline_ms and samples >= 5 and duration_ms > baseline_ms * 1.5 and (duration_ms - baseline_ms) > 1000:
+        logger.warning(
+            "SLA degradation detected for %s: %.0fms vs baseline %.0fms (%s samples)",
+            stage,
+            duration_ms,
+            baseline_ms,
+            samples,
+        )
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MOEX bonds ETL pipeline")
     parser.add_argument(
@@ -1347,10 +1421,12 @@ def main() -> int:
     start_time = time.perf_counter()
     today = date.today().isoformat()
     data_source = "cache"
+    run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
 
     logger.info("MOEX API script started")
 
     try:
+        fetch_started_dt = datetime.now()
         try:
             csv_data = get_cached_data(today)
             logger.info("Using cached data for %s", today)
@@ -1366,6 +1442,7 @@ def main() -> int:
                     cached_date, csv_data = get_latest_cached_data()
                 except CacheMissError:
                     elapsed = time.perf_counter() - start_time
+                    _save_sla_stage_timer(run_id, "fetch", fetch_started_dt, datetime.now(), "error", source=data_source, details="MOEX unavailable and cache empty")
                     logger.error("MOEX is unavailable (%s) and cache is empty", error)
                     logger.info("Execution time before failure: %.3f seconds", elapsed)
                     print("MOEX_API failed: MOEX unavailable and cache is empty")
@@ -1377,10 +1454,14 @@ def main() -> int:
                     error,
                     cached_date,
                 )
+        fetch_duration_ms = _save_sla_stage_timer(run_id, "fetch", fetch_started_dt, datetime.now(), "ok", source=data_source)
+        _check_sla_degradation("fetch", fetch_duration_ms, logger)
 
-        parse_started_at = time.perf_counter()
+        parse_started_dt = datetime.now()
         dataframe = parse_rates_csv(csv_data)
-        parse_elapsed = time.perf_counter() - parse_started_at
+        parse_elapsed = (datetime.now() - parse_started_dt).total_seconds()
+        parse_duration_ms = _save_sla_stage_timer(run_id, "parse", parse_started_dt, datetime.now(), "ok", source=data_source, details=f"rows={len(dataframe)}")
+        _check_sla_degradation("parse", parse_duration_ms, logger)
 
         excel_started_at = time.perf_counter()
         if args.debug:
@@ -1390,10 +1471,9 @@ def main() -> int:
         excel_elapsed = time.perf_counter() - excel_started_at
         row_count = len(dataframe)
 
-        run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
         dq_notes = _run_data_quality_checks(dataframe, run_id=run_id, source=data_source, logger=logger)
 
-        details_started_at = time.perf_counter()
+        details_started_dt = datetime.now()
         secids_count, details_sheets, parquet_files, finish_rows, finish_batch_path = fetch_and_save_bond_details(
             dataframe,
             logger,
@@ -1403,12 +1483,17 @@ def main() -> int:
             details_worker_processes=details_worker_processes,
             debug=args.debug,
         )
-        details_elapsed = time.perf_counter() - details_started_at
+        details_elapsed = (datetime.now() - details_started_dt).total_seconds()
+        details_duration_ms = _save_sla_stage_timer(run_id, "details", details_started_dt, datetime.now(), "ok", source=data_source, details=f"secids={secids_count}")
+        _check_sla_degradation("details", details_duration_ms, logger)
 
+        export_started_dt = datetime.now()
         dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
         intraday_rows = _persist_intraday_quotes_snapshot(session, logger)
-
         persist_raw_response(csv_data)
+        export_duration_ms = _save_sla_stage_timer(run_id, "export", export_started_dt, datetime.now(), "ok", source=data_source, details=f"intraday_rows={intraday_rows}")
+        _check_sla_degradation("export", export_duration_ms, logger)
+
         elapsed = time.perf_counter() - start_time
 
         logger.info("Data source: %s", data_source)
@@ -1434,11 +1519,11 @@ def main() -> int:
         logger.info("Intraday quotes snapshot rows: %s", intraday_rows)
         logger.info("Raw response saved to %s", RAW_RESPONSE_PATH)
         logger.info("Execution time: %.3f seconds", elapsed)
-        print("MOEX_API completed successfully")
         return 0
 
     except Exception as error:
         elapsed = time.perf_counter() - start_time
+        _save_sla_stage_timer(run_id, "export", datetime.now(), datetime.now(), "error", source=data_source, details=str(error))
         logger.error("Script failed: %s", error)
         logger.info("Execution time before failure: %.3f seconds", elapsed)
         print(f"MOEX_API failed: {error}")
