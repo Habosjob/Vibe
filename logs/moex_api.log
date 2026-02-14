@@ -1,0 +1,96 @@
+2026-02-14 00:33:45,030 | INFO | MOEX API script started
+2026-02-14 00:33:45,036 | INFO | Using cached data for 2026-02-14
+2026-02-14 00:33:52,911 | INFO | Endpoint security_overview is available (blocks: description, boards)
+2026-02-14 00:33:52,970 | INFO | Endpoint bondization is available (blocks: amortizations, coupons, offers)
+2026-02-14 00:33:53,032 | INFO | Endpoint bondization_stats is available (blocks: amortizations, amortizations.cursor, coupons, coupons.cursor, offers)
+2026-02-14 00:33:53,065 | INFO | Endpoint security_events is available (blocks: description, boards)
+2026-02-14 00:33:53,078 | INFO | Details security_overview for RU000A1021G3 loaded from cache
+2026-02-14 00:33:53,102 | INFO | Details bondization for RU000A1021G3 loaded from cache
+2026-02-14 00:33:53,127 | INFO | Details bondization_stats for RU000A1021G3 loaded from cache
+2026-02-14 00:33:53,153 | INFO | Details security_events for RU000A1021G3 loaded from cache
+2026-02-14 00:33:53,177 | INFO | Details security_overview for RU000A102GA7 loaded from cache
+2026-02-14 00:33:53,213 | INFO | Details bondization for RU000A102GA7 loaded from cache
+2026-02-14 00:33:53,228 | INFO | Details bondization_stats for RU000A102GA7 loaded from cache
+2026-02-14 00:33:53,251 | INFO | Details security_events for RU000A102GA7 loaded from cache
+2026-02-14 00:33:53,273 | INFO | Details security_overview for RU000A102SU0 loaded from cache
+2026-02-14 00:33:53,293 | INFO | Details bondization for RU000A102SU0 loaded from cache
+2026-02-14 00:33:53,315 | INFO | Details bondization_stats for RU000A102SU0 loaded from cache
+2026-02-14 00:33:53,336 | INFO | Details security_events for RU000A102SU0 loaded from cache
+2026-02-14 00:33:53,355 | INFO | Details security_overview for RU000A106805 loaded from cache
+2026-02-14 00:33:53,374 | INFO | Details bondization for RU000A106805 loaded from cache
+2026-02-14 00:33:53,395 | INFO | Details bondization_stats for RU000A106805 loaded from cache
+2026-02-14 00:33:53,417 | INFO | Details security_events for RU000A106805 loaded from cache
+2026-02-14 00:33:53,434 | INFO | Details security_overview for RU000A107GM1 loaded from cache
+2026-02-14 00:33:53,453 | INFO | Details bondization for RU000A107GM1 loaded from cache
+2026-02-14 00:33:53,468 | INFO | Details bondization_stats for RU000A107GM1 loaded from cache
+2026-02-14 00:33:53,512 | INFO | Details security_events for RU000A107GM1 loaded from cache
+2026-02-14 00:33:53,524 | INFO | Details security_overview for RU000A108QE5 loaded from cache
+2026-02-14 00:33:53,553 | INFO | Details bondization for RU000A108QE5 loaded from cache
+2026-02-14 00:33:53,574 | INFO | Details bondization_stats for RU000A108QE5 loaded from cache
+2026-02-14 00:33:53,602 | INFO | Details security_events for RU000A108QE5 loaded from cache
+2026-02-14 00:33:53,622 | INFO | Details security_overview for RU000A1094W7 loaded from cache
+2026-02-14 00:33:53,642 | INFO | Details bondization for RU000A1094W7 loaded from cache
+2026-02-14 00:33:53,662 | INFO | Details bondization_stats for RU000A1094W7 loaded from cache
+2026-02-14 00:33:53,683 | INFO | Details security_events for RU000A1094W7 loaded from cache
+2026-02-14 00:33:53,699 | INFO | Details security_overview for RU000A109BW7 loaded from cache
+2026-02-14 00:33:53,718 | INFO | Details bondization for RU000A109BW7 loaded from cache
+2026-02-14 00:33:53,740 | INFO | Details bondization_stats for RU000A109BW7 loaded from cache
+2026-02-14 00:33:53,759 | INFO | Details security_events for RU000A109BW7 loaded from cache
+2026-02-14 00:33:53,775 | INFO | Details security_overview for RU000A109K40 loaded from cache
+2026-02-14 00:33:53,795 | INFO | Details bondization for RU000A109K40 loaded from cache
+2026-02-14 00:33:53,815 | INFO | Details bondization_stats for RU000A109K40 loaded from cache
+2026-02-14 00:33:53,841 | INFO | Details security_events for RU000A109K40 loaded from cache
+2026-02-14 00:33:53,858 | INFO | Details security_overview for RU000A10AEA0 loaded from cache
+2026-02-14 00:33:53,881 | INFO | Details bondization for RU000A10AEA0 loaded from cache
+2026-02-14 00:33:53,902 | INFO | Details bondization_stats for RU000A10AEA0 loaded from cache
+2026-02-14 00:33:53,920 | INFO | Details security_events for RU000A10AEA0 loaded from cache
+2026-02-14 00:33:53,942 | INFO | Details security_overview for RU000A10AFQ3 loaded from cache
+2026-02-14 00:33:53,960 | INFO | Details bondization for RU000A10AFQ3 loaded from cache
+2026-02-14 00:33:53,981 | INFO | Details bondization_stats for RU000A10AFQ3 loaded from cache
+2026-02-14 00:33:54,004 | INFO | Details security_events for RU000A10AFQ3 loaded from cache
+2026-02-14 00:33:54,028 | INFO | Details security_overview for RU000A10AM16 loaded from cache
+2026-02-14 00:33:54,047 | INFO | Details bondization for RU000A10AM16 loaded from cache
+2026-02-14 00:33:54,070 | INFO | Details bondization_stats for RU000A10AM16 loaded from cache
+2026-02-14 00:33:54,093 | INFO | Details security_events for RU000A10AM16 loaded from cache
+2026-02-14 00:33:54,109 | INFO | Details security_overview for RU000A10B4W8 loaded from cache
+2026-02-14 00:33:54,130 | INFO | Details bondization for RU000A10B4W8 loaded from cache
+2026-02-14 00:33:54,150 | INFO | Details bondization_stats for RU000A10B4W8 loaded from cache
+2026-02-14 00:33:54,169 | INFO | Details security_events for RU000A10B4W8 loaded from cache
+2026-02-14 00:33:54,189 | INFO | Details security_overview for RU000A10BFQ1 loaded from cache
+2026-02-14 00:33:54,212 | INFO | Details bondization for RU000A10BFQ1 loaded from cache
+2026-02-14 00:33:54,228 | INFO | Details bondization_stats for RU000A10BFQ1 loaded from cache
+2026-02-14 00:33:54,252 | INFO | Details security_events for RU000A10BFQ1 loaded from cache
+2026-02-14 00:33:54,271 | INFO | Details security_overview for RU000A10BJL4 loaded from cache
+2026-02-14 00:33:54,288 | INFO | Details bondization for RU000A10BJL4 loaded from cache
+2026-02-14 00:33:54,313 | INFO | Details bondization_stats for RU000A10BJL4 loaded from cache
+2026-02-14 00:33:54,375 | INFO | Details security_events for RU000A10BJL4 loaded from cache
+2026-02-14 00:33:54,399 | INFO | Details security_overview for RU000A10BRN3 loaded from cache
+2026-02-14 00:33:54,417 | INFO | Details bondization for RU000A10BRN3 loaded from cache
+2026-02-14 00:33:54,444 | INFO | Details bondization_stats for RU000A10BRN3 loaded from cache
+2026-02-14 00:33:54,471 | INFO | Details security_events for RU000A10BRN3 loaded from cache
+2026-02-14 00:33:54,497 | INFO | Details security_overview for RU000A10CPQ8 loaded from cache
+2026-02-14 00:33:54,523 | INFO | Details bondization for RU000A10CPQ8 loaded from cache
+2026-02-14 00:33:54,548 | INFO | Details bondization_stats for RU000A10CPQ8 loaded from cache
+2026-02-14 00:33:54,576 | INFO | Details security_events for RU000A10CPQ8 loaded from cache
+2026-02-14 00:33:54,593 | INFO | Details security_overview for RU000A10D616 loaded from cache
+2026-02-14 00:33:54,610 | INFO | Details bondization for RU000A10D616 loaded from cache
+2026-02-14 00:33:54,635 | INFO | Details bondization_stats for RU000A10D616 loaded from cache
+2026-02-14 00:33:54,656 | INFO | Details security_events for RU000A10D616 loaded from cache
+2026-02-14 00:33:54,678 | INFO | Details security_overview for RU000A10DKS3 loaded from cache
+2026-02-14 00:33:54,696 | INFO | Details bondization for RU000A10DKS3 loaded from cache
+2026-02-14 00:33:54,716 | INFO | Details bondization_stats for RU000A10DKS3 loaded from cache
+2026-02-14 00:33:54,736 | INFO | Details security_events for RU000A10DKS3 loaded from cache
+2026-02-14 00:33:54,755 | INFO | Details security_overview for SU26212RMFS9 loaded from cache
+2026-02-14 00:33:54,775 | INFO | Details bondization for SU26212RMFS9 loaded from cache
+2026-02-14 00:33:54,798 | INFO | Details bondization_stats for SU26212RMFS9 loaded from cache
+2026-02-14 00:33:54,822 | INFO | Details security_events for SU26212RMFS9 loaded from cache
+2026-02-14 00:34:21,814 | INFO | Data source: cache
+2026-02-14 00:34:21,814 | INFO | CSV parse time: 0.143 seconds
+2026-02-14 00:34:21,814 | INFO | Excel export time: 7.282 seconds
+2026-02-14 00:34:21,814 | INFO | Details export time: 29.341 seconds
+2026-02-14 00:34:21,814 | INFO | Saved 3910 rows to C:\Users\user\Documents\Инвестиции\Vibe\Moex_Bonds.xlsx
+2026-02-14 00:34:21,814 | INFO | Saved extended details for 20 securities into 13 endpoint sheets (C:\Users\user\Documents\Инвестиции\Vibe\Moex_Bonds_Details.xlsx)
+2026-02-14 00:34:21,814 | INFO | Updated 4 parquet detail files in C:\Users\user\Documents\Инвестиции\Vibe\details_parquet
+2026-02-14 00:34:21,814 | INFO | Saved enriched finish dataset with 3910 rows to C:\Users\user\Documents\Инвестиции\Vibe\Moex_Bonds_Finish.xlsx
+2026-02-14 00:34:21,814 | INFO | Raw response saved to C:\Users\user\Documents\Инвестиции\Vibe\logs\raw_response_latest.csv
+2026-02-14 00:34:21,814 | INFO | Execution time: 36.782 seconds

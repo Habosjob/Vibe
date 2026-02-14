@@ -1,5 +1,4 @@
 __pycache__/
 *.pyc
 DB/
-logs/
 Moex_Bonds.xlsx
