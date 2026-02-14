@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Large local artifacts and databases
+DB/*.sqlite3
+*.db
+*.sqlite
+*.sql
+*.sql.gz
+*.dump
+*.bak
+
+# Runtime outputs
+logs/*.log
+logs/*.csv
+logs/dq_daily_report_*.txt
+finish_batches/*.xlsx
+details_parquet/*.parquet
+
+# Generated spreadsheets
+Moex_Bonds.xlsx
+Moex_Bonds_Details.xlsx
+Moex_Bonds_Finish.xlsx

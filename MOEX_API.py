@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import argparse
 import hashlib
 import io
 import json
@@ -39,7 +40,7 @@ FINISH_EXCEL_PATH = BASE_DIR / "Moex_Bonds_Finish.xlsx"
 FINISH_BATCH_DIR = BASE_DIR / "finish_batches"
 DETAILS_PARQUET_DIR = BASE_DIR / "details_parquet"
 DETAILS_TTL_HOURS = 24
-DETAILS_WORKER_PROCESSES = 2
+DEFAULT_DETAILS_WORKER_PROCESSES = 2
 RANDOM_SECID_SAMPLE_SIZE = 10
 DETAILS_SAMPLE_ONLY = os.getenv("DETAILS_SAMPLE_ONLY", "0") == "1"
 CB_FAILURE_THRESHOLD = 3
@@ -156,6 +157,17 @@ def init_db() -> None:
                 secid TEXT NOT NULL,
                 block_name TEXT NOT NULL,
                 row_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS details_update_watermark (
+                endpoint TEXT NOT NULL,
+                secid TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(endpoint, secid, fetched_at)
             )
             """
         )
@@ -484,12 +496,12 @@ def refresh_endpoint_health_mv() -> None:
             )
         connection.commit()
 
-def _get_cached_endpoint_payload(endpoint_name: str, secid: str) -> dict | None:
+def _get_cached_endpoint_record(endpoint_name: str, secid: str) -> tuple[dict, str] | None:
     cutoff = (datetime.now() - timedelta(hours=DETAILS_TTL_HOURS)).isoformat(timespec="seconds")
     with sqlite3.connect(CACHE_DB_PATH) as connection:
         row = connection.execute(
             """
-            SELECT response_json
+            SELECT response_json, fetched_at
             FROM details_cache
             WHERE endpoint = ? AND secid = ? AND fetched_at >= ?
             """,
@@ -498,11 +510,37 @@ def _get_cached_endpoint_payload(endpoint_name: str, secid: str) -> dict | None:
 
     if row is None:
         return None
-    return json.loads(row[0])
+    return json.loads(row[0]), row[1]
 
 
-def _save_endpoint_payload(endpoint_name: str, secid: str, payload: dict) -> None:
-    now = datetime.now().isoformat(timespec="seconds")
+def _watermark_exists(endpoint_name: str, secid: str, fetched_at: str) -> bool:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM details_update_watermark
+            WHERE endpoint = ? AND secid = ? AND fetched_at = ?
+            LIMIT 1
+            """,
+            (endpoint_name, secid, fetched_at),
+        ).fetchone()
+    return row is not None
+
+
+def _save_watermark(endpoint_name: str, secid: str, fetched_at: str) -> None:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO details_update_watermark(endpoint, secid, fetched_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (endpoint_name, secid, fetched_at, datetime.now().isoformat(timespec="seconds")),
+        )
+        connection.commit()
+
+
+def _save_endpoint_payload(endpoint_name: str, secid: str, payload: dict, fetched_at: str | None = None) -> str:
+    now = fetched_at or datetime.now().isoformat(timespec="seconds")
     serialized_payload = json.dumps(payload, ensure_ascii=False)
     blocks = _extract_blocks(payload)
 
@@ -540,6 +578,7 @@ def _save_endpoint_payload(endpoint_name: str, secid: str, payload: dict) -> Non
                 rows_to_insert,
             )
         connection.commit()
+    return now
 
 
 def _discover_working_endpoints(session: requests.Session, sample_secid: str, logger: logging.Logger) -> list[tuple[str, str]]:
@@ -821,7 +860,14 @@ def _run_data_quality_checks(dataframe: pd.DataFrame, run_id: str, source: str, 
     return notes
 
 
-def fetch_and_save_bond_details(dataframe: pd.DataFrame, logger: logging.Logger, session: requests.Session, export_date: str, source: str) -> tuple[int, int, int, int, Path]:
+def fetch_and_save_bond_details(
+    dataframe: pd.DataFrame,
+    logger: logging.Logger,
+    session: requests.Session,
+    export_date: str,
+    source: str,
+    details_worker_processes: int,
+) -> tuple[int, int, int, int, Path]:
     cleanup_details_cache()
     secids = _pick_secids(dataframe)
     if not secids:
@@ -835,33 +881,47 @@ def fetch_and_save_bond_details(dataframe: pd.DataFrame, logger: logging.Logger,
 
     endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {name: {} for name, _ in working_endpoints}
 
+    pending_by_secid: dict[str, list[tuple[str, str]]] = {}
     for secid in secids:
+        missing_endpoints: list[tuple[str, str]] = []
         for endpoint_name, endpoint_url in working_endpoints:
-            cached_payload = _get_cached_endpoint_payload(endpoint_name, secid)
-            if cached_payload is None:
+            cached_record = _get_cached_endpoint_record(endpoint_name, secid)
+            if cached_record is None:
+                missing_endpoints.append((endpoint_name, endpoint_url))
                 continue
+            cached_payload, fetched_at = cached_record
             blocks = _extract_blocks(cached_payload)
             logger.info("Details %s for %s loaded from cache", endpoint_name, secid)
             _save_endpoint_health(endpoint_name, secid, "ok", "cache", None, 0.0, list(blocks.keys()), None)
+            _save_watermark(endpoint_name, secid, fetched_at)
             for block_name, block_df in blocks.items():
                 if not block_df.empty:
                     endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
+        if missing_endpoints:
+            pending_by_secid[secid] = missing_endpoints
 
-    pending_secids = []
-    for secid in secids:
-        if any(_get_cached_endpoint_payload(endpoint_name, secid) is None for endpoint_name, _ in working_endpoints):
-            pending_secids.append(secid)
+    pending_secids = list(pending_by_secid.keys())
 
-    with ProcessPoolExecutor(max_workers=DETAILS_WORKER_PROCESSES) as executor:
+    with ProcessPoolExecutor(max_workers=details_worker_processes) as executor:
         futures = []
         for secid in pending_secids:
-            allowed_endpoints = [(n, u) for n, u in working_endpoints if not _is_circuit_open(n)]
+            allowed_endpoints = [(n, u) for n, u in pending_by_secid[secid] if not _is_circuit_open(n)]
             if not allowed_endpoints:
                 logger.warning("All endpoints are blocked by circuit breaker for %s", secid)
                 continue
             futures.append(executor.submit(_fetch_details_worker, secid, allowed_endpoints))
 
+        completed = 0
+        total = len(futures)
+        progress_started_at = time.perf_counter()
         for future in as_completed(futures):
+            completed += 1
+            elapsed = time.perf_counter() - progress_started_at
+            avg_seconds = elapsed / completed if completed else 0.0
+            remaining = max(total - completed, 0)
+            eta_seconds = int(avg_seconds * remaining)
+            percent = (completed / total * 100) if total else 100.0
+            print(f"Details progress: {completed}/{total} ({percent:.1f}%), ETA {eta_seconds}s")
             for endpoint_name, secid, payload, latency_ms, status_code, error_text in future.result():
                 if payload is None:
                     _save_endpoint_health(endpoint_name, secid, "error", "network", status_code, latency_ms, None, error_text)
@@ -870,9 +930,20 @@ def fetch_and_save_bond_details(dataframe: pd.DataFrame, logger: logging.Logger,
                     continue
 
                 _update_circuit_breaker(endpoint_name, is_success=True)
-                _save_endpoint_payload(endpoint_name, secid, payload)
+                network_fetched_at = datetime.now().isoformat(timespec="seconds")
+                if _watermark_exists(endpoint_name, secid, network_fetched_at):
+                    logger.info("Skip details update for %s:%s by watermark %s", endpoint_name, secid, network_fetched_at)
+                    continue
+
+                persisted_fetched_at = _save_endpoint_payload(
+                    endpoint_name,
+                    secid,
+                    payload,
+                    fetched_at=network_fetched_at,
+                )
                 blocks = _extract_blocks(payload)
                 _save_endpoint_health(endpoint_name, secid, "ok", "network", status_code, latency_ms, list(blocks.keys()), None)
+                _save_watermark(endpoint_name, secid, persisted_fetched_at)
                 logger.info("Details %s for %s loaded from network", endpoint_name, secid)
                 for block_name, block_df in blocks.items():
                     if not block_df.empty:
@@ -931,10 +1002,108 @@ def _prepare_csv_for_pandas(csv_data: str) -> tuple[str, str]:
     return "\n".join(filtered_lines), delimiter
 
 
+def _resolve_details_worker_processes(cli_value: int | None, logger: logging.Logger) -> int:
+    if cli_value is not None:
+        value = cli_value
+        source = "cli"
+    else:
+        raw_env = os.getenv("DETAILS_WORKER_PROCESSES", str(DEFAULT_DETAILS_WORKER_PROCESSES)).strip()
+        try:
+            value = int(raw_env)
+        except ValueError:
+            logger.warning(
+                "Invalid DETAILS_WORKER_PROCESSES env value '%s'. Fallback to %s",
+                raw_env,
+                DEFAULT_DETAILS_WORKER_PROCESSES,
+            )
+            value = DEFAULT_DETAILS_WORKER_PROCESSES
+        source = "env/default"
+
+    if value < 1:
+        logger.warning("DETAILS_WORKER_PROCESSES must be >= 1, got %s. Fallback to 1", value)
+        value = 1
+
+    logger.info("Details worker processes resolved to %s (%s)", value, source)
+    return value
+
+
+def _build_daily_dq_report(logger: logging.Logger, report_day: date) -> Path:
+    report_path = LOGS_DIR / f"dq_daily_report_{report_day.isoformat()}.txt"
+    day_start = datetime.combine(report_day, datetime.min.time())
+    day_end = day_start + timedelta(days=1)
+
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        daily_rows = connection.execute(
+            """
+            SELECT run_at, row_count, notes
+            FROM dq_run_history
+            WHERE run_at >= ? AND run_at < ?
+            ORDER BY run_at ASC
+            """,
+            (day_start.isoformat(timespec="seconds"), day_end.isoformat(timespec="seconds")),
+        ).fetchall()
+        trend_rows = connection.execute(
+            """
+            SELECT substr(run_at, 1, 10) AS run_day, AVG(row_count) AS avg_row_count, MAX(row_count) AS max_row_count
+            FROM dq_run_history
+            WHERE run_at >= ?
+            GROUP BY run_day
+            ORDER BY run_day DESC
+            LIMIT 7
+            """,
+            ((day_start - timedelta(days=30)).isoformat(timespec="seconds"),),
+        ).fetchall()
+
+    warning_counts: dict[str, int] = {}
+    for _, _, notes in daily_rows:
+        if not notes:
+            continue
+        for note in [part.strip() for part in str(notes).split("|") if part.strip()]:
+            warning_counts[note] = warning_counts.get(note, 0) + 1
+
+    top_warnings = sorted(warning_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+    trend_rows_desc = trend_rows
+    trend_rows_asc = list(reversed(trend_rows_desc))
+
+    lines = [
+        f"DQ daily report for {report_day.isoformat()}",
+        f"Runs today: {len(daily_rows)}",
+        "Top warnings:",
+    ]
+    if top_warnings:
+        lines.extend([f"- {warning} (count={count})" for warning, count in top_warnings])
+    else:
+        lines.append("- none")
+
+    lines.append("Row count trend (last <=7 days):")
+    if trend_rows_asc:
+        for run_day, avg_row_count, max_row_count in trend_rows_asc:
+            lines.append(f"- {run_day}: avg={avg_row_count:.1f}, max={int(max_row_count)}")
+    else:
+        lines.append("- no history")
+
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("Daily DQ report saved to %s", report_path)
+    return report_path
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="MOEX bonds ETL pipeline")
+    parser.add_argument(
+        "--details-worker-processes",
+        type=int,
+        default=None,
+        help="Worker process count for details fetching. Overrides DETAILS_WORKER_PROCESSES env.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = _parse_args()
     logger = setup_logging()
     init_db()
     session = build_retry_session()
+    details_worker_processes = _resolve_details_worker_processes(args.details_worker_processes, logger)
 
     start_time = time.perf_counter()
     today = date.today().isoformat()
@@ -989,8 +1158,11 @@ def main() -> int:
             session,
             export_date=today,
             source=data_source,
+            details_worker_processes=details_worker_processes,
         )
         details_elapsed = time.perf_counter() - details_started_at
+
+        dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
 
         persist_raw_response(csv_data)
         elapsed = time.perf_counter() - start_time
@@ -1010,6 +1182,7 @@ def main() -> int:
         logger.info("Saved enriched finish dataset with %s rows to %s", finish_rows, FINISH_EXCEL_PATH)
         logger.info("Saved incremental finish batch to %s", finish_batch_path)
         logger.info("DQ warnings count: %s", len(dq_notes))
+        logger.info("DQ daily report path: %s", dq_daily_report_path)
         logger.info("Raw response saved to %s", RAW_RESPONSE_PATH)
         logger.info("Execution time: %.3f seconds", elapsed)
         print("MOEX_API completed successfully")
