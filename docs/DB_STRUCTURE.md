@@ -67,6 +67,25 @@
 - `row_count_delta_ratio` — относительное отклонение от предыдущего прогона
 - `notes` — предупреждения качества
 
+### `dq_metrics_daily_mv`
+Материализованный дневной агрегат DQ-метрик (для быстрых дашбордов/алертов).
+- `run_day` — день (`YYYY-MM-DD`, PK)
+- `runs_count` — число прогонов за день
+- `avg_row_count` / `max_row_count` / `min_row_count` — агрегаты по `row_count`
+- `avg_empty_secid_ratio` / `avg_empty_isin_ratio` — средние DQ-доли
+- `max_row_count_delta_ratio` — максимальное отклонение за день
+- `warning_runs_count` — число прогонов с warning-нотой
+- `updated_at` — время пересчёта MV
+
+### `intraday_quotes_snapshot`
+Снапшоты внутридневных котировок (быстрый сбор по всем бумагам).
+- `snapshot_at` — время снапшота
+- `secid` — бумага
+- `boardid` — торговый режим
+- `tradingstatus` — статус торгов
+- `last`, `numtrades`, `volvalue`, `updatetime` — поля marketdata
+- PK: (`snapshot_at`, `secid`, `boardid`)
+
 ### `bonds_enriched`
 Актуальный full snapshot финальной таблицы (перезаписывается на каждом прогоне).
 
@@ -80,7 +99,7 @@
 - Индекс: `idx_bonds_enriched_incremental_export_date_batch(export_date, batch_id)`
 
 ## Экспортные файлы
-- `Moex_Bonds.xlsx` — базовый CSV-экспорт.
-- `Moex_Bonds_Details.xlsx` — endpoint/block-листы + `details_transposed`.
-- `Moex_Bonds_Finish.xlsx` — последний финальный срез.
+- `Moex_Bonds.xlsx` — базовый CSV-экспорт (только в режиме `--debug`).
+- `Moex_Bonds_Details.xlsx` — endpoint/block-листы + `details_transposed` (только в `--debug`).
+- `Moex_Bonds_Finish.xlsx` — последний финальный срез (всегда генерируется).
 - `finish_batches/Moex_Bonds_Finish_<date>_<batch>.xlsx` — инкрементальные batch-экспорты.
