@@ -27,6 +27,11 @@ MOEX_RATES_URL = (
     "iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&"
     "limit=unlimited&lang=ru"
 )
+MOEX_INTRADAY_QUOTES_URL = (
+    "https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json?"
+    "iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,BOARDID,TRADINGSTATUS,LAST,NUMTRADES,VOLVALUE,UPDATETIME&"
+    "limit=100"
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_DIR = BASE_DIR / "DB"
@@ -47,6 +52,9 @@ CB_FAILURE_THRESHOLD = 3
 CB_COOLDOWN_SECONDS = 180
 HEALTH_RETENTION_DAYS = 14
 ROW_COUNT_SPIKE_THRESHOLD = 0.30
+DISCOVERY_MAX_ATTEMPTS = 4
+DISCOVERY_BACKOFF_BASE_SECONDS = 0.7
+DISCOVERY_BACKOFF_MAX_SECONDS = 8.0
 
 STATIC_SECIDS = [
     "RU000A1021G3",
@@ -247,6 +255,43 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_dq_run_history_run_at ON dq_run_history(run_at)"
         )
         connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dq_metrics_daily_mv (
+                run_day TEXT PRIMARY KEY,
+                runs_count INTEGER NOT NULL,
+                avg_row_count REAL NOT NULL,
+                max_row_count INTEGER NOT NULL,
+                min_row_count INTEGER NOT NULL,
+                avg_empty_secid_ratio REAL NOT NULL,
+                avg_empty_isin_ratio REAL NOT NULL,
+                max_row_count_delta_ratio REAL,
+                warning_runs_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dq_metrics_daily_mv_run_day ON dq_metrics_daily_mv(run_day)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intraday_quotes_snapshot (
+                snapshot_at TEXT NOT NULL,
+                secid TEXT NOT NULL,
+                boardid TEXT,
+                tradingstatus TEXT,
+                last REAL,
+                numtrades REAL,
+                volvalue REAL,
+                updatetime TEXT,
+                PRIMARY KEY(snapshot_at, secid, boardid)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intraday_quotes_snapshot_snapshot_at ON intraday_quotes_snapshot(snapshot_at)"
+        )
+        connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_bonds_enriched_incremental_export_date_batch ON bonds_enriched_incremental(export_date, batch_id)"
         )
         connection.commit()
@@ -358,6 +403,62 @@ def _fetch_endpoint_payload(session: requests.Session, endpoint_name: str, secid
     if not isinstance(payload, dict):
         raise ValueError(f"Unexpected JSON shape for {endpoint_name}:{secid}")
     return payload, latency_ms, status_code
+
+
+def _fetch_endpoint_payload_with_discovery_backoff(
+    session: requests.Session,
+    endpoint_name: str,
+    secid: str,
+    endpoint_url: str,
+    logger: logging.Logger,
+) -> tuple[dict, float, int | None]:
+    last_error: Exception | None = None
+    for attempt in range(1, DISCOVERY_MAX_ATTEMPTS + 1):
+        try:
+            return _fetch_endpoint_payload(session, endpoint_name, secid, endpoint_url)
+        except Exception as error:  # noqa: BLE001
+            last_error = error
+            if attempt >= DISCOVERY_MAX_ATTEMPTS:
+                break
+            backoff = min(DISCOVERY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), DISCOVERY_BACKOFF_MAX_SECONDS)
+            jitter = random.uniform(0, backoff * 0.35)
+            sleep_for = backoff + jitter
+            logger.warning(
+                "Discovery call %s for %s failed on attempt %s/%s (%s). Retry in %.2fs",
+                endpoint_name,
+                secid,
+                attempt,
+                DISCOVERY_MAX_ATTEMPTS,
+                error,
+                sleep_for,
+            )
+            time.sleep(sleep_for)
+
+    assert last_error is not None
+    raise last_error
+
+
+def _precheck_details_endpoints_health(session: requests.Session, secid: str, logger: logging.Logger) -> list[tuple[str, str]]:
+    healthy: list[tuple[str, str]] = []
+    for endpoint_name, endpoint_url in DETAILS_ENDPOINTS:
+        if _is_circuit_open(endpoint_name):
+            logger.warning("Endpoint %s precheck skipped: circuit breaker is open", endpoint_name)
+            continue
+        probe_url = endpoint_url.format(secid=secid)
+        started = time.perf_counter()
+        try:
+            response = session.get(probe_url, timeout=6)
+            latency_ms = (time.perf_counter() - started) * 1000
+            if response.status_code >= 500:
+                _save_endpoint_health(endpoint_name, secid, "error", "precheck", response.status_code, latency_ms, None, "5xx during precheck")
+                logger.warning("Endpoint %s precheck failed with HTTP %s", endpoint_name, response.status_code)
+                continue
+            _save_endpoint_health(endpoint_name, secid, "ok", "precheck", response.status_code, latency_ms, None, None)
+            healthy.append((endpoint_name, endpoint_url))
+        except requests.RequestException as error:
+            _save_endpoint_health(endpoint_name, secid, "error", "precheck", None, None, None, str(error))
+            logger.warning("Endpoint %s precheck request failed: %s", endpoint_name, error)
+    return healthy
 
 
 def _save_endpoint_health(endpoint_name: str, secid: str, status: str, source: str, http_status: int | None, latency_ms: float | None, blocks: list[str] | None, error_text: str | None) -> None:
@@ -581,14 +682,25 @@ def _save_endpoint_payload(endpoint_name: str, secid: str, payload: dict, fetche
     return now
 
 
-def _discover_working_endpoints(session: requests.Session, sample_secid: str, logger: logging.Logger) -> list[tuple[str, str]]:
+def _discover_working_endpoints(
+    session: requests.Session,
+    sample_secid: str,
+    logger: logging.Logger,
+    candidates: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
     working_endpoints: list[tuple[str, str]] = []
-    for endpoint_name, endpoint_url in DETAILS_ENDPOINTS:
+    for endpoint_name, endpoint_url in (candidates or DETAILS_ENDPOINTS):
         if _is_circuit_open(endpoint_name):
             logger.warning("Endpoint %s skipped during discovery: circuit breaker is open", endpoint_name)
             continue
         try:
-            payload, latency_ms, status_code = _fetch_endpoint_payload(session, endpoint_name, sample_secid, endpoint_url)
+            payload, latency_ms, status_code = _fetch_endpoint_payload_with_discovery_backoff(
+                session,
+                endpoint_name,
+                sample_secid,
+                endpoint_url,
+                logger,
+            )
             blocks = _extract_blocks(payload)
             if blocks:
                 block_names = list(blocks.keys())
@@ -603,9 +715,6 @@ def _discover_working_endpoints(session: requests.Session, sample_secid: str, lo
             status_code = response.status_code if response is not None else None
             logger.warning("Endpoint %s is unavailable for %s: %s", endpoint_name, sample_secid, error)
             _save_endpoint_health(endpoint_name, sample_secid, "error", "network", status_code, None, None, str(error))
-            if response is not None and response.status_code >= 500:
-                logger.warning("MOEX service looks unavailable (HTTP %s). Stopping endpoint discovery early", response.status_code)
-                break
         except Exception as error:  # noqa: BLE001
             logger.warning("Endpoint %s is unavailable for %s: %s", endpoint_name, sample_secid, error)
             _save_endpoint_health(endpoint_name, sample_secid, "error", "network", None, None, None, str(error))
@@ -792,6 +901,108 @@ def _export_finish_incremental(finish_df: pd.DataFrame, export_date: str, batch_
     return batch_path
 
 
+def _refresh_dq_metrics_daily_mv() -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                substr(run_at, 1, 10) AS run_day,
+                COUNT(*) AS runs_count,
+                AVG(row_count) AS avg_row_count,
+                MAX(row_count) AS max_row_count,
+                MIN(row_count) AS min_row_count,
+                AVG(empty_secid_ratio) AS avg_empty_secid_ratio,
+                AVG(empty_isin_ratio) AS avg_empty_isin_ratio,
+                MAX(row_count_delta_ratio) AS max_row_count_delta_ratio,
+                SUM(CASE WHEN COALESCE(notes, '') <> '' THEN 1 ELSE 0 END) AS warning_runs_count
+            FROM dq_run_history
+            GROUP BY run_day
+            """
+        ).fetchall()
+        connection.executemany(
+            """
+            INSERT OR REPLACE INTO dq_metrics_daily_mv(
+                run_day,
+                runs_count,
+                avg_row_count,
+                max_row_count,
+                min_row_count,
+                avg_empty_secid_ratio,
+                avg_empty_isin_ratio,
+                max_row_count_delta_ratio,
+                warning_runs_count,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [(*row, now) for row in rows],
+        )
+        connection.commit()
+
+
+def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging.Logger) -> int:
+    snapshot_at = datetime.now().isoformat(timespec="seconds")
+    offset = 0
+    page_size = 100
+    rows_to_save: list[tuple[str, str, str | None, str | None, float | None, float | None, float | None, str | None]] = []
+
+    while True:
+        url = f"{MOEX_INTRADAY_QUOTES_URL}&start={offset}"
+        response = session.get(url, timeout=20)
+        response.raise_for_status()
+        payload = response.json()
+        marketdata = payload.get("marketdata", {}) if isinstance(payload, dict) else {}
+        columns = marketdata.get("columns", []) if isinstance(marketdata, dict) else []
+        data = marketdata.get("data", []) if isinstance(marketdata, dict) else []
+        if not columns or not data:
+            break
+
+        for item in data:
+            row = dict(zip(columns, item))
+            rows_to_save.append(
+                (
+                    snapshot_at,
+                    str(row.get("SECID", "")).strip(),
+                    row.get("BOARDID"),
+                    row.get("TRADINGSTATUS"),
+                    row.get("LAST"),
+                    row.get("NUMTRADES"),
+                    row.get("VOLVALUE"),
+                    row.get("UPDATETIME"),
+                )
+            )
+
+        if len(data) < page_size:
+            break
+        offset += page_size
+
+    rows_to_save = [row for row in rows_to_save if row[1]]
+    if rows_to_save:
+        with sqlite3.connect(CACHE_DB_PATH) as connection:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO intraday_quotes_snapshot(
+                    snapshot_at, secid, boardid, tradingstatus, last, numtrades, volvalue, updatetime
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows_to_save,
+            )
+            connection.commit()
+
+    logger.info("Intraday quotes snapshot saved: %s rows", len(rows_to_save))
+    return len(rows_to_save)
+
+
+def _print_details_progress(completed: int, total: int, eta_seconds: int) -> None:
+    percent = (completed / total * 100) if total else 100.0
+    line = f"Details progress: {completed}/{total} ({percent:.1f}%), ETA {eta_seconds}s"
+    print(f"\r{line}", end="", flush=True)
+    if completed >= total:
+        print()
+
+
 def _run_data_quality_checks(dataframe: pd.DataFrame, run_id: str, source: str, logger: logging.Logger) -> list[str]:
     row_count = len(dataframe)
     secid_col = next((c for c in ["SECID", "secid", "SecID"] if c in dataframe.columns), None)
@@ -852,6 +1063,8 @@ def _run_data_quality_checks(dataframe: pd.DataFrame, run_id: str, source: str, 
         )
         connection.commit()
 
+    _refresh_dq_metrics_daily_mv()
+
     for note in notes:
         logger.warning("DQ check: %s", note)
     if not notes:
@@ -867,17 +1080,35 @@ def fetch_and_save_bond_details(
     export_date: str,
     source: str,
     details_worker_processes: int,
+    debug: bool,
 ) -> tuple[int, int, int, int, Path]:
     cleanup_details_cache()
     secids = _pick_secids(dataframe)
     if not secids:
         logger.warning("Could not determine SECID list. Skipping details export")
-        return 0, 0, 0, 0, FINISH_EXCEL_PATH
+        finish_df = dataframe.copy()
+        batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
+        batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
+        _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
+        return 0, 0, 0, len(finish_df), batch_path
 
-    working_endpoints = _discover_working_endpoints(session, secids[0], logger)
+    prechecked_endpoints = _precheck_details_endpoints_health(session, secids[0], logger)
+    if not prechecked_endpoints:
+        logger.warning("All details endpoints failed cold-start precheck. Skip heavy details phase")
+        finish_df = dataframe.copy()
+        batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
+        batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
+        _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
+        return len(secids), 0, 0, len(finish_df), batch_path
+
+    working_endpoints = _discover_working_endpoints(session, secids[0], logger, candidates=prechecked_endpoints)
     if not working_endpoints:
         logger.warning("No working details endpoints found. Skipping details export")
-        return len(secids), 0, 0, 0, FINISH_EXCEL_PATH
+        finish_df = dataframe.copy()
+        batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
+        batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
+        _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
+        return len(secids), 0, 0, len(finish_df), batch_path
 
     endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {name: {} for name, _ in working_endpoints}
 
@@ -920,8 +1151,7 @@ def fetch_and_save_bond_details(
             avg_seconds = elapsed / completed if completed else 0.0
             remaining = max(total - completed, 0)
             eta_seconds = int(avg_seconds * remaining)
-            percent = (completed / total * 100) if total else 100.0
-            print(f"Details progress: {completed}/{total} ({percent:.1f}%), ETA {eta_seconds}s")
+            _print_details_progress(completed, total, eta_seconds)
             for endpoint_name, secid, payload, latency_ms, status_code, error_text in future.result():
                 if payload is None:
                     _save_endpoint_health(endpoint_name, secid, "error", "network", status_code, latency_ms, None, error_text)
@@ -958,7 +1188,12 @@ def fetch_and_save_bond_details(
                 merged_frames[endpoint_name][block_name] = pd.concat(valid_frames, ignore_index=True, sort=False)
 
     enrichment_df = _build_enrichment_frame(merged_frames)
-    excel_sheets = _write_details_excel(merged_frames, enrichment_df)
+    excel_sheets = 0
+    if debug:
+        excel_sheets = _write_details_excel(merged_frames, enrichment_df)
+    else:
+        logger.info("Debug mode disabled: skip %s generation", DETAILS_EXCEL_PATH.name)
+
     parquet_files = _update_details_parquet(merged_frames)
 
     finish_df = _merge_base_with_enrichment(dataframe, enrichment_df)
@@ -1044,14 +1279,13 @@ def _build_daily_dq_report(logger: logging.Logger, report_day: date) -> Path:
         ).fetchall()
         trend_rows = connection.execute(
             """
-            SELECT substr(run_at, 1, 10) AS run_day, AVG(row_count) AS avg_row_count, MAX(row_count) AS max_row_count
-            FROM dq_run_history
-            WHERE run_at >= ?
-            GROUP BY run_day
+            SELECT run_day, avg_row_count, max_row_count
+            FROM dq_metrics_daily_mv
+            WHERE run_day >= ?
             ORDER BY run_day DESC
             LIMIT 7
             """,
-            ((day_start - timedelta(days=30)).isoformat(timespec="seconds"),),
+            ((day_start - timedelta(days=30)).date().isoformat(),),
         ).fetchall()
 
     warning_counts: dict[str, int] = {}
@@ -1094,6 +1328,11 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Worker process count for details fetching. Overrides DETAILS_WORKER_PROCESSES env.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug artifacts (Moex_Bonds.xlsx and Moex_Bonds_Details.xlsx)",
     )
     return parser.parse_args()
 
@@ -1144,7 +1383,10 @@ def main() -> int:
         parse_elapsed = time.perf_counter() - parse_started_at
 
         excel_started_at = time.perf_counter()
-        dataframe.to_excel(EXCEL_PATH, index=False)
+        if args.debug:
+            dataframe.to_excel(EXCEL_PATH, index=False)
+        else:
+            logger.info("Debug mode disabled: skip %s generation", EXCEL_PATH.name)
         excel_elapsed = time.perf_counter() - excel_started_at
         row_count = len(dataframe)
 
@@ -1159,10 +1401,12 @@ def main() -> int:
             export_date=today,
             source=data_source,
             details_worker_processes=details_worker_processes,
+            debug=args.debug,
         )
         details_elapsed = time.perf_counter() - details_started_at
 
         dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
+        intraday_rows = _persist_intraday_quotes_snapshot(session, logger)
 
         persist_raw_response(csv_data)
         elapsed = time.perf_counter() - start_time
@@ -1171,18 +1415,23 @@ def main() -> int:
         logger.info("CSV parse time: %.3f seconds", parse_elapsed)
         logger.info("Excel export time: %.3f seconds", excel_elapsed)
         logger.info("Details export time: %.3f seconds", details_elapsed)
-        logger.info("Saved %s rows to %s", row_count, EXCEL_PATH)
-        logger.info(
-            "Saved extended details for %s securities into %s endpoint sheets (%s)",
-            secids_count,
-            details_sheets,
-            DETAILS_EXCEL_PATH,
-        )
+        if args.debug:
+            logger.info("Saved %s rows to %s", row_count, EXCEL_PATH)
+        if args.debug:
+            logger.info(
+                "Saved extended details for %s securities into %s endpoint sheets (%s)",
+                secids_count,
+                details_sheets,
+                DETAILS_EXCEL_PATH,
+            )
+        else:
+            logger.info("Debug mode disabled: details endpoint sheets export skipped")
         logger.info("Updated %s parquet detail files in %s", parquet_files, DETAILS_PARQUET_DIR)
         logger.info("Saved enriched finish dataset with %s rows to %s", finish_rows, FINISH_EXCEL_PATH)
         logger.info("Saved incremental finish batch to %s", finish_batch_path)
         logger.info("DQ warnings count: %s", len(dq_notes))
         logger.info("DQ daily report path: %s", dq_daily_report_path)
+        logger.info("Intraday quotes snapshot rows: %s", intraday_rows)
         logger.info("Raw response saved to %s", RAW_RESPONSE_PATH)
         logger.info("Execution time: %.3f seconds", elapsed)
         print("MOEX_API completed successfully")

@@ -13,9 +13,6 @@ DB/*.sqlite3
 *.bak
 
 # Runtime outputs
-logs/*.log
-logs/*.csv
-logs/dq_daily_report_*.txt
 finish_batches/*.xlsx
 details_parquet/*.parquet
 
