@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import csv
 import argparse
+import csv
 import io
 import json
 import logging
@@ -10,6 +10,7 @@ import random
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -54,6 +55,14 @@ ROW_COUNT_SPIKE_THRESHOLD = 0.30
 DISCOVERY_MAX_ATTEMPTS = 4
 DISCOVERY_BACKOFF_BASE_SECONDS = 0.7
 DISCOVERY_BACKOFF_MAX_SECONDS = 8.0
+
+PIPELINE_STAGE_ORDER = ["fetch", "parse", "details", "export"]
+PIPELINE_STAGE_TITLES = {
+    "fetch": "Загрузка дневного CSV",
+    "parse": "Парсинг и baseline DQ",
+    "details": "Обогащение деталей и материализация",
+    "export": "Финальные отчёты и intraday snapshot",
+}
 
 STATIC_SECIDS = [
     "RU000A1021G3",
@@ -411,9 +420,15 @@ def _pick_secids(dataframe: pd.DataFrame, random_sample_size: int = RANDOM_SECID
     return STATIC_SECIDS.copy()
 
 
-def _fetch_endpoint_payload(session: requests.Session, endpoint_name: str, secid: str, endpoint_url: str) -> tuple[dict, float, int | None]:
+def _fetch_endpoint_payload(
+    session: requests.Session,
+    endpoint_name: str,
+    secid: str,
+    endpoint_url: str,
+    timeout_seconds: int = 30,
+) -> tuple[dict, float, int | None]:
     started = time.perf_counter()
-    response = session.get(endpoint_url.format(secid=secid), timeout=30)
+    response = session.get(endpoint_url.format(secid=secid), timeout=timeout_seconds)
     latency_ms = (time.perf_counter() - started) * 1000
     status_code = response.status_code
     response.raise_for_status()
@@ -632,6 +647,24 @@ def _get_cached_endpoint_record(endpoint_name: str, secid: str) -> tuple[dict, s
     return json.loads(row[0]), row[1]
 
 
+def _get_latest_endpoint_record(endpoint_name: str, secid: str) -> tuple[dict, str] | None:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        row = connection.execute(
+            """
+            SELECT response_json, fetched_at
+            FROM details_cache
+            WHERE endpoint = ? AND secid = ?
+            ORDER BY fetched_at DESC
+            LIMIT 1
+            """,
+            (endpoint_name, secid),
+        ).fetchone()
+
+    if row is None:
+        return None
+    return json.loads(row[0]), row[1]
+
+
 def _watermark_exists(endpoint_name: str, secid: str, fetched_at: str) -> bool:
     with sqlite3.connect(CACHE_DB_PATH) as connection:
         row = connection.execute(
@@ -752,12 +785,26 @@ def _fetch_details_worker(secid: str, endpoints: list[tuple[str, str]]) -> list[
     session = build_retry_session()
     results: list[tuple[str, str, dict | None, float | None, int | None, str | None]] = []
     for endpoint_name, endpoint_url in endpoints:
-        try:
-            payload, latency_ms, status_code = _fetch_endpoint_payload(session, endpoint_name, secid, endpoint_url)
-            results.append((endpoint_name, secid, payload, latency_ms, status_code, None))
-        except Exception as error:  # noqa: BLE001
-            status_code = getattr(getattr(error, "response", None), "status_code", None)
-            results.append((endpoint_name, secid, None, None, status_code, str(error)))
+        attempt_timeouts = [15, 30, 45]
+        last_error: Exception | None = None
+        for timeout_seconds in attempt_timeouts:
+            try:
+                payload, latency_ms, status_code = _fetch_endpoint_payload(
+                    session,
+                    endpoint_name,
+                    secid,
+                    endpoint_url,
+                    timeout_seconds=timeout_seconds,
+                )
+                results.append((endpoint_name, secid, payload, latency_ms, status_code, None))
+                last_error = None
+                break
+            except Exception as error:  # noqa: BLE001
+                last_error = error
+
+        if last_error is not None:
+            status_code = getattr(getattr(last_error, "response", None), "status_code", None)
+            results.append((endpoint_name, secid, None, None, status_code, str(last_error)))
     return results
 
 
@@ -1018,9 +1065,56 @@ def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging
     return len(rows_to_save)
 
 
-def _print_details_progress(completed: int, total: int, eta_seconds: int) -> None:
+def _humanize_duration(seconds: float) -> str:
+    total_seconds = max(int(seconds), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours} ч {minutes} мин {secs} сек"
+
+
+def _format_eta_timestamp(seconds: float) -> str:
+    return (datetime.now() + timedelta(seconds=max(seconds, 0))).strftime("%H:%M:%S")
+
+
+@dataclass
+class StageProgressView:
+    total_stages: int
+    started_at: float
+
+    def print_stage_start(self, stage: str, stage_index: int) -> None:
+        stage_title = PIPELINE_STAGE_TITLES.get(stage, stage)
+        print(
+            f"\n🔹 Этап {stage_index}/{self.total_stages}: {stage_title}. "
+            f"Выполнено этапов: {stage_index - 1}/{self.total_stages}.",
+            flush=True,
+        )
+
+    def print_stage_finish(self, stage: str, stage_index: int, duration_ms: float) -> None:
+        elapsed = time.perf_counter() - self.started_at
+        per_stage_avg = elapsed / max(stage_index, 1)
+        remaining_stages = max(self.total_stages - stage_index, 0)
+        eta_seconds = per_stage_avg * remaining_stages
+        stage_title = PIPELINE_STAGE_TITLES.get(stage, stage)
+        print(
+            f"✅ Этап завершён: {stage_title} за {duration_ms / 1000:.1f} сек. "
+            f"Выполнено этапов {stage_index}/{self.total_stages}. "
+            f"Ориентировочное время завершения: {_humanize_duration(eta_seconds)} "
+            f"(≈ {_format_eta_timestamp(eta_seconds)}).",
+            flush=True,
+        )
+
+
+def _print_details_progress(completed: int, total: int, eta_seconds: int, stage_started_at: float) -> None:
     percent = (completed / total * 100) if total else 100.0
-    print(f"\rProgress: {percent:5.1f}%", end="", flush=True)
+    elapsed = time.perf_counter() - stage_started_at
+    avg_per_item = elapsed / completed if completed else 0.0
+    print(
+        "\r"
+        f"   ↳ details: прогресс {percent:5.1f}% | выполнено {completed}/{total} | "
+        f"до окончания ~ {eta_seconds} сек | ср. шаг {avg_per_item:.2f} сек",
+        end="",
+        flush=True,
+    )
     if completed >= total:
         print()
 
@@ -1103,6 +1197,7 @@ def fetch_and_save_bond_details(
     source: str,
     details_worker_processes: int,
     debug: bool,
+    stage_started_at: float | None = None,
 ) -> tuple[int, int, int, int, Path]:
     cleanup_details_cache()
     secids = _pick_secids(dataframe)
@@ -1173,9 +1268,27 @@ def fetch_and_save_bond_details(
             avg_seconds = elapsed / completed if completed else 0.0
             remaining = max(total - completed, 0)
             eta_seconds = int(avg_seconds * remaining)
-            _print_details_progress(completed, total, eta_seconds)
+            _print_details_progress(completed, total, eta_seconds, stage_started_at=stage_started_at or progress_started_at)
             for endpoint_name, secid, payload, latency_ms, status_code, error_text in future.result():
                 if payload is None:
+                    stale_cached_record = _get_latest_endpoint_record(endpoint_name, secid)
+                    if stale_cached_record is not None:
+                        stale_payload, stale_fetched_at = stale_cached_record
+                        stale_blocks = _extract_blocks(stale_payload)
+                        _save_endpoint_health(endpoint_name, secid, "ok", "stale_cache", status_code, latency_ms, list(stale_blocks.keys()), error_text)
+                        _save_watermark(endpoint_name, secid, stale_fetched_at)
+                        logger.warning(
+                            "Details %s for %s loaded from stale cache (%s) after network error: %s",
+                            endpoint_name,
+                            secid,
+                            stale_fetched_at,
+                            error_text,
+                        )
+                        for block_name, block_df in stale_blocks.items():
+                            if not block_df.empty:
+                                endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
+                        continue
+
                     _save_endpoint_health(endpoint_name, secid, "error", "network", status_code, latency_ms, None, error_text)
                     _update_circuit_breaker(endpoint_name, is_success=False)
                     logger.warning("Details %s for %s failed: %s", endpoint_name, secid, error_text)
@@ -1408,7 +1521,108 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable debug artifacts (Moex_Bonds.xlsx and Moex_Bonds_Details.xlsx)",
     )
+    parser.add_argument(
+        "--service",
+        choices=["all", "rates-ingest", "details-enricher", "quotes-snapshotter"],
+        default="all",
+        help="Run full pipeline or a dedicated microservice-style stage.",
+    )
     return parser.parse_args()
+
+
+def _load_daily_csv_with_cache_fallback(session: requests.Session, logger: logging.Logger, start_time: float, run_id: str) -> tuple[str, str, str, float]:
+    today = date.today().isoformat()
+    data_source = "cache"
+    fetch_started_dt = datetime.now()
+    try:
+        csv_data = get_cached_data(today)
+        logger.info("Using cached data for %s", today)
+    except CacheMissError:
+        data_source = "network"
+        logger.info("Cache miss for %s. Fetching from MOEX...", today)
+        try:
+            csv_data = fetch_moex_csv(session)
+            save_to_cache(today, csv_data)
+            logger.info("Data fetched and cached")
+        except requests.RequestException as error:
+            try:
+                cached_date, csv_data = get_latest_cached_data()
+            except CacheMissError:
+                elapsed = time.perf_counter() - start_time
+                _save_sla_stage_timer(run_id, "fetch", fetch_started_dt, datetime.now(), "error", source=data_source, details="MOEX unavailable and cache empty")
+                logger.error("MOEX is unavailable (%s) and cache is empty", error)
+                logger.info("Execution time before failure: %.3f seconds", elapsed)
+                raise RuntimeError("MOEX unavailable and cache is empty") from error
+
+            data_source = f"cache_fallback:{cached_date}"
+            logger.warning(
+                "MOEX is unavailable (%s). Falling back to cached data from %s",
+                error,
+                cached_date,
+            )
+    fetch_duration_ms = _save_sla_stage_timer(run_id, "fetch", fetch_started_dt, datetime.now(), "ok", source=data_source)
+    _check_sla_degradation("fetch", fetch_duration_ms, logger)
+    return csv_data, data_source, today, fetch_duration_ms
+
+
+def run_rates_ingest(session: requests.Session, logger: logging.Logger, run_id: str, debug: bool, stage_view: StageProgressView | None = None) -> tuple[pd.DataFrame, str, str]:
+    if stage_view is not None:
+        stage_view.print_stage_start("fetch", 1)
+    pipeline_started = stage_view.started_at if stage_view else time.perf_counter()
+    csv_data, data_source, export_date, fetch_duration_ms = _load_daily_csv_with_cache_fallback(session, logger, pipeline_started, run_id)
+    if stage_view is not None:
+        stage_view.print_stage_finish("fetch", 1, fetch_duration_ms)
+
+    if stage_view is not None:
+        stage_view.print_stage_start("parse", 2)
+    parse_started_dt = datetime.now()
+    dataframe = parse_rates_csv(csv_data)
+    if debug:
+        dataframe.to_excel(EXCEL_PATH, index=False)
+    else:
+        logger.info("Debug mode disabled: skip %s generation", EXCEL_PATH.name)
+    _run_data_quality_checks(dataframe, run_id=run_id, source=data_source, logger=logger)
+    persist_raw_response(csv_data)
+    parse_duration_ms = _save_sla_stage_timer(run_id, "parse", parse_started_dt, datetime.now(), "ok", source=data_source, details=f"rows={len(dataframe)}")
+    _check_sla_degradation("parse", parse_duration_ms, logger)
+    if stage_view is not None:
+        stage_view.print_stage_finish("parse", 2, parse_duration_ms)
+
+    return dataframe, data_source, export_date
+
+
+def run_details_enricher(dataframe: pd.DataFrame, session: requests.Session, logger: logging.Logger, run_id: str, source: str, export_date: str, details_worker_processes: int, debug: bool, stage_view: StageProgressView | None = None) -> tuple[int, int, int, int, Path]:
+    if stage_view is not None:
+        stage_view.print_stage_start("details", 3)
+    details_started_dt = datetime.now()
+    result = fetch_and_save_bond_details(
+        dataframe,
+        logger,
+        session,
+        export_date=export_date,
+        source=source,
+        details_worker_processes=details_worker_processes,
+        debug=debug,
+        stage_started_at=time.perf_counter(),
+    )
+    details_duration_ms = _save_sla_stage_timer(run_id, "details", details_started_dt, datetime.now(), "ok", source=source, details=f"secids={result[0]}")
+    _check_sla_degradation("details", details_duration_ms, logger)
+    if stage_view is not None:
+        stage_view.print_stage_finish("details", 3, details_duration_ms)
+    return result
+
+
+def run_quotes_snapshotter(session: requests.Session, logger: logging.Logger, run_id: str, source: str, stage_view: StageProgressView | None = None) -> tuple[Path, int]:
+    if stage_view is not None:
+        stage_view.print_stage_start("export", 4)
+    export_started_dt = datetime.now()
+    dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
+    intraday_rows = _persist_intraday_quotes_snapshot(session, logger)
+    export_duration_ms = _save_sla_stage_timer(run_id, "export", export_started_dt, datetime.now(), "ok", source=source, details=f"intraday_rows={intraday_rows}")
+    _check_sla_degradation("export", export_duration_ms, logger)
+    if stage_view is not None:
+        stage_view.print_stage_finish("export", 4, export_duration_ms)
+    return dq_daily_report_path, intraday_rows
 
 
 def main() -> int:
@@ -1419,111 +1633,53 @@ def main() -> int:
     details_worker_processes = _resolve_details_worker_processes(args.details_worker_processes, logger)
 
     start_time = time.perf_counter()
-    today = date.today().isoformat()
-    data_source = "cache"
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
-
+    stage_view = StageProgressView(total_stages=len(PIPELINE_STAGE_ORDER), started_at=start_time) if args.service == "all" else None
     logger.info("MOEX API script started")
 
     try:
-        fetch_started_dt = datetime.now()
-        try:
-            csv_data = get_cached_data(today)
-            logger.info("Using cached data for %s", today)
-        except CacheMissError:
-            data_source = "network"
-            logger.info("Cache miss for %s. Fetching from MOEX...", today)
-            try:
-                csv_data = fetch_moex_csv(session)
-                save_to_cache(today, csv_data)
-                logger.info("Data fetched and cached")
-            except requests.RequestException as error:
-                try:
-                    cached_date, csv_data = get_latest_cached_data()
-                except CacheMissError:
-                    elapsed = time.perf_counter() - start_time
-                    _save_sla_stage_timer(run_id, "fetch", fetch_started_dt, datetime.now(), "error", source=data_source, details="MOEX unavailable and cache empty")
-                    logger.error("MOEX is unavailable (%s) and cache is empty", error)
-                    logger.info("Execution time before failure: %.3f seconds", elapsed)
-                    print("MOEX_API failed: MOEX unavailable and cache is empty")
-                    return 1
+        if args.service == "rates-ingest":
+            run_rates_ingest(session, logger, run_id=run_id, debug=args.debug, stage_view=None)
+            return 0
 
-                data_source = f"cache_fallback:{cached_date}"
-                logger.warning(
-                    "MOEX is unavailable (%s). Falling back to cached data from %s",
-                    error,
-                    cached_date,
-                )
-        fetch_duration_ms = _save_sla_stage_timer(run_id, "fetch", fetch_started_dt, datetime.now(), "ok", source=data_source)
-        _check_sla_degradation("fetch", fetch_duration_ms, logger)
+        if args.service == "details-enricher":
+            dataframe, data_source, export_date = run_rates_ingest(session, logger, run_id=run_id, debug=args.debug, stage_view=None)
+            run_details_enricher(dataframe, session, logger, run_id=run_id, source=data_source, export_date=export_date, details_worker_processes=details_worker_processes, debug=args.debug, stage_view=None)
+            return 0
 
-        parse_started_dt = datetime.now()
-        dataframe = parse_rates_csv(csv_data)
-        parse_elapsed = (datetime.now() - parse_started_dt).total_seconds()
-        parse_duration_ms = _save_sla_stage_timer(run_id, "parse", parse_started_dt, datetime.now(), "ok", source=data_source, details=f"rows={len(dataframe)}")
-        _check_sla_degradation("parse", parse_duration_ms, logger)
+        if args.service == "quotes-snapshotter":
+            run_quotes_snapshotter(session, logger, run_id=run_id, source="snapshotter", stage_view=None)
+            return 0
 
-        excel_started_at = time.perf_counter()
-        if args.debug:
-            dataframe.to_excel(EXCEL_PATH, index=False)
-        else:
-            logger.info("Debug mode disabled: skip %s generation", EXCEL_PATH.name)
-        excel_elapsed = time.perf_counter() - excel_started_at
-        row_count = len(dataframe)
-
-        dq_notes = _run_data_quality_checks(dataframe, run_id=run_id, source=data_source, logger=logger)
-
-        details_started_dt = datetime.now()
-        secids_count, details_sheets, parquet_files, finish_rows, finish_batch_path = fetch_and_save_bond_details(
+        dataframe, data_source, export_date = run_rates_ingest(session, logger, run_id=run_id, debug=args.debug, stage_view=stage_view)
+        secids_count, details_sheets, parquet_files, finish_rows, finish_batch_path = run_details_enricher(
             dataframe,
-            logger,
             session,
-            export_date=today,
+            logger,
+            run_id=run_id,
             source=data_source,
+            export_date=export_date,
             details_worker_processes=details_worker_processes,
             debug=args.debug,
+            stage_view=stage_view,
         )
-        details_elapsed = (datetime.now() - details_started_dt).total_seconds()
-        details_duration_ms = _save_sla_stage_timer(run_id, "details", details_started_dt, datetime.now(), "ok", source=data_source, details=f"secids={secids_count}")
-        _check_sla_degradation("details", details_duration_ms, logger)
-
-        export_started_dt = datetime.now()
-        dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
-        intraday_rows = _persist_intraday_quotes_snapshot(session, logger)
-        persist_raw_response(csv_data)
-        export_duration_ms = _save_sla_stage_timer(run_id, "export", export_started_dt, datetime.now(), "ok", source=data_source, details=f"intraday_rows={intraday_rows}")
-        _check_sla_degradation("export", export_duration_ms, logger)
+        dq_daily_report_path, intraday_rows = run_quotes_snapshotter(session, logger, run_id=run_id, source=data_source, stage_view=stage_view)
 
         elapsed = time.perf_counter() - start_time
-
         logger.info("Data source: %s", data_source)
-        logger.info("CSV parse time: %.3f seconds", parse_elapsed)
-        logger.info("Excel export time: %.3f seconds", excel_elapsed)
-        logger.info("Details export time: %.3f seconds", details_elapsed)
-        if args.debug:
-            logger.info("Saved %s rows to %s", row_count, EXCEL_PATH)
-        if args.debug:
-            logger.info(
-                "Saved extended details for %s securities into %s endpoint sheets (%s)",
-                secids_count,
-                details_sheets,
-                DETAILS_EXCEL_PATH,
-            )
-        else:
-            logger.info("Debug mode disabled: details endpoint sheets export skipped")
+        logger.info("Saved extended details for %s securities into %s endpoint sheets", secids_count, details_sheets)
         logger.info("Updated %s parquet detail files in %s", parquet_files, DETAILS_PARQUET_DIR)
         logger.info("Saved enriched finish dataset with %s rows to %s", finish_rows, FINISH_EXCEL_PATH)
         logger.info("Saved incremental finish batch to %s", finish_batch_path)
-        logger.info("DQ warnings count: %s", len(dq_notes))
         logger.info("DQ daily report path: %s", dq_daily_report_path)
         logger.info("Intraday quotes snapshot rows: %s", intraday_rows)
-        logger.info("Raw response saved to %s", RAW_RESPONSE_PATH)
         logger.info("Execution time: %.3f seconds", elapsed)
+        print(f"\n🎉 Готово! Полный пайплайн завершён за {_humanize_duration(elapsed)}.", flush=True)
         return 0
 
     except Exception as error:
         elapsed = time.perf_counter() - start_time
-        _save_sla_stage_timer(run_id, "export", datetime.now(), datetime.now(), "error", source=data_source, details=str(error))
+        _save_sla_stage_timer(run_id, "export", datetime.now(), datetime.now(), "error", source="unknown", details=str(error))
         logger.error("Script failed: %s", error)
         logger.info("Execution time before failure: %.3f seconds", elapsed)
         print(f"MOEX_API failed: {error}")
