@@ -1338,6 +1338,11 @@ def _print_details_heartbeat(completed: int, total: int, pending: int, stage_sta
     )
 
 
+def _print_details_stage_note(message: str, stage_started_at: float) -> None:
+    elapsed = time.perf_counter() - stage_started_at
+    print(f"   ↳ details: {message} (прошло {elapsed:.1f} сек)", flush=True)
+
+
 def _print_export_progress(message: str, stage_started_at: float) -> None:
     elapsed = time.perf_counter() - stage_started_at
     print(f"   ↳ export: {message} (прошло {elapsed:.1f} сек)", flush=True)
@@ -1423,7 +1428,9 @@ def fetch_and_save_bond_details(
     debug: bool,
     stage_started_at: float | None = None,
 ) -> tuple[int, int, int, int, Path]:
+    progress_anchor = stage_started_at or time.perf_counter()
     cleanup_details_cache()
+    _print_details_stage_note("очистка старого кэша завершена", stage_started_at=progress_anchor)
     secids = _pick_secids(dataframe)
     if not secids:
         logger.warning("Could not determine SECID list. Skipping details export")
@@ -1433,7 +1440,13 @@ def fetch_and_save_bond_details(
         _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
         return 0, 0, 0, len(finish_df), batch_path
 
+    _print_details_stage_note(f"подготовлен список бумаг: {len(secids)} SECID", stage_started_at=progress_anchor)
+    _print_details_stage_note("precheck health details-endpoints", stage_started_at=progress_anchor)
     prechecked_endpoints = _precheck_details_endpoints_health(session, secids[0], logger)
+    _print_details_stage_note(
+        f"precheck завершён: доступно endpoint'ов {len(prechecked_endpoints)}",
+        stage_started_at=progress_anchor,
+    )
     if not prechecked_endpoints:
         logger.warning("All details endpoints failed cold-start precheck. Skip heavy details phase")
         finish_df = _normalize_identity_columns(dataframe.copy())
@@ -1442,7 +1455,12 @@ def fetch_and_save_bond_details(
         _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
         return len(secids), 0, 0, len(finish_df), batch_path
 
+    _print_details_stage_note("discovery рабочих endpoint'ов", stage_started_at=progress_anchor)
     working_endpoints = _discover_working_endpoints(session, secids[0], logger, candidates=prechecked_endpoints)
+    _print_details_stage_note(
+        f"discovery завершён: рабочих endpoint'ов {len(working_endpoints)}",
+        stage_started_at=progress_anchor,
+    )
     if not working_endpoints:
         logger.warning("No working details endpoints found. Skipping details export")
         finish_df = _normalize_identity_columns(dataframe.copy())
@@ -1471,6 +1489,10 @@ def fetch_and_save_bond_details(
                     endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
         if missing_endpoints:
             pending_by_secid[secid] = missing_endpoints
+    _print_details_stage_note(
+        f"подготовка задач завершена: сетевых SECID {len(pending_by_secid)}, кэшированных {len(secids) - len(pending_by_secid)}",
+        stage_started_at=progress_anchor,
+    )
 
     pending_secids = list(pending_by_secid.keys())
 
