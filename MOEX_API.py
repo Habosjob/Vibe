@@ -9,6 +9,7 @@ import os
 import random
 import sqlite3
 import time
+import re
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -29,7 +30,7 @@ MOEX_RATES_URL = (
 )
 MOEX_INTRADAY_QUOTES_URL = (
     "https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json?"
-    "iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,BOARDID,TRADINGSTATUS,LAST,NUMTRADES,VOLVALUE,UPDATETIME&"
+    "iss.meta=off&iss.only=marketdata&marketdata.columns=SECID,BOARDID,TRADINGSTATUS,OPEN,CLOSE,LCLOSE,LAST,NUMTRADES,VOLVALUE,UPDATETIME&"
     "limit=100"
 )
 
@@ -42,9 +43,10 @@ LOG_PATH = LOGS_DIR / "moex_api.log"
 EXCEL_PATH = BASE_DIR / "Moex_Bonds.xlsx"
 DETAILS_EXCEL_PATH = BASE_DIR / "Moex_Bonds_Details.xlsx"
 FINISH_EXCEL_PATH = BASE_DIR / "Moex_Bonds_Finish.xlsx"
+FINISH_PRICE_EXCEL_PATH = BASE_DIR / "MOEX_Bonds_Finish_Price.xlsx"
 FINISH_BATCH_DIR = BASE_DIR / "finish_batches"
 DETAILS_PARQUET_DIR = BASE_DIR / "details_parquet"
-DETAILS_TTL_HOURS = 24
+DETAILS_TTL_HOURS = 24 * 7
 DEFAULT_DETAILS_WORKER_PROCESSES = min(16, max(4, (os.cpu_count() or 2) * 2))
 RANDOM_SECID_SAMPLE_SIZE = 10
 DETAILS_SAMPLE_ONLY = os.getenv("DETAILS_SAMPLE_ONLY", "0") == "1"
@@ -55,6 +57,43 @@ ROW_COUNT_SPIKE_THRESHOLD = 0.30
 DISCOVERY_MAX_ATTEMPTS = 4
 DISCOVERY_BACKOFF_BASE_SECONDS = 0.7
 DISCOVERY_BACKOFF_MAX_SECONDS = 8.0
+INTRADAY_SNAPSHOT_INTERVAL_MINUTES = 10
+
+FINISH_EXCEL_EXCLUDED_COLUMNS = {
+    "NAME",
+    "TYPENAME",
+    "REGNUMBER",
+    "LISTLEVEL",
+    "IS_COLLATERAL",
+    "IS_EXTERNAL",
+    "PRIMARY_BOARDID",
+    "PRIMARY_BOARD_TITLE",
+    "IS_RII",
+    "INCLUDEDBYMOEX",
+    "SUSPENSION_LISTING",
+    "EVENINGSESSION",
+    "MORNINGSESSION",
+    "WEEKENDSESSION",
+    "REGISTRYCLOSEDATE",
+    "DIVIDENDVALUE",
+    "DIVIDENDYIELD",
+    "REGISTRYCLOSETYPE",
+    "LOTSIZE",
+    "RTL1",
+    "RTH1",
+    "RTL2",
+    "RTH2",
+    "RTL3",
+    "RTH3",
+    "DISCOUNT1",
+    "LIMIT1",
+    "DISCOUNT2",
+    "LIMIT2",
+    "DISCOUNT3",
+    "DISCOUNTL0",
+    "FULLCOVERED",
+    "FULL_COVERED_LIMIT",
+}
 
 PIPELINE_STAGE_ORDER = ["fetch", "parse", "details", "export"]
 PIPELINE_STAGE_TITLES = {
@@ -307,6 +346,9 @@ def init_db() -> None:
                 secid TEXT NOT NULL,
                 boardid TEXT,
                 tradingstatus TEXT,
+                open REAL,
+                close REAL,
+                lclose REAL,
                 last REAL,
                 numtrades REAL,
                 volvalue REAL,
@@ -318,6 +360,11 @@ def init_db() -> None:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_intraday_quotes_snapshot_snapshot_at ON intraday_quotes_snapshot(snapshot_at)"
         )
+        for column_name in ["open", "close", "lclose"]:
+            try:
+                connection.execute(f"ALTER TABLE intraday_quotes_snapshot ADD COLUMN {column_name} REAL")
+            except sqlite3.OperationalError:
+                pass
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_bonds_enriched_incremental_export_date_batch ON bonds_enriched_incremental(export_date, batch_id)"
         )
@@ -774,11 +821,38 @@ def _discover_working_endpoints(
 
 def _normalize_block_frame(secid: str, block_name: str, block_df: pd.DataFrame) -> pd.DataFrame:
     enriched = block_df.copy()
+    enriched = _expand_description_pairs(enriched)
     enriched = enriched.drop(columns=["secid", "block_name"], errors="ignore")
     enriched.insert(0, "secid", secid)
     enriched.insert(1, "block_name", block_name)
     non_meta_cols = [column for column in enriched.columns if column not in {"secid", "block_name"}]
     return enriched[["secid", "block_name", *non_meta_cols]]
+
+
+def _slugify_column(value: str) -> str:
+    lowered = value.strip().lower()
+    normalized = re.sub(r"[^a-zа-я0-9]+", "_", lowered, flags=re.IGNORECASE)
+    return normalized.strip("_")[:60] or "field"
+
+
+def _expand_description_pairs(frame: pd.DataFrame) -> pd.DataFrame:
+    title_col = next((c for c in frame.columns if c.endswith("_description_title")), None)
+    value_col = next((c for c in frame.columns if c.endswith("_description_value")), None)
+    if title_col is None or value_col is None or frame.empty:
+        return frame
+
+    expanded: list[dict[str, str | float | int | None]] = []
+    for _, row in frame.iterrows():
+        row_dict = row.to_dict()
+        titles = [part.strip() for part in str(row_dict.get(title_col, "")).split("|") if part.strip()]
+        values = [part.strip() for part in str(row_dict.get(value_col, "")).split("|")]
+        for idx, title in enumerate(titles):
+            key = f"overview_{_slugify_column(title)}"
+            row_dict[key] = values[idx].strip() if idx < len(values) else ""
+        expanded.append(row_dict)
+
+    result = pd.DataFrame(expanded)
+    return result.loc[:, ~result.columns.duplicated()].copy()
 
 
 def _fetch_details_worker(secid: str, endpoints: list[tuple[str, str]]) -> list[tuple[str, str, dict | None, float | None, int | None, str | None]]:
@@ -933,6 +1007,134 @@ def _merge_base_with_enrichment(base_df: pd.DataFrame, enrichment_df: pd.DataFra
     return merged
 
 
+def _normalize_identity_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
+    prepared = dataframe.copy()
+    secid_col = next((c for c in ["SECID", "secid", "SecID"] if c in prepared.columns), None)
+    isin_col = next((c for c in ["ISIN", "isin"] if c in prepared.columns), None)
+
+    if secid_col is None and isin_col is not None:
+        prepared["SECID"] = prepared[isin_col]
+        secid_col = "SECID"
+
+    if secid_col is not None:
+        prepared[secid_col] = prepared[secid_col].astype(str).str.strip()
+        if isin_col is not None:
+            isin_series = prepared[isin_col].astype(str).str.strip()
+            prepared.loc[prepared[secid_col] == "", secid_col] = isin_series
+
+    drop_candidates = [c for c in ["ISIN", "isin"] if c in prepared.columns]
+    if secid_col not in drop_candidates:
+        prepared = prepared.drop(columns=drop_candidates, errors="ignore")
+
+    prepared = prepared.loc[:, ~prepared.columns.duplicated()].copy()
+    return prepared
+
+
+def _build_finish_excel_view(full_df: pd.DataFrame) -> pd.DataFrame:
+    view_df = full_df.drop(columns=[c for c in full_df.columns if c in FINISH_EXCEL_EXCLUDED_COLUMNS], errors="ignore").copy()
+    preferred_order = [c for c in ["SECID", "SHORTNAME", "PRICE", "WAPRICE", "YIELDATWAP", "MATDATE", "EMITENTNAME"] if c in view_df.columns]
+    tail = [c for c in view_df.columns if c not in preferred_order]
+    view_df = view_df[preferred_order + tail]
+    return view_df.loc[:, ~view_df.columns.duplicated()].copy()
+
+
+def _build_price_snapshot_export(base_df: pd.DataFrame, now_snapshot_at: str) -> pd.DataFrame:
+    today = date.today().isoformat()
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        now_df = pd.read_sql_query(
+            """
+            SELECT secid, boardid, last, updatetime, open, close
+            FROM intraday_quotes_snapshot
+            WHERE snapshot_at = ?
+            """,
+            connection,
+            params=(now_snapshot_at,),
+        )
+        latest_df = pd.read_sql_query(
+            """
+            SELECT q.secid, q.last AS last_known
+            FROM intraday_quotes_snapshot q
+            JOIN (
+                SELECT secid, MAX(snapshot_at) AS max_snapshot
+                FROM intraday_quotes_snapshot
+                WHERE substr(snapshot_at, 1, 10) = ?
+                GROUP BY secid
+            ) x ON q.secid = x.secid AND q.snapshot_at = x.max_snapshot
+            """,
+            connection,
+            params=(today,),
+        )
+
+    if now_df.empty:
+        return pd.DataFrame(columns=["SECID", "CLOSE_TODAY", "OPEN_TODAY", "PRICE_NOW", "LAST_PRICE_TODAY", "DAY_CHANGE_PCT"])
+
+    now_df = now_df.sort_values(["secid", "boardid"]).drop_duplicates("secid", keep="first")
+    latest_df = latest_df.sort_values("secid").drop_duplicates("secid", keep="first")
+
+    daily_close = base_df[[c for c in ["SECID", "PRICE"] if c in base_df.columns]].copy()
+    if not daily_close.empty:
+        daily_close = daily_close.rename(columns={"PRICE": "CLOSE_TODAY"})
+
+    result = now_df.merge(latest_df, on="secid", how="left")
+    if not daily_close.empty:
+        result = result.merge(daily_close.rename(columns={"SECID": "secid"}), on="secid", how="left")
+
+    result["PRICE_NOW"] = pd.to_numeric(result.get("last"), errors="coerce")
+    result["OPEN_TODAY"] = pd.to_numeric(result.get("open"), errors="coerce")
+    result["LAST_PRICE_TODAY"] = pd.to_numeric(result.get("last_known"), errors="coerce")
+    result["CLOSE_TODAY"] = pd.to_numeric(result.get("CLOSE_TODAY"), errors="coerce")
+    result["DAY_CHANGE_PCT"] = ((result["PRICE_NOW"] - result["OPEN_TODAY"]) / result["OPEN_TODAY"]) * 100
+
+    result = result.rename(columns={"secid": "SECID"})
+    return result[["SECID", "CLOSE_TODAY", "OPEN_TODAY", "PRICE_NOW", "LAST_PRICE_TODAY", "DAY_CHANGE_PCT"]]
+
+
+def _export_price_workbook(base_df: pd.DataFrame, now_snapshot_at: str) -> None:
+    price_df = _build_price_snapshot_export(base_df, now_snapshot_at).sort_values("DAY_CHANGE_PCT", na_position="last")
+    top_fall = price_df.nsmallest(10, "DAY_CHANGE_PCT") if not price_df.empty else price_df
+    top_rise = price_df.nlargest(10, "DAY_CHANGE_PCT") if not price_df.empty else price_df
+
+    with pd.ExcelWriter(FINISH_PRICE_EXCEL_PATH, engine="openpyxl") as writer:
+        price_df.to_excel(writer, sheet_name="prices", index=False)
+        top_fall.to_excel(writer, sheet_name="top_fall", index=False)
+        top_rise.to_excel(writer, sheet_name="top_rise", index=False)
+
+        for worksheet in writer.book.worksheets:
+            _autosize_worksheet(worksheet)
+
+        from openpyxl.chart import BarChart, Reference
+
+        summary_ws = writer.book.create_sheet("top10_charts")
+        summary_ws.append(["Top-10 падение", "Изменение %"])
+        for _, row in top_fall.iterrows():
+            summary_ws.append([row.get("SECID"), row.get("DAY_CHANGE_PCT")])
+        start_rise = len(top_fall) + 4
+        summary_ws.cell(row=start_rise, column=1, value="Top-10 рост")
+        summary_ws.cell(row=start_rise, column=2, value="Изменение %")
+        for idx, (_, row) in enumerate(top_rise.iterrows(), start=start_rise + 1):
+            summary_ws.cell(row=idx, column=1, value=row.get("SECID"))
+            summary_ws.cell(row=idx, column=2, value=row.get("DAY_CHANGE_PCT"))
+
+        chart_fall = BarChart()
+        chart_fall.title = "TOP-10 упавших"
+        chart_fall.y_axis.title = "%"
+        data = Reference(summary_ws, min_col=2, min_row=1, max_row=len(top_fall) + 1)
+        cats = Reference(summary_ws, min_col=1, min_row=2, max_row=len(top_fall) + 1)
+        chart_fall.add_data(data, titles_from_data=True)
+        chart_fall.set_categories(cats)
+        summary_ws.add_chart(chart_fall, "D2")
+
+        chart_rise = BarChart()
+        chart_rise.title = "TOP-10 выросших"
+        chart_rise.y_axis.title = "%"
+        data2 = Reference(summary_ws, min_col=2, min_row=start_rise, max_row=start_rise + len(top_rise))
+        cats2 = Reference(summary_ws, min_col=1, min_row=start_rise + 1, max_row=start_rise + len(top_rise))
+        chart_rise.add_data(data2, titles_from_data=True)
+        chart_rise.set_categories(cats2)
+        summary_ws.add_chart(chart_rise, "D22")
+        _autosize_worksheet(summary_ws)
+
+
 def _persist_finish_to_sqlite(finish_df: pd.DataFrame, batch_id: str, export_date: str, source: str) -> None:
     exported_at = datetime.now().isoformat(timespec="seconds")
     with sqlite3.connect(CACHE_DB_PATH) as connection:
@@ -962,8 +1164,13 @@ def _persist_finish_to_sqlite(finish_df: pd.DataFrame, batch_id: str, export_dat
 def _export_finish_incremental(finish_df: pd.DataFrame, export_date: str, batch_id: str) -> Path:
     FINISH_BATCH_DIR.mkdir(parents=True, exist_ok=True)
     batch_path = FINISH_BATCH_DIR / f"Moex_Bonds_Finish_{export_date}_{batch_id}.xlsx"
-    finish_df.to_excel(batch_path, index=False)
-    finish_df.to_excel(FINISH_EXCEL_PATH, index=False)
+    finish_excel_df = _build_finish_excel_view(finish_df)
+    with pd.ExcelWriter(batch_path, engine="openpyxl") as writer:
+        finish_excel_df.to_excel(writer, sheet_name="finish", index=False)
+        _autosize_worksheet(writer.book["finish"])
+    with pd.ExcelWriter(FINISH_EXCEL_PATH, engine="openpyxl") as writer:
+        finish_excel_df.to_excel(writer, sheet_name="finish", index=False)
+        _autosize_worksheet(writer.book["finish"])
     return batch_path
 
 
@@ -1007,11 +1214,11 @@ def _refresh_dq_metrics_daily_mv() -> None:
         connection.commit()
 
 
-def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging.Logger) -> int:
+def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging.Logger) -> tuple[int, str]:
     snapshot_at = datetime.now().isoformat(timespec="seconds")
     offset = 0
     page_size = 100
-    rows_to_save: list[tuple[str, str, str | None, str | None, float | None, float | None, float | None, str | None]] = []
+    rows_to_save: list[tuple[str, str, str | None, str | None, float | None, float | None, float | None, float | None, float | None, float | None, str | None]] = []
 
     while True:
         url = f"{MOEX_INTRADAY_QUOTES_URL}&start={offset}"
@@ -1021,7 +1228,7 @@ def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging
             payload = response.json()
         except requests.RequestException as error:
             logger.warning("Intraday snapshot skipped due to MOEX error: %s", error)
-            return 0
+            return 0, snapshot_at
         marketdata = payload.get("marketdata", {}) if isinstance(payload, dict) else {}
         columns = marketdata.get("columns", []) if isinstance(marketdata, dict) else []
         data = marketdata.get("data", []) if isinstance(marketdata, dict) else []
@@ -1036,6 +1243,9 @@ def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging
                     str(row.get("SECID", "")).strip(),
                     row.get("BOARDID"),
                     row.get("TRADINGSTATUS"),
+                    row.get("OPEN"),
+                    row.get("CLOSE"),
+                    row.get("LCLOSE"),
                     row.get("LAST"),
                     row.get("NUMTRADES"),
                     row.get("VOLVALUE"),
@@ -1053,16 +1263,16 @@ def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging
             connection.executemany(
                 """
                 INSERT OR REPLACE INTO intraday_quotes_snapshot(
-                    snapshot_at, secid, boardid, tradingstatus, last, numtrades, volvalue, updatetime
+                    snapshot_at, secid, boardid, tradingstatus, open, close, lclose, last, numtrades, volvalue, updatetime
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows_to_save,
             )
             connection.commit()
 
     logger.info("Intraday quotes snapshot saved: %s rows", len(rows_to_save))
-    return len(rows_to_save)
+    return len(rows_to_save), snapshot_at
 
 
 def _humanize_duration(seconds: float) -> str:
@@ -1204,7 +1414,7 @@ def fetch_and_save_bond_details(
     secids = _pick_secids(dataframe)
     if not secids:
         logger.warning("Could not determine SECID list. Skipping details export")
-        finish_df = dataframe.copy()
+        finish_df = _normalize_identity_columns(dataframe.copy())
         batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
         batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
         _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
@@ -1213,7 +1423,7 @@ def fetch_and_save_bond_details(
     prechecked_endpoints = _precheck_details_endpoints_health(session, secids[0], logger)
     if not prechecked_endpoints:
         logger.warning("All details endpoints failed cold-start precheck. Skip heavy details phase")
-        finish_df = dataframe.copy()
+        finish_df = _normalize_identity_columns(dataframe.copy())
         batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
         batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
         _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
@@ -1222,7 +1432,7 @@ def fetch_and_save_bond_details(
     working_endpoints = _discover_working_endpoints(session, secids[0], logger, candidates=prechecked_endpoints)
     if not working_endpoints:
         logger.warning("No working details endpoints found. Skipping details export")
-        finish_df = dataframe.copy()
+        finish_df = _normalize_identity_columns(dataframe.copy())
         batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
         batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
         _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
@@ -1341,7 +1551,7 @@ def fetch_and_save_bond_details(
 
     parquet_files = _update_details_parquet(merged_frames)
 
-    finish_df = _merge_base_with_enrichment(dataframe, enrichment_df)
+    finish_df = _normalize_identity_columns(_merge_base_with_enrichment(dataframe, enrichment_df))
     batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
     batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
     _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
@@ -1518,12 +1728,25 @@ def _check_sla_degradation(stage: str, duration_ms: float, logger: logging.Logge
             samples,
         )
 
+def _run_sqlite_maintenance(logger: logging.Logger) -> None:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        connection.execute("ANALYZE")
+        connection.execute("PRAGMA optimize")
+        connection.commit()
+    logger.info("SQLite maintenance completed (ANALYZE + PRAGMA optimize)")
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MOEX bonds ETL pipeline")
     parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug artifacts (Moex_Bonds.xlsx and Moex_Bonds_Details.xlsx)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preflight MOEX/cache checks without writing Excel/DB payloads",
     )
     return parser.parse_args()
 
@@ -1563,6 +1786,51 @@ def _load_daily_csv_with_cache_fallback(session: requests.Session, logger: loggi
     return csv_data, data_source, today, fetch_duration_ms
 
 
+def _diff_bonds_against_previous_day(current_df: pd.DataFrame, export_date: str) -> tuple[list[str], list[str]]:
+    key_col = "ISIN" if "ISIN" in current_df.columns else ("SECID" if "SECID" in current_df.columns else None)
+    if key_col is None:
+        return [], []
+
+    short_col = "SHORTNAME" if "SHORTNAME" in current_df.columns else None
+    today_rows = {
+        str(row[key_col]).strip(): str(row.get(short_col, "")).strip()
+        for _, row in current_df.iterrows()
+        if str(row.get(key_col, "")).strip()
+    }
+
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        prev_row = connection.execute(
+            """
+            SELECT csv_data
+            FROM bonds_cache
+            WHERE fetch_date < ?
+            ORDER BY fetch_date DESC
+            LIMIT 1
+            """,
+            (export_date,),
+        ).fetchone()
+
+    if prev_row is None:
+        return sorted([f"{isin}, {name}" for isin, name in today_rows.items() if isin]), []
+
+    prev_df = parse_rates_csv(prev_row[0])
+    prev_key_col = "ISIN" if "ISIN" in prev_df.columns else ("SECID" if "SECID" in prev_df.columns else None)
+    if prev_key_col is None:
+        return [], []
+    prev_short_col = "SHORTNAME" if "SHORTNAME" in prev_df.columns else None
+    prev_rows = {
+        str(row[prev_key_col]).strip(): str(row.get(prev_short_col, "")).strip()
+        for _, row in prev_df.iterrows()
+        if str(row.get(prev_key_col, "")).strip()
+    }
+
+    added = sorted(set(today_rows) - set(prev_rows))
+    removed = sorted(set(prev_rows) - set(today_rows))
+    added_lines = [f"{isin}, {today_rows.get(isin, '')}" for isin in added]
+    removed_lines = [f"{isin}, {prev_rows.get(isin, '')}" for isin in removed]
+    return added_lines, removed_lines
+
+
 def run_rates_ingest(session: requests.Session, logger: logging.Logger, run_id: str, debug: bool, stage_view: StageProgressView | None = None) -> tuple[pd.DataFrame, str, str]:
     if stage_view is not None:
         stage_view.print_stage_start("fetch", 1)
@@ -1585,6 +1853,14 @@ def run_rates_ingest(session: requests.Session, logger: logging.Logger, run_id: 
     _check_sla_degradation("parse", parse_duration_ms, logger)
     if stage_view is not None:
         stage_view.print_stage_finish("parse", 2, parse_duration_ms)
+
+    added_lines, removed_lines = _diff_bonds_against_previous_day(dataframe, export_date)
+    logger.info("Добавлено %s облигаций", len(added_lines))
+    for line in added_lines[:50]:
+        logger.info("  + %s", line)
+    logger.info("Погашено %s бумаг", len(removed_lines))
+    for line in removed_lines[:50]:
+        logger.info("  - %s", line)
 
     return dataframe, data_source, export_date
 
@@ -1615,7 +1891,13 @@ def run_quotes_snapshotter(session: requests.Session, logger: logging.Logger, ru
         stage_view.print_stage_start("export", 4)
     export_started_dt = datetime.now()
     dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
-    intraday_rows = _persist_intraday_quotes_snapshot(session, logger)
+    intraday_rows, snapshot_at = _persist_intraday_quotes_snapshot(session, logger)
+    try:
+        with sqlite3.connect(CACHE_DB_PATH) as connection:
+            finish_df = pd.read_sql_query("SELECT * FROM bonds_enriched", connection)
+        _export_price_workbook(finish_df, snapshot_at)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("Price workbook export skipped: %s", error)
     export_duration_ms = _save_sla_stage_timer(run_id, "export", export_started_dt, datetime.now(), "ok", source=source, details=f"intraday_rows={intraday_rows}")
     _check_sla_degradation("export", export_duration_ms, logger)
     if stage_view is not None:
@@ -1629,6 +1911,28 @@ def main() -> int:
     init_db()
     session = build_retry_session()
     details_worker_processes = _resolve_details_worker_processes(None, logger)
+    _run_sqlite_maintenance(logger)
+
+    if args.dry_run:
+        try:
+            try:
+                csv_data = fetch_moex_csv(session)
+                source = "network"
+            except Exception:
+                try:
+                    _, csv_data = get_latest_cached_data()
+                    source = "cache"
+                except Exception:
+                    csv_data = RAW_RESPONSE_PATH.read_text(encoding="utf-8")
+                    source = "raw_file"
+            dataframe = parse_rates_csv(csv_data)
+            secids = _pick_secids(dataframe)
+            healthy = _precheck_details_endpoints_health(session, secids[0] if secids else STATIC_SECIDS[0], logger)
+            print(f"DRY-RUN OK: source={source}, rows={len(dataframe)}, secids={len(secids)}, healthy_endpoints={len(healthy)}")
+            return 0
+        except Exception as error:  # noqa: BLE001
+            logger.error("Dry-run failed: %s", error)
+            return 1
 
     start_time = time.perf_counter()
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
