@@ -1338,6 +1338,11 @@ def _print_details_heartbeat(completed: int, total: int, pending: int, stage_sta
     )
 
 
+def _print_export_progress(message: str, stage_started_at: float) -> None:
+    elapsed = time.perf_counter() - stage_started_at
+    print(f"   ↳ export: {message} (прошло {elapsed:.1f} сек)", flush=True)
+
+
 def _run_data_quality_checks(dataframe: pd.DataFrame, run_id: str, source: str, logger: logging.Logger) -> list[str]:
     row_count = len(dataframe)
     secid_col = next((c for c in ["SECID", "secid", "SecID"] if c in dataframe.columns), None)
@@ -1492,7 +1497,7 @@ def fetch_and_save_bond_details(
             if not done_futures:
                 _print_details_progress(completed, total, None, stage_started_at=stage_started_at or progress_started_at)
                 now = time.perf_counter()
-                if now - last_heartbeat_at >= 15:
+                if now - last_heartbeat_at >= 5:
                     _print_details_heartbeat(
                         completed,
                         total,
@@ -1882,6 +1887,7 @@ def run_rates_ingest(session: requests.Session, logger: logging.Logger, run_id: 
     for line in removed_lines[:50]:
         logger.info("  - %s", line)
     if not added_lines and not removed_lines:
+        logger.info("Изменений по бумагам нет")
         print("Изменений по бумагам нет", flush=True)
 
     return dataframe, data_source, export_date
@@ -1912,11 +1918,16 @@ def run_quotes_snapshotter(session: requests.Session, logger: logging.Logger, ru
     if stage_view is not None:
         stage_view.print_stage_start("export", 4)
     export_started_dt = datetime.now()
+    export_started_perf = time.perf_counter()
+    _print_export_progress("подготовка дневного DQ-отчёта", export_started_perf)
     dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
+    _print_export_progress("снимок intraday-котировок", export_started_perf)
     intraday_rows, snapshot_at = _persist_intraday_quotes_snapshot(session, logger)
     try:
+        _print_export_progress("чтение обогащённой витрины из SQLite", export_started_perf)
         with sqlite3.connect(CACHE_DB_PATH) as connection:
             finish_df = pd.read_sql_query("SELECT * FROM bonds_enriched", connection)
+        _print_export_progress("экспорт Excel с ценами", export_started_perf)
         _export_price_workbook(finish_df, snapshot_at)
     except Exception as error:  # noqa: BLE001
         logger.warning("Price workbook export skipped: %s", error)
