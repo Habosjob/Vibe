@@ -15,6 +15,7 @@ class HTTPResponse:
     content: bytes
     elapsed_seconds: float
     status_code: int
+    headers: dict[str, str]
 
 
 def get_with_retries(
@@ -40,6 +41,7 @@ def get_with_retries(
                 content=response.content,
                 elapsed_seconds=elapsed,
                 status_code=response.status_code,
+                headers=dict(response.headers),
             )
         except (requests.RequestException, HTTPRequestError) as exc:
             last_error = exc
