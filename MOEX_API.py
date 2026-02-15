@@ -10,7 +10,7 @@ import random
 import sqlite3
 import time
 import re
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -589,6 +589,23 @@ def _save_endpoint_health(endpoint_name: str, secid: str, status: str, source: s
         connection.commit()
 
 
+def _save_endpoint_health_bulk(rows: list[tuple[str, str, str, str, int | None, float | None, str | None, str | None]]) -> None:
+    if not rows:
+        return
+    checked_at = datetime.now().isoformat(timespec="seconds")
+    payload = [(checked_at, *row) for row in rows]
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        connection.executemany(
+            """
+            INSERT INTO endpoint_health_history(
+                checked_at, endpoint, secid, status, source, http_status, latency_ms, blocks, error_text
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+        connection.commit()
+
 
 
 def _is_circuit_open(endpoint_name: str) -> bool:
@@ -760,6 +777,69 @@ def _save_watermark(endpoint_name: str, secid: str, fetched_at: str) -> None:
             (endpoint_name, secid, fetched_at, datetime.now().isoformat(timespec="seconds")),
         )
         connection.commit()
+
+
+def _save_watermarks_bulk(rows: list[tuple[str, str, str]]) -> None:
+    if not rows:
+        return
+    updated_at = datetime.now().isoformat(timespec="seconds")
+    payload = [(endpoint_name, secid, fetched_at, updated_at) for endpoint_name, secid, fetched_at in rows]
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO details_update_watermark(endpoint, secid, fetched_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            payload,
+        )
+        connection.commit()
+
+
+def _prepare_cached_blocks_for_secid(
+    secid: str,
+    working_endpoints: list[tuple[str, str]],
+    fresh_cache: dict[tuple[str, str], tuple[dict, str]],
+    latest_cache: dict[tuple[str, str], tuple[dict, str]],
+    network_targets: set[str],
+) -> tuple[
+    str,
+    list[tuple[str, str]],
+    list[tuple[str, str, pd.DataFrame]],
+    list[tuple[str, str, str, str, int | None, float | None, str | None, str | None]],
+    list[tuple[str, str, str]],
+    int,
+]:
+    missing_endpoints: list[tuple[str, str]] = []
+    normalized_blocks: list[tuple[str, str, pd.DataFrame]] = []
+    health_rows: list[tuple[str, str, str, str, int | None, float | None, str | None, str | None]] = []
+    watermark_rows: list[tuple[str, str, str]] = []
+    stale_cache_loaded = 0
+
+    for endpoint_name, endpoint_url in working_endpoints:
+        cached_record = fresh_cache.get((endpoint_name, secid))
+        cache_source = "cache"
+        if cached_record is None and secid not in network_targets:
+            cached_record = latest_cache.get((endpoint_name, secid))
+            cache_source = "stale_cache"
+            if cached_record is not None:
+                stale_cache_loaded += 1
+
+        if cached_record is None:
+            if secid in network_targets:
+                missing_endpoints.append((endpoint_name, endpoint_url))
+            continue
+
+        cached_payload, fetched_at = cached_record
+        blocks = _extract_blocks(cached_payload)
+        block_names = list(blocks.keys())
+        health_rows.append((endpoint_name, secid, "ok", cache_source, None, 0.0, ", ".join(block_names) if block_names else None, None))
+        watermark_rows.append((endpoint_name, secid, fetched_at))
+
+        for block_name, block_df in blocks.items():
+            if not block_df.empty:
+                normalized_blocks.append((endpoint_name, block_name, _normalize_block_frame(secid, block_name, block_df)))
+
+    return secid, missing_endpoints, normalized_blocks, health_rows, watermark_rows, stale_cache_loaded
 
 
 def _save_endpoint_payload(endpoint_name: str, secid: str, payload: dict, fetched_at: str | None = None) -> str:
@@ -1556,40 +1636,47 @@ def fetch_and_save_bond_details(
     prep_total = len(secids)
     prep_completed = 0
     prep_last_note_at = time.perf_counter()
-    for secid in secids:
-        missing_endpoints: list[tuple[str, str]] = []
-        for endpoint_name, endpoint_url in working_endpoints:
-            cached_record = fresh_cache.get((endpoint_name, secid))
-            if cached_record is None and secid not in network_targets:
-                cached_record = latest_cache.get((endpoint_name, secid))
-                if cached_record is not None:
-                    stale_cache_loaded += 1
-            if cached_record is None:
-                if secid in network_targets:
-                    missing_endpoints.append((endpoint_name, endpoint_url))
-                continue
+    cache_health_rows: list[tuple[str, str, str, str, int | None, float | None, str | None, str | None]] = []
+    cache_watermark_rows: list[tuple[str, str, str]] = []
 
-            cached_payload, fetched_at = cached_record
-            blocks = _extract_blocks(cached_payload)
-            logger.info("Details %s for %s loaded from cache", endpoint_name, secid)
-            _save_endpoint_health(endpoint_name, secid, "ok", "cache", None, 0.0, list(blocks.keys()), None)
-            _save_watermark(endpoint_name, secid, fetched_at)
-            for block_name, block_df in blocks.items():
-                if not block_df.empty:
-                    endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
-
-        if missing_endpoints:
-            pending_by_secid[secid] = missing_endpoints
-
-        prep_completed += 1
-        now = time.perf_counter()
-        if now - prep_last_note_at >= 5 or prep_completed == prep_total:
-            prep_percent = (prep_completed / prep_total * 100) if prep_total else 100.0
-            _print_details_stage_note(
-                f"подготовка задач: {prep_percent:5.1f}% ({prep_completed}/{prep_total}), сетевых SECID {len(pending_by_secid)}",
-                stage_started_at=progress_anchor,
+    cache_workers = min(max(4, details_worker_processes), 24)
+    with ThreadPoolExecutor(max_workers=cache_workers) as cache_executor:
+        futures = [
+            cache_executor.submit(
+                _prepare_cached_blocks_for_secid,
+                secid,
+                working_endpoints,
+                fresh_cache,
+                latest_cache,
+                network_targets,
             )
-            prep_last_note_at = now
+            for secid in secids
+        ]
+
+        for future in as_completed(futures):
+            secid, missing_endpoints, normalized_blocks, health_rows, watermark_rows, stale_loaded = future.result()
+            stale_cache_loaded += stale_loaded
+            cache_health_rows.extend(health_rows)
+            cache_watermark_rows.extend(watermark_rows)
+
+            for endpoint_name, block_name, normalized_block in normalized_blocks:
+                endpoint_frames[endpoint_name].setdefault(block_name, []).append(normalized_block)
+
+            if missing_endpoints:
+                pending_by_secid[secid] = missing_endpoints
+
+            prep_completed += 1
+            now = time.perf_counter()
+            if now - prep_last_note_at >= 5 or prep_completed == prep_total:
+                prep_percent = (prep_completed / prep_total * 100) if prep_total else 100.0
+                _print_details_stage_note(
+                    f"подготовка задач: {prep_percent:5.1f}% ({prep_completed}/{prep_total}), сетевых SECID {len(pending_by_secid)}",
+                    stage_started_at=progress_anchor,
+                )
+                prep_last_note_at = now
+
+    _save_endpoint_health_bulk(cache_health_rows)
+    _save_watermarks_bulk(cache_watermark_rows)
 
     _print_details_stage_note(
         f"подготовка задач завершена: сетевых SECID {len(pending_by_secid)}, кэшированных {len(secids) - len(pending_by_secid)}, stale-cache {stale_cache_loaded}",

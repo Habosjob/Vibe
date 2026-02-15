@@ -3,11 +3,13 @@
 ## Реализовано в этом релизе
 1. ✅ **Вынесен SQL-слой details-кэша в `repositories/`** (`DetailsRepository` с bulk-загрузкой cache/latest).
    - Профит: меньше SQL-вызовов в горячем цикле, заметно быстрее этап подготовки задач на 3-м этапе.
-2. ✅ **Structured logging (JSON) + correlation_id (`run_id`)**.
+2. ✅ **Добавлена многопоточная обработка cache-stage + batch-запись health/watermark**.
+   - Профит: ускорение cache-only прогонов (убраны десятки тысяч одиночных commit в SQLite).
+3. ✅ **Structured logging (JSON) + correlation_id (`run_id`)**.
    - Профит: проще трассировать один запуск через весь pipeline и разбирать инциденты в лог-агрегаторах.
-3. ✅ **Lightweight Prometheus-метрики через `/metrics` в API**.
+4. ✅ **Lightweight Prometheus-метрики через `/metrics` в API**.
    - Профит: доступны ключевые показатели (`cache_hit_ratio`, latency по этапам, error_rate по endpoint) для дашбордов и алертов.
-4. ✅ **Добавлены unit-тесты критичных участков (diff, incremental, read-model)**.
+5. ✅ **Добавлены unit-тесты критичных участков (diff, incremental, read-model)**.
    - Профит: меньше регрессий при изменениях ETL/SQLite логики.
 
 ## Осознанно не реализовано
