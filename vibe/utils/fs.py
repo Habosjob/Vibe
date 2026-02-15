@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -16,4 +17,25 @@ def write_bytes_atomic(content: bytes, out_path: Path) -> None:
         tmp.flush()
         os.fsync(tmp.fileno())
         temp_path = Path(tmp.name)
-    os.replace(temp_path, out_path)
+    atomic_replace_with_retry(temp_path, out_path)
+
+
+def atomic_replace_with_retry(
+    src: Path,
+    dst: Path,
+    retries: int = 6,
+    initial_backoff_s: float = 0.05,
+) -> None:
+    """Atomically replace ``dst`` with ``src`` with retries for transient Windows locks."""
+    delay = initial_backoff_s
+    for attempt in range(retries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as exc:
+            if attempt == retries - 1:
+                raise PermissionError(
+                    f"Failed to replace '{dst}' with '{src}': target file may be open in Excel"
+                ) from exc
+            time.sleep(delay)
+            delay *= 2
