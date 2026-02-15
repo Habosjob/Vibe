@@ -1,13 +1,5 @@
 # IMPROVEMENTS
 
-## Реализовано
-- FastAPI API-слой `services/api_service.py` для чтения `bonds_enriched`, `bonds_enriched_incremental` и parquet-деталей.
-- Режим `--dry-run` в `MOEX_API.py` (preflight без записи артефактов).
-- Регламент SQLite-обслуживания (`ANALYZE` + `PRAGMA optimize`) при старте пайплайна.
-- Увеличен TTL details-cache до 7 суток (недельный горизонт переиспользования).
-- Улучшен intraday-export: отдельный файл `MOEX_Bonds_Finish_Price.xlsx` + TOP10 падения/роста + диаграммы.
-- Улучшен импорт security overview: pipe-строки раскладываются по отдельным полям.
-- Добавлен видимый прогресс этапа 3 в консоли: precheck/discovery/подготовка задач и heartbeat для длинных запросов details.
 
 ## Осознанно не реализовано
 - Уведомления Telegram/Slack (по вашему условию).
