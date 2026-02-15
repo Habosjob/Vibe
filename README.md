@@ -10,6 +10,9 @@
 python -m vibe.app moex-bond-rates \
   --out data/curated/moex/bond_rates.xlsx \
   --raw data/raw/moex/bond_rates.csv
+
+# Принудительно игнорировать дневной parquet-кэш
+python -m vibe.app moex-bond-rates --no-cache
 ```
 
 По умолчанию используется статичный URL MOEX ISS из `vibe/config.py`.

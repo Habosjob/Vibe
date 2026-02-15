@@ -2,6 +2,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import load_workbook
 
 from vibe.storage.excel import write_dataframe_to_excel_atomic
 
@@ -46,3 +47,26 @@ def test_excel_atomic_write_overwrite(tmp_path: Path) -> None:
 
     meta_second = _meta_to_dict(pd.read_excel(out_path, sheet_name="meta"))
     assert meta_first["downloaded_at_utc"] != meta_second["downloaded_at_utc"]
+
+
+def test_excel_rates_sheet_formatting_and_order(tmp_path: Path) -> None:
+    out_path = tmp_path / "bond_rates.xlsx"
+    df = pd.DataFrame(
+        {
+            "LAST": [95.31],
+            "SHORTNAME": ["ОФЗ 26212"],
+            "ISIN": ["RU000A"],
+            "ZCOL": ["value"],
+        }
+    )
+
+    write_dataframe_to_excel_atomic(df, out_path)
+
+    wb = load_workbook(out_path)
+    ws = wb["rates"]
+
+    assert ws.freeze_panes == "A2"
+    assert ws.auto_filter.ref == ws.dimensions
+    assert [ws.cell(row=1, column=i).value for i in range(1, 5)] == ["ISIN", "SHORTNAME", "LAST", "ZCOL"]
+    assert ws.column_dimensions["A"].width >= 8
+    assert ws.column_dimensions["A"].width <= 50
