@@ -27,8 +27,8 @@ def test_excel_atomic_write_overwrite(tmp_path: Path) -> None:
     )
 
     assert out_path.exists()
-    xls = pd.ExcelFile(out_path)
-    assert {"rates", "meta"}.issubset(set(xls.sheet_names))
+    with pd.ExcelFile(out_path) as xls:
+        assert {"rates", "meta"}.issubset(set(xls.sheet_names))
     meta_first = _meta_to_dict(pd.read_excel(out_path, sheet_name="meta"))
 
     time.sleep(0.01)

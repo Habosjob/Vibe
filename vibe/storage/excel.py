@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 
 import pandas as pd
 
-from vibe.utils.fs import ensure_parent_dir
+from vibe.utils.fs import atomic_replace_with_retry, ensure_parent_dir
 
 
 def write_dataframe_to_excel_atomic(
@@ -28,7 +27,7 @@ def write_dataframe_to_excel_atomic(
             df.to_excel(writer, sheet_name=sheet_name, index=False)
             meta_df = pd.DataFrame(list(meta.items()), columns=["key", "value"])
             meta_df.to_excel(writer, sheet_name="meta", index=False)
-        os.replace(temp_path, out_path)
+        atomic_replace_with_retry(temp_path, out_path)
     finally:
         if temp_path.exists() and temp_path != out_path:
             temp_path.unlink(missing_ok=True)
