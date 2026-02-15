@@ -9,8 +9,9 @@ from vibe.ingest.moex_bonds_endpoints_probe import build_probe_summary_df
 
 class _Resp:
     status_code = 200
-    headers = {"Content-Type": "text/html"}
+    headers = {"Content-Type": "text/html", "Server": "cloudflare"}
     content = b"<html>gateway</html>"
+    url = "https://iss.moex.com/cdn-cgi/challenge"
 
 
 def test_fetch_endpoint_non_json_returns_error_meta(monkeypatch, tmp_path: Path, caplog) -> None:
@@ -21,11 +22,14 @@ def test_fetch_endpoint_non_json_returns_error_meta(monkeypatch, tmp_path: Path,
     payload, meta = client.fetch_endpoint(isin="RU000A", board="TQCB", spec=spec)
 
     assert payload is None
-    assert meta.error is not None and "invalid_json" in meta.error
+    assert meta.error == "HTML_INSTEAD_OF_JSON"
     assert meta.status_code == 200
     assert meta.content_type == "text/html"
     assert "<html>gateway</html>" in (meta.response_head or "")
     assert "url=https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQCB/securities/RU000A/orderbook.json" in caplog.text
+    assert "final_url=https://iss.moex.com/cdn-cgi/challenge" in caplog.text
+    assert meta.final_url == "https://iss.moex.com/cdn-cgi/challenge"
+    assert meta.headers_subset == {"Content-Type": "text/html", "Server": "cloudflare"}
     assert "response_head='<html>gateway</html>'" in caplog.text
 
 
@@ -54,3 +58,4 @@ def test_build_probe_summary_captures_response_diagnostics() -> None:
     assert row["__status"] == "ERROR"
     assert row["content_type"] == "text/plain"
     assert row["response_head"] == "upstream error"
+    assert row["final_url"] == ""
