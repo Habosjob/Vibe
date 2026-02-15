@@ -1635,3 +1635,25 @@
 2026-02-15 21:25:58,078 vibe.data_sources.moex_bonds_endpoints INFO: Cache hit: endpoint=bondization isin=RU000A10ASE2 url=https://iss.moex.com/iss/statistics/engines/stock/markets/bonds/bondization/RU000A10ASE2.json?from=2026-01-16&iss.only=coupons%2Camortizations%2Coffers&iss.meta=off
 2026-02-15 21:25:58,102 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_1 isin=RU000A10ASE2 endpoint=bondization status=200 cache_hit=True rows=14
 2026-02-15 21:25:58,796 root INFO: Probe complete: out_dir=data\curated\moex\endpoints_probe\20260215 files_written=20 total_isins=20
+2026-02-15 21:39:06,700 root INFO: Logging initialized: file=logs\moex_endpoints_probe_20260215.log level=INFO
+2026-02-15 21:39:06,785 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe started: isins=1 out_dir=data\curated\moex\endpoints_probe\20260215 from=2026-01-16 till=2026-02-15 interval=24
+2026-02-15 21:39:07,442 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=generic isin= error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:07,834 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=marketdata isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:08,244 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=marketdata isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:08,624 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=marketdata isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:08,626 vibe.ingest.moex_bonds_endpoints_probe WARNING: Board resolve failed for RU0002868001, fallback board: TQCB
+2026-02-15 21:39:09,004 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=securities isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:09,006 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=securities status=None cache_hit=False rows=0
+2026-02-15 21:39:09,399 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=marketdata isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:09,401 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=marketdata status=None cache_hit=False rows=0
+2026-02-15 21:39:09,795 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=history isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:09,798 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=history status=None cache_hit=False rows=0
+2026-02-15 21:39:10,177 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=candles isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:10,178 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=candles status=None cache_hit=False rows=0
+2026-02-15 21:39:10,840 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=trades isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:10,844 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=trades status=None cache_hit=False rows=0
+2026-02-15 21:39:11,234 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:11,235 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=orderbook status=None cache_hit=False rows=0
+2026-02-15 21:39:11,613 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=bondization isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
+2026-02-15 21:39:11,615 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=bondization status=None cache_hit=False rows=0
+2026-02-15 21:39:11,900 root INFO: Probe complete: out_dir=data\curated\moex\endpoints_probe\20260215 files_written=1 total_isins=1
