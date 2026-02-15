@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CACHE_DB_PATH = BASE_DIR / "DB" / "moex_cache.sqlite3"
@@ -70,6 +71,49 @@ def get_batches(export_date: str | None = None, source: str | None = None, limit
         }
         for row in rows
     ]
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics() -> str:
+    lines: list[str] = []
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        cache_stats = connection.execute(
+            """
+            SELECT
+                SUM(CASE WHEN source = 'cache' THEN 1 ELSE 0 END) AS cache_hits,
+                COUNT(*) AS total
+            FROM dq_run_history
+            """
+        ).fetchone()
+        cache_hits = int(cache_stats[0] or 0)
+        total_runs = int(cache_stats[1] or 0)
+
+        lines.append("# HELP moex_cache_hit_ratio Share of pipeline runs served from cache")
+        lines.append("# TYPE moex_cache_hit_ratio gauge")
+        lines.append(f"moex_cache_hit_ratio {cache_hits / total_runs if total_runs else 0.0:.6f}")
+
+        for stage, avg_ms in connection.execute(
+            """
+            SELECT stage, AVG(duration_ms)
+            FROM etl_stage_sla
+            WHERE status = 'ok'
+            GROUP BY stage
+            """
+        ).fetchall():
+            metric = f"moex_stage_latency_ms_avg{{stage=\"{stage}\"}}"
+            lines.append(f"{metric} {float(avg_ms or 0.0):.3f}")
+
+        for endpoint, error_rate in connection.execute(
+            """
+            SELECT endpoint, error_rate
+            FROM endpoint_health_mv
+            WHERE window = '24h'
+            """
+        ).fetchall():
+            metric = f"moex_endpoint_error_rate{{endpoint=\"{endpoint}\"}}"
+            lines.append(f"{metric} {float(error_rate or 0.0):.6f}")
+
+    return "\n".join(lines) + "\n"
 
 
 @app.get("/details/{endpoint}")
