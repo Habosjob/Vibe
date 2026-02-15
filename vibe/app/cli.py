@@ -115,10 +115,11 @@ def main(argv: list[str] | None = None) -> int:
                 use_cache=not args.no_cache,
             )
             logging.info(
-                "Probe complete: out_dir=%s files_written=%s total_isins=%s",
+                "Probe complete: out_dir=%s files_written=%s total_isins=%s orderbook_blocked_html=%s",
                 result.output_dir,
                 result.files_written,
                 result.total_isins,
+                result.orderbook_blocked_html,
             )
             return 0
         except Exception:

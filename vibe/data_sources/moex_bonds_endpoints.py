@@ -41,6 +41,18 @@ class FetchMeta:
     content_type: str | None = None
     response_head: str | None = None
     error: str | None = None
+    final_url: str | None = None
+    headers_subset: dict[str, str] | None = None
+
+
+def _extract_headers_subset(headers: dict[str, str]) -> dict[str, str]:
+    wanted = {"content-type", "server", "location"}
+    subset: dict[str, str] = {}
+    for key, value in headers.items():
+        key_lc = str(key).lower()
+        if key_lc in wanted or key_lc.startswith("cf-"):
+            subset[str(key)] = str(value)
+    return subset
 
 
 def build_probe_cache_key(*, isin: str, endpoint_name: str, url: str, params: dict[str, Any] | None) -> str:
@@ -116,6 +128,8 @@ class MoexBondEndpointsClient:
                     params=params or {},
                     response_head=cached_meta.get("response_head"),
                     error=cached_meta.get("error"),
+                    final_url=cached_meta.get("final_url"),
+                    headers_subset=cached_meta.get("headers_subset"),
                 )
             except Exception as exc:
                 logger.warning("Cache read failed for %s: %s", cache_path, exc)
@@ -125,11 +139,15 @@ class MoexBondEndpointsClient:
             response = get_with_retries(url, timeout=self.timeout, retries=self.retries)
             elapsed_ms = int((perf_counter() - start) * 1000)
             content_type = response.headers.get("Content-Type")
+            headers_subset = _extract_headers_subset(response.headers)
+            final_url = getattr(response, "final_url", None) or getattr(response, "url", None) or url
             response_text = response.content.decode("utf-8", errors="replace")
             try:
                 payload = json.loads(response_text)
             except json.JSONDecodeError as exc:
-                error = f"invalid_json: {exc}"
+                response_head = response_text[:200]
+                is_html = (content_type or "").lower().startswith("text/html") and "<html" in response_head.lower()
+                error = "HTML_INSTEAD_OF_JSON" if is_html else f"invalid_json: {exc}"
                 meta = FetchMeta(
                     status_code=response.status_code,
                     content_type=content_type,
@@ -137,8 +155,10 @@ class MoexBondEndpointsClient:
                     elapsed_ms=elapsed_ms,
                     url=url,
                     params=params or {},
-                    response_head=response_text[:200],
+                    response_head=response_head,
                     error=error,
+                    final_url=final_url,
+                    headers_subset=headers_subset,
                 )
                 if self.use_cache and cache_path is not None:
                     ensure_parent_dir(cache_path)
@@ -157,6 +177,8 @@ class MoexBondEndpointsClient:
                                     "fetched_at": datetime.now(timezone.utc).isoformat(),
                                     "response_head": meta.response_head,
                                     "error": meta.error,
+                                    "final_url": meta.final_url,
+                                    "headers_subset": meta.headers_subset,
                                 },
                             },
                             ensure_ascii=False,
@@ -164,12 +186,13 @@ class MoexBondEndpointsClient:
                         encoding="utf-8",
                     )
                 logger.warning(
-                    "Fetch non-JSON response: endpoint=%s isin=%s status=%s content_type=%s url=%s response_head=%r",
+                    "Fetch non-JSON response: endpoint=%s isin=%s status=%s content_type=%s url=%s final_url=%s response_head=%r",
                     endpoint_name,
                     isin,
                     response.status_code,
                     content_type,
                     url,
+                    meta.final_url if meta.final_url and meta.final_url != url else "",
                     response_text[:200],
                 )
                 return None, meta
@@ -182,6 +205,8 @@ class MoexBondEndpointsClient:
                 url=url,
                 params=params or {},
                 error=None,
+                final_url=final_url,
+                headers_subset=headers_subset,
             )
             if self.use_cache and cache_path is not None:
                 ensure_parent_dir(cache_path)
@@ -200,6 +225,8 @@ class MoexBondEndpointsClient:
                                 "fetched_at": datetime.now(timezone.utc).isoformat(),
                                 "response_head": meta.response_head,
                                 "error": meta.error,
+                                "final_url": meta.final_url,
+                                "headers_subset": meta.headers_subset,
                             },
                         },
                         ensure_ascii=False,
@@ -227,6 +254,8 @@ class MoexBondEndpointsClient:
                 params=params or {},
                 response_head=None,
                 error=error,
+                final_url=None,
+                headers_subset=None,
             )
 
     def resolve_board(self, isin: str) -> str:

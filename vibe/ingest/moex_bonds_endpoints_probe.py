@@ -34,6 +34,7 @@ class ProbeResult:
     output_dir: Path
     files_written: int
     total_isins: int
+    orderbook_blocked_html: int = 0
 
 
 def pick_isins(
@@ -100,6 +101,41 @@ def _choose_working_fallback_board(client: MoexBondEndpointsClient, isin: str) -
             return board
     return BOARD_FALLBACKS[0]
 
+def _pick_first_value(frame: pd.DataFrame, candidates: list[str]) -> Any | None:
+    normalized = {str(col).upper(): col for col in frame.columns}
+    if frame.empty:
+        return None
+    row = frame.iloc[0]
+    for candidate in candidates:
+        column = normalized.get(candidate.upper())
+        if column is None:
+            continue
+        value = row.get(column)
+        if pd.notna(value):
+            return value
+    return None
+
+
+def _extract_top_of_book_from_marketdata(frame: pd.DataFrame) -> dict[str, Any] | None:
+    if frame.empty:
+        return None
+    bestbid = _pick_first_value(frame, ["BESTBID", "BID", "BIDPRICE"])
+    bestoffer = _pick_first_value(frame, ["BESTOFFER", "OFFER", "OFFERPRICE"])
+    if bestbid is None and bestoffer is None:
+        return None
+    return {
+        "bestbid": bestbid,
+        "bestoffer": bestoffer,
+        "biddepth": _pick_first_value(frame, ["BIDDEPTH", "NUMBIDS", "BIDQTY"]),
+        "offerdepth": _pick_first_value(frame, ["OFFERDEPTH", "NUMOFFERS", "OFFERQTY"]),
+    }
+
+
+def _build_orderbook_fallback_frame(top_of_book: dict[str, Any]) -> pd.DataFrame:
+    row = dict(top_of_book)
+    row["source"] = "marketdata_fallback"
+    return pd.DataFrame([row])
+
 
 def build_probe_summary_df(
     *,
@@ -109,6 +145,8 @@ def build_probe_summary_df(
     from_date: date,
     till_date: date,
     interval: int,
+    status_override: str | None = None,
+    reason_override: str | None = None,
 ) -> pd.DataFrame:
     tables = []
     rows_by_table: dict[str, int] = {}
@@ -117,7 +155,10 @@ def build_probe_summary_df(
         tables = sorted(tables_payload.keys())
         rows_by_table = {name: len(df) for name, df in tables_payload.items()}
 
-    if meta.error:
+    if status_override:
+        status = status_override
+        reason = reason_override or ""
+    elif meta.error:
         status = "ERROR"
         reason = "request_error"
     elif not payload:
@@ -151,6 +192,8 @@ def build_probe_summary_df(
                 "params": json.dumps(meta.params, ensure_ascii=False, sort_keys=True),
                 "error": meta.error or "",
                 "response_head": (meta.response_head or "")[:200],
+                "final_url": meta.final_url or "",
+                "headers_subset": json.dumps(meta.headers_subset or {}, ensure_ascii=False, sort_keys=True),
             }
         ]
     )
@@ -215,14 +258,19 @@ def run_probe(
     endpoint_specs = default_endpoint_specs()
     params_map = default_endpoint_params(from_date=from_date, till_date=till_date, interval=interval)
     files_written = 0
+    orderbook_blocked_html = 0
+    counter_lock = threading.Lock()
     run_date = datetime.now(timezone.utc).strftime("%Y%m%d")
     source_snapshot = str(_load_latest_bond_rates_snapshot()[1])
 
     def _process_isin(isin: str) -> int:
+        nonlocal orderbook_blocked_html
         endpoint_sheets: dict[str, pd.DataFrame] = {}
         endpoint_summaries: dict[str, pd.DataFrame] = {}
         ok: list[str] = []
         failed: list[str] = []
+        orderbook_status = "ok"
+        marketdata_top_of_book: dict[str, Any] | None = None
         client = MoexBondEndpointsClient(timeout=timeout, retries=retries, cache_dir=cache_dir, use_cache=use_cache)
 
         try:
@@ -248,6 +296,20 @@ def run_probe(
                 )
 
             frame = iss_json_to_single_frame(payload or {})
+            status_override: str | None = None
+            reason_override: str | None = None
+
+            if spec.name == "marketdata" and payload and not frame.empty:
+                marketdata_top_of_book = _extract_top_of_book_from_marketdata(frame)
+
+            if spec.name == "orderbook" and fetch_meta.error == "HTML_INSTEAD_OF_JSON":
+                orderbook_status = "blocked_html"
+                status_override = "BLOCKED_HTML"
+                reason_override = "html_instead_of_json"
+                if marketdata_top_of_book:
+                    frame = _build_orderbook_fallback_frame(marketdata_top_of_book)
+                    logger.info("Orderbook fallback from marketdata applied: isin=%s", isin)
+
             summary_df = build_probe_summary_df(
                 meta=fetch_meta,
                 payload=payload,
@@ -255,6 +317,8 @@ def run_probe(
                 from_date=from_date,
                 till_date=till_date,
                 interval=interval,
+                status_override=status_override,
+                reason_override=reason_override,
             )
 
             if spec.name == "bondization":
@@ -280,6 +344,10 @@ def run_probe(
                 len(frame),
             )
 
+        if orderbook_status == "blocked_html":
+            with counter_lock:
+                orderbook_blocked_html += 1
+
         out_path = out_dir / f"{isin}.xlsx"
         meta = {
             "isin": isin,
@@ -287,6 +355,7 @@ def run_probe(
             "run_date": run_date,
             "endpoints_ok": ",".join(ok),
             "endpoints_failed": "; ".join(failed),
+            "orderbook_status": orderbook_status,
             "source_snapshot": source_snapshot,
         }
         write_isin_workbook(
@@ -304,8 +373,14 @@ def run_probe(
             files_written += written
 
     cleanup_old_dirs(Path("data/curated/moex/endpoints_probe"), keep_days=7)
+    logger.info("Probe counters: orderbook_blocked_html=%s", orderbook_blocked_html)
 
-    return ProbeResult(output_dir=out_dir, files_written=files_written, total_isins=len(isins))
+    return ProbeResult(
+        output_dir=out_dir,
+        files_written=files_written,
+        total_isins=len(isins),
+        orderbook_blocked_html=orderbook_blocked_html,
+    )
 
 
 def run_probe_for_latest_bond_rates(
