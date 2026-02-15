@@ -43,6 +43,8 @@ class IngestResult:
 def _validate_and_cast(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         raise ValueError("MOEX rates DataFrame is empty.")
+    if df.shape[1] < 5:
+        raise ValueError(f"MOEX rates DataFrame has too few columns: {df.shape[1]}.")
 
     columns = set(df.columns)
     id_hits = columns.intersection(KNOWN_ID_COLUMNS)
