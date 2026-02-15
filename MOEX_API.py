@@ -1640,6 +1640,7 @@ def fetch_and_save_bond_details(
                         if not block_df.empty:
                             endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
 
+    _print_details_stage_note("сетевой этап завершён, объединяем блоки", stage_started_at=progress_anchor)
     merged_frames: dict[str, dict[str, pd.DataFrame]] = {}
     for endpoint_name, blocks in endpoint_frames.items():
         merged_frames[endpoint_name] = {}
@@ -1648,19 +1649,41 @@ def fetch_and_save_bond_details(
             if valid_frames:
                 merged_frames[endpoint_name][block_name] = pd.concat(valid_frames, ignore_index=True, sort=False)
 
+    total_materialized_blocks = sum(len(blocks) for blocks in merged_frames.values())
+    _print_details_stage_note(
+        f"объединение завершено: endpoint'ов {len(merged_frames)}, блоков {total_materialized_blocks}",
+        stage_started_at=progress_anchor,
+    )
+
+    _print_details_stage_note("строим enrichment-таблицу", stage_started_at=progress_anchor)
     enrichment_df = _build_enrichment_frame(merged_frames)
+    _print_details_stage_note(
+        f"enrichment готов: строк {len(enrichment_df)}",
+        stage_started_at=progress_anchor,
+    )
     excel_sheets = 0
     if debug:
+        _print_details_stage_note("debug режим: формируем Excel с деталями", stage_started_at=progress_anchor)
         excel_sheets = _write_details_excel(merged_frames, enrichment_df)
     else:
         logger.info("Debug mode disabled: skip %s generation", DETAILS_EXCEL_PATH.name)
 
+    _print_details_stage_note("материализуем details parquet", stage_started_at=progress_anchor)
     parquet_files = _update_details_parquet(merged_frames)
+    _print_details_stage_note(
+        f"parquet обновлён: файлов {parquet_files}",
+        stage_started_at=progress_anchor,
+    )
 
+    _print_details_stage_note("собираем финальный датасет", stage_started_at=progress_anchor)
     finish_df = _normalize_identity_columns(_merge_base_with_enrichment(dataframe, enrichment_df))
     batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
     batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
     _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
+    _print_details_stage_note(
+        f"финальный датасет сохранён: строк {len(finish_df)}",
+        stage_started_at=progress_anchor,
+    )
     refresh_endpoint_health_mv()
     return len(secids), excel_sheets, parquet_files, len(finish_df), batch_path
 
