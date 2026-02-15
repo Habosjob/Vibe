@@ -48,3 +48,14 @@ def test_run_ingest_uses_default_paths_when_out_and_raw_are_none(tmp_path: Path,
     assert result.out_xlsx == DEFAULT_OUT_XLSX
     assert result.raw_csv == DEFAULT_RAW_DIR / f"{DEFAULT_RAW_BASENAME}_{date_tag}.csv"
     assert DEFAULT_OUT_XLSX.exists()
+
+
+def test_cli_parser_probe_defaults() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["moex-bond-endpoints-probe"])
+
+    assert args.n_static == 10
+    assert args.n_random == 10
+    assert args.interval == 24
+    assert args.max_rows_per_sheet == 200_000
