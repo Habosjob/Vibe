@@ -15,7 +15,9 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
 ------------------------------------------------------------
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/conftest.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_cli_defaults.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_excel_atomic_write.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_ingest_features.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_rates_parse.py
 
 ------------------------------------------------------------
