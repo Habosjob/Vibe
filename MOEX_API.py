@@ -1330,6 +1330,14 @@ def _print_details_progress(completed: int, total: int, eta_seconds: int | None,
         print()
 
 
+def _print_details_heartbeat(completed: int, total: int, pending: int, stage_started_at: float) -> None:
+    elapsed = time.perf_counter() - stage_started_at
+    print(
+        f"\n   ↳ details: ожидание ответов {completed}/{total}, активных задач {pending}, прошло {elapsed:.0f} сек",
+        flush=True,
+    )
+
+
 def _run_data_quality_checks(dataframe: pd.DataFrame, run_id: str, source: str, logger: logging.Logger) -> list[str]:
     row_count = len(dataframe)
     secid_col = next((c for c in ["SECID", "secid", "SecID"] if c in dataframe.columns), None)
@@ -1473,13 +1481,25 @@ def fetch_and_save_bond_details(
         completed = 0
         total = len(futures)
         progress_started_at = time.perf_counter()
+        last_heartbeat_at = progress_started_at
         pending_futures = set(futures)
         if total:
             _print_details_progress(0, total, None, stage_started_at=stage_started_at or progress_started_at)
+        else:
+            print("   ↳ details: все данные взяты из кэша, сетевых запросов нет", flush=True)
         while pending_futures:
             done_futures, pending_futures = wait(pending_futures, timeout=2.0, return_when=FIRST_COMPLETED)
             if not done_futures:
                 _print_details_progress(completed, total, None, stage_started_at=stage_started_at or progress_started_at)
+                now = time.perf_counter()
+                if now - last_heartbeat_at >= 15:
+                    _print_details_heartbeat(
+                        completed,
+                        total,
+                        len(pending_futures),
+                        stage_started_at=stage_started_at or progress_started_at,
+                    )
+                    last_heartbeat_at = now
                 continue
 
             for future in done_futures:
@@ -1861,6 +1881,8 @@ def run_rates_ingest(session: requests.Session, logger: logging.Logger, run_id: 
     logger.info("Погашено %s бумаг", len(removed_lines))
     for line in removed_lines[:50]:
         logger.info("  - %s", line)
+    if not added_lines and not removed_lines:
+        print("Изменений по бумагам нет", flush=True)
 
     return dataframe, data_source, export_date
 
