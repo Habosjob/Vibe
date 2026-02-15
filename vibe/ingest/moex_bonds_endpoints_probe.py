@@ -123,9 +123,17 @@ def _extract_top_of_book_from_marketdata(frame: pd.DataFrame) -> dict[str, Any] 
     bestoffer = _pick_first_value(frame, ["BESTOFFER", "OFFER", "OFFERPRICE"])
     if bestbid is None and bestoffer is None:
         return None
+
+    spread: float | None = None
+    bid_value = pd.to_numeric(pd.Series([bestbid]), errors="coerce").iloc[0]
+    offer_value = pd.to_numeric(pd.Series([bestoffer]), errors="coerce").iloc[0]
+    if pd.notna(bid_value) and pd.notna(offer_value):
+        spread = float(offer_value - bid_value)
+
     return {
         "bestbid": bestbid,
         "bestoffer": bestoffer,
+        "spread": spread,
         "biddepth": _pick_first_value(frame, ["BIDDEPTH", "NUMBIDS", "BIDQTY"]),
         "offerdepth": _pick_first_value(frame, ["OFFERDEPTH", "NUMOFFERS", "OFFERQTY"]),
     }
@@ -133,7 +141,7 @@ def _extract_top_of_book_from_marketdata(frame: pd.DataFrame) -> dict[str, Any] 
 
 def _build_orderbook_fallback_frame(top_of_book: dict[str, Any]) -> pd.DataFrame:
     row = dict(top_of_book)
-    row["source"] = "marketdata_fallback"
+    row["top_of_book_source"] = "marketdata_fallback"
     return pd.DataFrame([row])
 
 
