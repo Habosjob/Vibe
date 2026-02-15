@@ -1,19 +1,29 @@
 # IMPROVEMENTS
 
+## Реализовано в этом релизе
+1. ✅ **Вынесен SQL-слой details-кэша в `repositories/`** (`DetailsRepository` с bulk-загрузкой cache/latest).
+   - Профит: меньше SQL-вызовов в горячем цикле, заметно быстрее этап подготовки задач на 3-м этапе.
+2. ✅ **Добавлена многопоточная обработка cache-stage + batch-запись health/watermark**.
+   - Профит: ускорение cache-only прогонов (убраны десятки тысяч одиночных commit в SQLite).
+3. ✅ **Structured logging (JSON) + correlation_id (`run_id`)**.
+   - Профит: проще трассировать один запуск через весь pipeline и разбирать инциденты в лог-агрегаторах.
+4. ✅ **Lightweight Prometheus-метрики через `/metrics` в API**.
+   - Профит: доступны ключевые показатели (`cache_hit_ratio`, latency по этапам, error_rate по endpoint) для дашбордов и алертов.
+5. ✅ **Добавлены unit-тесты критичных участков (diff, incremental, read-model)**.
+   - Профит: меньше регрессий при изменениях ETL/SQLite логики.
+
 ## Осознанно не реализовано
 - Уведомления Telegram/Slack (по вашему условию).
-- **П.1 scheduler-service** как отдельный orchestrator пока не выносился в отдельный процесс/репозиторий.
-
-
+- Вынос scheduler-service в отдельный orchestrator/процесс.
 
 ## Предлагаемые следующие доработки (кратко + профит)
-1. **Вынести SQL в репозиторные слои (`repositories/`)**.
-   - Профит: проще тестировать, меньше связности между ETL-логикой и хранением.
-2. **Добавить профили выполнения (`--profile full|incremental|offline`)**.
-   - Профит: предсказуемое поведение пайплайна для разных operational-сценариев.
-3. **Сделать structured-logging (JSON) + correlation_id по run_id/secid**.
-   - Профит: удобнее трассировка инцидентов в ELK/Loki.
-4. **Добавить lightweight метрики Prometheus (latency, error-rate, cache-hit)**.
-   - Профит: алерты на деградацию до того, как это заметит пользователь.
-5. **Покрыть критичные участки unit/integration тестами (diff, incremental, read-model)**.
-   - Профит: меньше регрессий при изменениях pipeline.
+1. **Разделить `MOEX_API.py` на доменные сервисы (`ingest`, `details`, `export`, `dq`)**.
+   - Профит: проще сопровождать, меньше риск side-effect при изменениях.
+2. **Перевести тяжёлые merge/normalize шаги на батчи + pyarrow dataset scan**.
+   - Профит: снижение пикового RAM и ускорение на больших объёмах.
+3. **Инкрементально обновлять `bonds_read_model` (upsert по SECID), а не пересоздавать таблицу полностью**.
+   - Профит: быстрее 4-й этап и меньше write amplification в SQLite.
+4. **Добавить retention/архивацию для `details_rows`, `intraday_quotes_snapshot`, `bonds_enriched_incremental` с политиками по дням/объёму**.
+   - Профит: контролируемый размер БД, прогнозируемое время VACUUM/backup.
+5. **Ввести профили запуска (`full|incremental|offline`) как обязательный CLI-параметр для cron**.
+   - Профит: детерминированное поведение и меньше случайных "тяжёлых" прогонов.

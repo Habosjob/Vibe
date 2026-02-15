@@ -10,7 +10,7 @@ import random
 import sqlite3
 import time
 import re
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -18,6 +18,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 from cache_policy import CACHE_POLICY
+from repositories.details_repository import DetailsRepository
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -59,6 +60,7 @@ DISCOVERY_MAX_ATTEMPTS = CACHE_POLICY.discovery_max_attempts
 DISCOVERY_BACKOFF_BASE_SECONDS = CACHE_POLICY.discovery_backoff_base_seconds
 DISCOVERY_BACKOFF_MAX_SECONDS = CACHE_POLICY.discovery_backoff_max_seconds
 INTRADAY_SNAPSHOT_INTERVAL_MINUTES = CACHE_POLICY.intraday_snapshot_interval_minutes
+LOG_FORMAT = os.getenv("LOG_FORMAT", "text").strip().lower()
 
 FINISH_EXCEL_EXCLUDED_COLUMNS = {
     "NAME",
@@ -141,6 +143,23 @@ class CacheMissError(RuntimeError):
     """Raised when cache does not contain data for requested day."""
 
 
+class JsonLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, object] = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        run_id = getattr(record, "run_id", None)
+        secid = getattr(record, "secid", None)
+        if run_id:
+            payload["run_id"] = run_id
+        if secid:
+            payload["secid"] = secid
+        return json.dumps(payload, ensure_ascii=False)
+
+
 def build_retry_session() -> requests.Session:
     retry = Retry(
         total=5,
@@ -167,14 +186,15 @@ def setup_logging() -> logging.Logger:
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    text_formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    file_formatter: logging.Formatter = JsonLogFormatter() if LOG_FORMAT == "json" else text_formatter
 
     file_handler = logging.FileHandler(LOG_PATH, mode="w", encoding="utf-8")
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(file_formatter)
 
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(logging.WARNING)
-    stream_handler.setFormatter(formatter)
+    stream_handler.setFormatter(text_formatter)
 
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
@@ -360,6 +380,9 @@ def init_db() -> None:
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_intraday_quotes_snapshot_snapshot_at ON intraday_quotes_snapshot(snapshot_at)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intraday_quotes_snapshot_secid_snapshot ON intraday_quotes_snapshot(secid, snapshot_at)"
         )
         for column_name in ["open", "close", "lclose"]:
             try:
@@ -566,6 +589,23 @@ def _save_endpoint_health(endpoint_name: str, secid: str, status: str, source: s
         connection.commit()
 
 
+def _save_endpoint_health_bulk(rows: list[tuple[str, str, str, str, int | None, float | None, str | None, str | None]]) -> None:
+    if not rows:
+        return
+    checked_at = datetime.now().isoformat(timespec="seconds")
+    payload = [(checked_at, *row) for row in rows]
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        connection.executemany(
+            """
+            INSERT INTO endpoint_health_history(
+                checked_at, endpoint, secid, status, source, http_status, latency_ms, blocks, error_text
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+        connection.commit()
+
 
 
 def _is_circuit_open(endpoint_name: str) -> bool:
@@ -737,6 +777,69 @@ def _save_watermark(endpoint_name: str, secid: str, fetched_at: str) -> None:
             (endpoint_name, secid, fetched_at, datetime.now().isoformat(timespec="seconds")),
         )
         connection.commit()
+
+
+def _save_watermarks_bulk(rows: list[tuple[str, str, str]]) -> None:
+    if not rows:
+        return
+    updated_at = datetime.now().isoformat(timespec="seconds")
+    payload = [(endpoint_name, secid, fetched_at, updated_at) for endpoint_name, secid, fetched_at in rows]
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO details_update_watermark(endpoint, secid, fetched_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            payload,
+        )
+        connection.commit()
+
+
+def _prepare_cached_blocks_for_secid(
+    secid: str,
+    working_endpoints: list[tuple[str, str]],
+    fresh_cache: dict[tuple[str, str], tuple[dict, str]],
+    latest_cache: dict[tuple[str, str], tuple[dict, str]],
+    network_targets: set[str],
+) -> tuple[
+    str,
+    list[tuple[str, str]],
+    list[tuple[str, str, pd.DataFrame]],
+    list[tuple[str, str, str, str, int | None, float | None, str | None, str | None]],
+    list[tuple[str, str, str]],
+    int,
+]:
+    missing_endpoints: list[tuple[str, str]] = []
+    normalized_blocks: list[tuple[str, str, pd.DataFrame]] = []
+    health_rows: list[tuple[str, str, str, str, int | None, float | None, str | None, str | None]] = []
+    watermark_rows: list[tuple[str, str, str]] = []
+    stale_cache_loaded = 0
+
+    for endpoint_name, endpoint_url in working_endpoints:
+        cached_record = fresh_cache.get((endpoint_name, secid))
+        cache_source = "cache"
+        if cached_record is None and secid not in network_targets:
+            cached_record = latest_cache.get((endpoint_name, secid))
+            cache_source = "stale_cache"
+            if cached_record is not None:
+                stale_cache_loaded += 1
+
+        if cached_record is None:
+            if secid in network_targets:
+                missing_endpoints.append((endpoint_name, endpoint_url))
+            continue
+
+        cached_payload, fetched_at = cached_record
+        blocks = _extract_blocks(cached_payload)
+        block_names = list(blocks.keys())
+        health_rows.append((endpoint_name, secid, "ok", cache_source, None, 0.0, ", ".join(block_names) if block_names else None, None))
+        watermark_rows.append((endpoint_name, secid, fetched_at))
+
+        for block_name, block_df in blocks.items():
+            if not block_df.empty:
+                normalized_blocks.append((endpoint_name, block_name, _normalize_block_frame(secid, block_name, block_df)))
+
+    return secid, missing_endpoints, normalized_blocks, health_rows, watermark_rows, stale_cache_loaded
 
 
 def _save_endpoint_payload(endpoint_name: str, secid: str, payload: dict, fetched_at: str | None = None) -> str:
@@ -1525,41 +1628,55 @@ def fetch_and_save_bond_details(
     network_targets = set(incremental_target) if incremental_target else set(secids)
     stale_cache_loaded = 0
     _print_details_stage_note("подготовка задач: проверяем кэш и формируем сетевой список SECID", stage_started_at=progress_anchor)
+
+    repository = DetailsRepository(CACHE_DB_PATH)
+    endpoint_names = [name for name, _ in working_endpoints]
+    fresh_cache, latest_cache = repository.load_cached_records_bulk(secids, endpoint_names, DETAILS_TTL_HOURS)
+
     prep_total = len(secids)
     prep_completed = 0
     prep_last_note_at = time.perf_counter()
-    for secid in secids:
-        missing_endpoints: list[tuple[str, str]] = []
-        for endpoint_name, endpoint_url in working_endpoints:
-            cached_record = _get_cached_endpoint_record(endpoint_name, secid)
-            if cached_record is None and secid not in network_targets:
-                cached_record = _get_latest_endpoint_record(endpoint_name, secid)
-                if cached_record is not None:
-                    stale_cache_loaded += 1
-            if cached_record is None:
-                if secid in network_targets:
-                    missing_endpoints.append((endpoint_name, endpoint_url))
-                continue
-            cached_payload, fetched_at = cached_record
-            blocks = _extract_blocks(cached_payload)
-            logger.info("Details %s for %s loaded from cache", endpoint_name, secid)
-            _save_endpoint_health(endpoint_name, secid, "ok", "cache", None, 0.0, list(blocks.keys()), None)
-            _save_watermark(endpoint_name, secid, fetched_at)
-            for block_name, block_df in blocks.items():
-                if not block_df.empty:
-                    endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
-        if missing_endpoints:
-            pending_by_secid[secid] = missing_endpoints
+    cache_health_rows: list[tuple[str, str, str, str, int | None, float | None, str | None, str | None]] = []
+    cache_watermark_rows: list[tuple[str, str, str]] = []
 
-        prep_completed += 1
-        now = time.perf_counter()
-        if now - prep_last_note_at >= 5 or prep_completed == prep_total:
-            prep_percent = (prep_completed / prep_total * 100) if prep_total else 100.0
-            _print_details_stage_note(
-                f"подготовка задач: {prep_percent:5.1f}% ({prep_completed}/{prep_total}), сетевых SECID {len(pending_by_secid)}",
-                stage_started_at=progress_anchor,
+    cache_workers = min(max(4, details_worker_processes), 24)
+    with ThreadPoolExecutor(max_workers=cache_workers) as cache_executor:
+        futures = [
+            cache_executor.submit(
+                _prepare_cached_blocks_for_secid,
+                secid,
+                working_endpoints,
+                fresh_cache,
+                latest_cache,
+                network_targets,
             )
-            prep_last_note_at = now
+            for secid in secids
+        ]
+
+        for future in as_completed(futures):
+            secid, missing_endpoints, normalized_blocks, health_rows, watermark_rows, stale_loaded = future.result()
+            stale_cache_loaded += stale_loaded
+            cache_health_rows.extend(health_rows)
+            cache_watermark_rows.extend(watermark_rows)
+
+            for endpoint_name, block_name, normalized_block in normalized_blocks:
+                endpoint_frames[endpoint_name].setdefault(block_name, []).append(normalized_block)
+
+            if missing_endpoints:
+                pending_by_secid[secid] = missing_endpoints
+
+            prep_completed += 1
+            now = time.perf_counter()
+            if now - prep_last_note_at >= 5 or prep_completed == prep_total:
+                prep_percent = (prep_completed / prep_total * 100) if prep_total else 100.0
+                _print_details_stage_note(
+                    f"подготовка задач: {prep_percent:5.1f}% ({prep_completed}/{prep_total}), сетевых SECID {len(pending_by_secid)}",
+                    stage_started_at=progress_anchor,
+                )
+                prep_last_note_at = now
+
+    _save_endpoint_health_bulk(cache_health_rows)
+    _save_watermarks_bulk(cache_watermark_rows)
 
     _print_details_stage_note(
         f"подготовка задач завершена: сетевых SECID {len(pending_by_secid)}, кэшированных {len(secids) - len(pending_by_secid)}, stale-cache {stale_cache_loaded}",
@@ -2080,7 +2197,9 @@ def run_quotes_snapshotter(session: requests.Session, logger: logging.Logger, ru
     dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
     _print_export_progress("снимок intraday-котировок", export_started_perf)
     intraday_rows, snapshot_at = _persist_intraday_quotes_snapshot(session, logger)
+    _print_export_progress("обновление read-model в SQLite", export_started_perf)
     _refresh_bonds_read_model()
+    _print_export_progress("read-model обновлён", export_started_perf)
     try:
         _print_export_progress("чтение обогащённой витрины из SQLite", export_started_perf)
         with sqlite3.connect(CACHE_DB_PATH) as connection:
@@ -2128,14 +2247,15 @@ def main() -> int:
     start_time = time.perf_counter()
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
     stage_view = StageProgressView(total_stages=len(PIPELINE_STAGE_ORDER), started_at=start_time)
-    logger.info("MOEX API script started")
+    run_logger = logging.LoggerAdapter(logger, {"run_id": run_id})
+    run_logger.info("MOEX API script started")
 
     try:
-        dataframe, data_source, export_date, incremental_secids = run_rates_ingest(session, logger, run_id=run_id, debug=args.debug, stage_view=stage_view)
+        dataframe, data_source, export_date, incremental_secids = run_rates_ingest(session, run_logger, run_id=run_id, debug=args.debug, stage_view=stage_view)
         secids_count, details_sheets, parquet_files, finish_rows, finish_batch_path = run_details_enricher(
             dataframe,
             session,
-            logger,
+            run_logger,
             run_id=run_id,
             source=data_source,
             export_date=export_date,
@@ -2144,25 +2264,25 @@ def main() -> int:
             incremental_secids=incremental_secids,
             stage_view=stage_view,
         )
-        dq_daily_report_path, intraday_rows = run_quotes_snapshotter(session, logger, run_id=run_id, source=data_source, stage_view=stage_view)
+        dq_daily_report_path, intraday_rows = run_quotes_snapshotter(session, run_logger, run_id=run_id, source=data_source, stage_view=stage_view)
 
         elapsed = time.perf_counter() - start_time
-        logger.info("Data source: %s", data_source)
-        logger.info("Saved extended details for %s securities into %s endpoint sheets", secids_count, details_sheets)
-        logger.info("Updated %s parquet detail files in %s", parquet_files, DETAILS_PARQUET_DIR)
-        logger.info("Saved enriched finish dataset with %s rows to %s", finish_rows, FINISH_EXCEL_PATH)
-        logger.info("Saved incremental finish batch to %s", finish_batch_path)
-        logger.info("DQ daily report path: %s", dq_daily_report_path)
-        logger.info("Intraday quotes snapshot rows: %s", intraday_rows)
-        logger.info("Execution time: %.3f seconds", elapsed)
+        run_logger.info("Data source: %s", data_source)
+        run_logger.info("Saved extended details for %s securities into %s endpoint sheets", secids_count, details_sheets)
+        run_logger.info("Updated %s parquet detail files in %s", parquet_files, DETAILS_PARQUET_DIR)
+        run_logger.info("Saved enriched finish dataset with %s rows to %s", finish_rows, FINISH_EXCEL_PATH)
+        run_logger.info("Saved incremental finish batch to %s", finish_batch_path)
+        run_logger.info("DQ daily report path: %s", dq_daily_report_path)
+        run_logger.info("Intraday quotes snapshot rows: %s", intraday_rows)
+        run_logger.info("Execution time: %.3f seconds", elapsed)
         print(f"\n🎉 Готово! Полный пайплайн завершён за {_humanize_duration(elapsed)}.", flush=True)
         return 0
 
     except Exception as error:
         elapsed = time.perf_counter() - start_time
         _save_sla_stage_timer(run_id, "export", datetime.now(), datetime.now(), "error", source="unknown", details=str(error))
-        logger.error("Script failed: %s", error)
-        logger.info("Execution time before failure: %.3f seconds", elapsed)
+        run_logger.error("Script failed: %s", error)
+        run_logger.info("Execution time before failure: %.3f seconds", elapsed)
         print(f"MOEX_API failed: {error}")
         return 1
 
