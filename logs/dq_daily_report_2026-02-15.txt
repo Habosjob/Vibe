@@ -1,7 +1,0 @@
-DQ daily report for 2026-02-15
-Runs today: 16
-Top warnings:
-- none
-Row count trend (last <=7 days):
-- 2026-02-14: avg=3910.0, max=3910
-- 2026-02-15: avg=3906.0, max=3906
