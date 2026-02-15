@@ -279,6 +279,7 @@ def run_probe(
         failed: list[str] = []
         orderbook_status = "ok"
         marketdata_top_of_book: dict[str, Any] | None = None
+        orderbook_fallback_pending = False
         client = MoexBondEndpointsClient(timeout=timeout, retries=retries, cache_dir=cache_dir, use_cache=use_cache)
 
         try:
@@ -309,6 +310,10 @@ def run_probe(
 
             if spec.name == "marketdata" and payload and not frame.empty:
                 marketdata_top_of_book = _extract_top_of_book_from_marketdata(frame)
+                if orderbook_fallback_pending and marketdata_top_of_book:
+                    endpoint_sheets["orderbook"] = _build_orderbook_fallback_frame(marketdata_top_of_book)
+                    orderbook_fallback_pending = False
+                    logger.info("Orderbook fallback from marketdata applied (deferred): isin=%s", isin)
 
             if spec.name == "orderbook" and fetch_meta.error == "HTML_INSTEAD_OF_JSON":
                 orderbook_status = "blocked_html"
@@ -317,6 +322,8 @@ def run_probe(
                 if marketdata_top_of_book:
                     frame = _build_orderbook_fallback_frame(marketdata_top_of_book)
                     logger.info("Orderbook fallback from marketdata applied: isin=%s", isin)
+                else:
+                    orderbook_fallback_pending = True
 
             summary_df = build_probe_summary_df(
                 meta=fetch_meta,
