@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+
+# local data artifacts
+data/raw/
+data/curated/
