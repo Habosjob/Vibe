@@ -17,6 +17,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/conftest.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_cli_defaults.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_excel_atomic_write.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_iss_json_normalize.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_ingest_features.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_rates_parse.py
 
@@ -40,6 +41,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/app/cli.py
   ----------------------------------------------------------
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/data_sources/__init__.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/data_sources/moex_bonds_endpoints.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/data_sources/moex_iss.py
 
   ----------------------------------------------------------
@@ -48,6 +50,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/data_sources/moex_iss.
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/ingest/__init__.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/ingest/moex_bond_rates.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/ingest/moex_bonds_endpoints_probe.py
 
   ----------------------------------------------------------
   Директория: vibe/storage/
