@@ -27,6 +27,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_cli_defaults.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_excel_atomic_write.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_iss_json_normalize.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_ingest_features.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_probe_non_json.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_rates_parse.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_resolve_board.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_probe_writes_summary_for_empty.py
