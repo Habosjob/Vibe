@@ -10,6 +10,7 @@ import random
 import sqlite3
 import time
 import re
+from functools import reduce
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -1016,43 +1017,60 @@ def _build_enrichment_frame(
     endpoint_frames: dict[str, dict[str, pd.DataFrame]],
     progress_callback: Callable[[int, int, str, str], None] | None = None,
 ) -> pd.DataFrame:
-    feature_frames: list[pd.DataFrame] = []
-    total_blocks = sum(len(block_frames) for block_frames in endpoint_frames.values())
-    processed_blocks = 0
-
+    block_tasks: list[tuple[str, str, pd.DataFrame]] = []
     for endpoint_name, block_frames in endpoint_frames.items():
         for block_name, frame in block_frames.items():
-            processed_blocks += 1
-            if progress_callback is not None:
-                progress_callback(processed_blocks, total_blocks, endpoint_name, block_name)
-            if frame.empty:
-                continue
+            block_tasks.append((endpoint_name, block_name, frame))
 
-            prepared = frame.copy()
-            prepared["secid"] = prepared["secid"].astype(str).str.strip().str.upper()
-            payload_columns = [c for c in prepared.columns if c not in {"secid", "block_name"}]
+    total_blocks = len(block_tasks)
+    if total_blocks == 0:
+        return pd.DataFrame(columns=["secid"])
 
-            grouped = prepared.groupby("secid", as_index=False).size().rename(columns={"size": f"{endpoint_name}_{block_name}_rows"})
-            for col in payload_columns:
-                series = (
-                    prepared.groupby("secid")[col]
-                    .apply(
-                        lambda s: " | ".join(
-                            list(dict.fromkeys(str(v) for v in s.dropna().tolist() if str(v).strip()))[:5]
-                        )
+    def _build_block_feature_frame(endpoint_name: str, block_name: str, frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return pd.DataFrame(columns=["secid"])
+
+        prepared = frame.copy()
+        prepared["secid"] = prepared["secid"].astype(str).str.strip().str.upper()
+        payload_columns = [c for c in prepared.columns if c not in {"secid", "block_name"}]
+        grouped = prepared.groupby("secid", as_index=False).size().rename(columns={"size": f"{endpoint_name}_{block_name}_rows"})
+
+        for col in payload_columns:
+            series = (
+                prepared.groupby("secid")[col]
+                .agg(
+                    lambda s: " | ".join(
+                        list(dict.fromkeys(str(v) for v in s.dropna().tolist() if str(v).strip()))[:5]
                     )
-                    .reset_index(name=f"{endpoint_name}_{block_name}_{col}")
                 )
-                grouped = grouped.merge(series, on="secid", how="left")
+                .reset_index(name=f"{endpoint_name}_{block_name}_{col}")
+            )
+            grouped = grouped.merge(series, on="secid", how="left")
 
-            feature_frames.append(grouped)
+        return grouped
+
+    cpu = max(os.cpu_count() or 2, 2)
+    enrichment_workers = min(16, max(2, cpu // 2))
+    feature_frames: list[pd.DataFrame] = []
+    completed = 0
+    with ThreadPoolExecutor(max_workers=enrichment_workers) as pool:
+        futures: dict[Future[pd.DataFrame], tuple[str, str]] = {}
+        for endpoint_name, block_name, frame in block_tasks:
+            futures[pool.submit(_build_block_feature_frame, endpoint_name, block_name, frame)] = (endpoint_name, block_name)
+
+        for future in as_completed(futures):
+            block_df = future.result()
+            endpoint_name, block_name = futures[future]
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, total_blocks, endpoint_name, block_name)
+            if not block_df.empty:
+                feature_frames.append(block_df)
 
     if not feature_frames:
         return pd.DataFrame(columns=["secid"])
 
-    enrichment = feature_frames[0]
-    for frame in feature_frames[1:]:
-        enrichment = enrichment.merge(frame, on="secid", how="outer")
+    enrichment = reduce(lambda left, right: left.merge(right, on="secid", how="outer"), feature_frames)
     enrichment = enrichment.loc[:, ~enrichment.columns.duplicated()].copy()
     return enrichment
 
@@ -1409,13 +1427,23 @@ def _refresh_dq_metrics_daily_mv() -> None:
         connection.commit()
 
 
-def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging.Logger) -> tuple[int, str]:
+def _persist_intraday_quotes_snapshot(
+    session: requests.Session,
+    logger: logging.Logger,
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[int, str]:
     snapshot_at = datetime.now().isoformat(timespec="seconds")
     offset = 0
     page_size = 100
+    pages = 0
+    max_pages = 200
     rows_to_save: list[tuple[str, str, str | None, str | None, float | None, float | None, float | None, float | None, float | None, float | None, str | None]] = []
 
     while True:
+        pages += 1
+        if pages > max_pages:
+            logger.warning("Intraday snapshot stopped by safety guard: pages > %s", max_pages)
+            break
         url = f"{MOEX_INTRADAY_QUOTES_URL}&start={offset}"
         try:
             response = session.get(url, timeout=20)
@@ -1427,6 +1455,8 @@ def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging
         marketdata = payload.get("marketdata", {}) if isinstance(payload, dict) else {}
         columns = marketdata.get("columns", []) if isinstance(marketdata, dict) else []
         data = marketdata.get("data", []) if isinstance(marketdata, dict) else []
+        if progress_callback is not None:
+            progress_callback(f"intraday page={pages}, offset={offset}, rows={len(data)}")
         if not columns or not data:
             break
 
@@ -1454,6 +1484,8 @@ def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging
 
     rows_to_save = [row for row in rows_to_save if row[1]]
     if rows_to_save:
+        if progress_callback is not None:
+            progress_callback(f"intraday persist rows={len(rows_to_save)}")
         with sqlite3.connect(CACHE_DB_PATH) as connection:
             connection.executemany(
                 """
@@ -2373,7 +2405,11 @@ def run_quotes_snapshotter(session: requests.Session, logger: logging.Logger, ru
     _print_export_progress("подготовка дневного DQ-отчёта", export_started_perf)
     dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
     _print_export_progress("снимок intraday-котировок", export_started_perf)
-    intraday_rows, snapshot_at = _persist_intraday_quotes_snapshot(session, logger)
+    intraday_rows, snapshot_at = _persist_intraday_quotes_snapshot(
+        session,
+        logger,
+        progress_callback=lambda msg: _print_export_progress(msg, export_started_perf),
+    )
     _print_export_progress("обновление read-model в SQLite", export_started_perf)
     _refresh_bonds_read_model()
     _print_export_progress("read-model обновлён", export_started_perf)
