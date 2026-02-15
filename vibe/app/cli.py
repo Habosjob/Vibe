@@ -9,10 +9,12 @@ from vibe.config import (
     DEFAULT_HTTP_RETRIES,
     DEFAULT_HTTP_TIMEOUT_SECONDS,
     DEFAULT_MOEX_RATES_URL,
-    DEFAULT_OUT_XLSX,
-    DEFAULT_RAW_CSV,
 )
-from vibe.ingest.moex_bond_rates import run_moex_bond_rates_ingest
+from vibe.ingest.moex_bond_rates import (
+    DEFAULT_KEEP_ID,
+    DEFAULT_MAX_PRINT,
+    run_moex_bond_rates_ingest,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,11 +22,13 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     moex = subparsers.add_parser("moex-bond-rates", help="Download MOEX bond rates CSV and save Excel")
-    moex.add_argument("--out", type=Path, default=DEFAULT_OUT_XLSX)
-    moex.add_argument("--raw", type=Path, default=DEFAULT_RAW_CSV)
+    moex.add_argument("--out", type=Path, default=None, help="Optional output xlsx path")
+    moex.add_argument("--raw", type=Path, default=None, help="Optional raw csv path or directory")
     moex.add_argument("--url", default=DEFAULT_MOEX_RATES_URL)
     moex.add_argument("--timeout", type=int, default=DEFAULT_HTTP_TIMEOUT_SECONDS)
     moex.add_argument("--retries", type=int, default=DEFAULT_HTTP_RETRIES)
+    moex.add_argument("--max-print", type=int, default=DEFAULT_MAX_PRINT)
+    moex.add_argument("--keep-id", choices=["ISIN", "SECID"], default=DEFAULT_KEEP_ID)
     moex.add_argument("--no-cache", action="store_true", help="Bypass daily parquet cache and force download")
 
     return parser
@@ -44,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 retries=args.retries,
                 no_cache=args.no_cache,
+                max_print=args.max_print,
+                keep_id=args.keep_id,
             )
             logging.info(
                 "Ingest complete: out=%s raw=%s rows=%s cols=%s",
