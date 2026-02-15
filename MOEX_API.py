@@ -14,6 +14,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_c
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import requests
@@ -49,7 +50,8 @@ FINISH_PRICE_EXCEL_PATH = BASE_DIR / "MOEX_Bonds_Finish_Price.xlsx"
 FINISH_BATCH_DIR = BASE_DIR / "finish_batches"
 DETAILS_PARQUET_DIR = BASE_DIR / "details_parquet"
 DETAILS_TTL_HOURS = CACHE_POLICY.details_ttl_hours
-DEFAULT_DETAILS_WORKER_PROCESSES = min(16, max(4, (os.cpu_count() or 2) * 2))
+DEFAULT_DETAILS_WORKER_PROCESSES = min(64, max(8, (os.cpu_count() or 2) * 4))
+DEFAULT_CACHE_PREP_WORKERS = min(96, max(8, (os.cpu_count() or 2) * 6))
 RANDOM_SECID_SAMPLE_SIZE = 10
 DETAILS_SAMPLE_ONLY = os.getenv("DETAILS_SAMPLE_ONLY", "0") == "1"
 CB_FAILURE_THRESHOLD = CACHE_POLICY.cb_failure_threshold
@@ -1004,10 +1006,19 @@ def _autosize_worksheet(worksheet) -> None:
         worksheet.column_dimensions[column].width = min(max(12, max_length + 2), 60)
 
 
-def _build_enrichment_frame(endpoint_frames: dict[str, dict[str, pd.DataFrame]]) -> pd.DataFrame:
+def _build_enrichment_frame(
+    endpoint_frames: dict[str, dict[str, pd.DataFrame]],
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+) -> pd.DataFrame:
     secid_features: dict[str, dict[str, str | int | float]] = {}
+    total_blocks = sum(len(block_frames) for block_frames in endpoint_frames.values())
+    processed_blocks = 0
+
     for endpoint_name, block_frames in endpoint_frames.items():
         for block_name, frame in block_frames.items():
+            processed_blocks += 1
+            if progress_callback is not None:
+                progress_callback(processed_blocks, total_blocks, endpoint_name, block_name)
             if frame.empty:
                 continue
             for secid, group in frame.groupby("secid"):
@@ -1420,6 +1431,27 @@ def _persist_intraday_quotes_snapshot(session: requests.Session, logger: logging
     return len(rows_to_save), snapshot_at
 
 
+
+
+def _format_runtime_diag(stage_started_at: float, stage_cpu_started_at: float, completed: int, total: int, workers: int) -> str:
+    elapsed = max(time.perf_counter() - stage_started_at, 1e-9)
+    cpu_elapsed = max(time.process_time() - stage_cpu_started_at, 0.0)
+    cpu_count = max(os.cpu_count() or 1, 1)
+    throughput = completed / elapsed if completed > 0 else 0.0
+    core_usage_pct = (cpu_elapsed / elapsed) * 100.0
+    host_cpu_pct = core_usage_pct / cpu_count
+    load_note = ""
+    if hasattr(os, "getloadavg"):
+        try:
+            load1 = os.getloadavg()[0]
+            load_note = f", load1={load1:.2f}"
+        except OSError:
+            load_note = ""
+    return (
+        f"diag: workers={workers}, throughput={throughput:.2f}/sec, "
+        f"proc-core-usage={core_usage_pct:.1f}%, est-host-cpu={host_cpu_pct:.1f}%{load_note}"
+    )
+
 def _humanize_duration(seconds: float) -> str:
     total_seconds = max(int(seconds), 0)
     hours, remainder = divmod(total_seconds, 3600)
@@ -1639,7 +1671,17 @@ def fetch_and_save_bond_details(
     cache_health_rows: list[tuple[str, str, str, str, int | None, float | None, str | None, str | None]] = []
     cache_watermark_rows: list[tuple[str, str, str]] = []
 
-    cache_workers = min(max(4, details_worker_processes), 24)
+    raw_cache_workers = os.getenv("DETAILS_CACHE_WORKERS", "").strip()
+    if raw_cache_workers:
+        try:
+            cache_workers = max(1, int(raw_cache_workers))
+        except ValueError:
+            logger.warning("Invalid DETAILS_CACHE_WORKERS='%s'. Fallback to auto", raw_cache_workers)
+            cache_workers = min(DEFAULT_CACHE_PREP_WORKERS, max(8, details_worker_processes * 2))
+    else:
+        cache_workers = min(DEFAULT_CACHE_PREP_WORKERS, max(8, details_worker_processes * 2))
+
+    prep_cpu_started_at = time.process_time()
     with ThreadPoolExecutor(max_workers=cache_workers) as cache_executor:
         futures = [
             cache_executor.submit(
@@ -1673,6 +1715,10 @@ def fetch_and_save_bond_details(
                     f"подготовка задач: {prep_percent:5.1f}% ({prep_completed}/{prep_total}), сетевых SECID {len(pending_by_secid)}",
                     stage_started_at=progress_anchor,
                 )
+                _print_details_stage_note(
+                    _format_runtime_diag(progress_anchor, prep_cpu_started_at, prep_completed, prep_total, cache_workers),
+                    stage_started_at=progress_anchor,
+                )
                 prep_last_note_at = now
 
     _save_endpoint_health_bulk(cache_health_rows)
@@ -1680,6 +1726,10 @@ def fetch_and_save_bond_details(
 
     _print_details_stage_note(
         f"подготовка задач завершена: сетевых SECID {len(pending_by_secid)}, кэшированных {len(secids) - len(pending_by_secid)}, stale-cache {stale_cache_loaded}",
+        stage_started_at=progress_anchor,
+    )
+    _print_details_stage_note(
+        _format_runtime_diag(progress_anchor, prep_cpu_started_at, prep_completed, prep_total, cache_workers),
         stage_started_at=progress_anchor,
     )
 
@@ -1791,6 +1841,12 @@ def fetch_and_save_bond_details(
                             endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
 
     _print_details_stage_note("сетевой этап завершён, объединяем блоки", stage_started_at=progress_anchor)
+    merge_started_at = time.perf_counter()
+    merge_cpu_started_at = time.process_time()
+    merge_total = sum(len(blocks) for blocks in endpoint_frames.values())
+    merge_completed = 0
+    merge_last_note = merge_started_at
+
     merged_frames: dict[str, dict[str, pd.DataFrame]] = {}
     for endpoint_name, blocks in endpoint_frames.items():
         merged_frames[endpoint_name] = {}
@@ -1798,6 +1854,18 @@ def fetch_and_save_bond_details(
             valid_frames = [frame.dropna(axis=1, how="all") for frame in frames if not frame.empty]
             if valid_frames:
                 merged_frames[endpoint_name][block_name] = pd.concat(valid_frames, ignore_index=True, sort=False)
+            merge_completed += 1
+            now = time.perf_counter()
+            if now - merge_last_note >= 4 or merge_completed == merge_total:
+                _print_details_stage_note(
+                    f"merge прогресс: {merge_completed}/{merge_total} блоков",
+                    stage_started_at=progress_anchor,
+                )
+                _print_details_stage_note(
+                    _format_runtime_diag(merge_started_at, merge_cpu_started_at, merge_completed, merge_total, workers=1),
+                    stage_started_at=progress_anchor,
+                )
+                merge_last_note = now
 
     total_materialized_blocks = sum(len(blocks) for blocks in merged_frames.values())
     _print_details_stage_note(
@@ -1806,7 +1874,25 @@ def fetch_and_save_bond_details(
     )
 
     _print_details_stage_note("строим enrichment-таблицу", stage_started_at=progress_anchor)
-    enrichment_df = _build_enrichment_frame(merged_frames)
+    enrich_started_at = time.perf_counter()
+    enrich_cpu_started_at = time.process_time()
+    enrich_last_note = enrich_started_at
+
+    def _on_enrichment_progress(done: int, total: int, endpoint_name: str, block_name: str) -> None:
+        nonlocal enrich_last_note
+        now = time.perf_counter()
+        if now - enrich_last_note >= 4 or done == total:
+            _print_details_stage_note(
+                f"enrichment прогресс: {done}/{total} блоков (текущий {endpoint_name}/{block_name})",
+                stage_started_at=progress_anchor,
+            )
+            _print_details_stage_note(
+                _format_runtime_diag(enrich_started_at, enrich_cpu_started_at, done, total, workers=1),
+                stage_started_at=progress_anchor,
+            )
+            enrich_last_note = now
+
+    enrichment_df = _build_enrichment_frame(merged_frames, progress_callback=_on_enrichment_progress)
     _print_details_stage_note(
         f"enrichment готов: строк {len(enrichment_df)}",
         stage_started_at=progress_anchor,
