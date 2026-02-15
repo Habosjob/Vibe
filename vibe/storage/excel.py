@@ -55,3 +55,26 @@ def write_dataframe_to_excel_atomic(
     finally:
         if temp_path.exists() and temp_path != out_path:
             temp_path.unlink(missing_ok=True)
+
+
+def write_workbook_multi_sheet_atomic(
+    sheets: dict[str, pd.DataFrame],
+    meta_df: pd.DataFrame,
+    out_path: Path,
+) -> None:
+    ensure_parent_dir(out_path)
+
+    with tempfile.NamedTemporaryFile(
+        dir=out_path.parent, suffix=".xlsx", delete=False
+    ) as tmp:
+        temp_path = Path(tmp.name)
+
+    try:
+        with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+            for sheet_name, df in sheets.items():
+                df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+            meta_df.to_excel(writer, sheet_name="meta", index=False)
+        atomic_replace_with_retry(temp_path, out_path)
+    finally:
+        if temp_path.exists() and temp_path != out_path:
+            temp_path.unlink(missing_ok=True)
