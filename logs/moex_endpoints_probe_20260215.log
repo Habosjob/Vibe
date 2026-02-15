@@ -1,0 +1,321 @@
+2026-02-15 19:44:55,648 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=441
+2026-02-15 19:44:55,651 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU0002868001: TQCB
+2026-02-15 19:44:56,030 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU0002868001 status=200 elapsed_ms=376
+2026-02-15 19:44:56,037 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU0002868001 status=200 cache=False rows=0
+2026-02-15 19:44:56,415 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU0002868001 status=200 elapsed_ms=371
+2026-02-15 19:44:56,429 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU0002868001 status=200 cache=False rows=1
+2026-02-15 19:44:56,781 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU0002868001 status=200 elapsed_ms=349
+2026-02-15 19:44:56,786 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU0002868001 status=200 cache=False rows=1
+2026-02-15 19:44:57,173 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU0002868001 status=200 elapsed_ms=385
+2026-02-15 19:44:57,179 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU0002868001 status=200 cache=False rows=0
+2026-02-15 19:44:57,778 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU0002868001 status=200 elapsed_ms=597
+2026-02-15 19:44:57,788 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU0002868001 status=200 cache=False rows=1
+2026-02-15 19:44:58,146 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU0002868001 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:44:58,147 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU0002868001 status=None cache=False rows=0
+2026-02-15 19:44:58,535 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU0002868001 status=200 elapsed_ms=386
+2026-02-15 19:44:58,553 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU0002868001 status=200 cache=False rows=0
+2026-02-15 19:44:59,222 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=409
+2026-02-15 19:44:59,230 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0A0RU0: EQRP
+2026-02-15 19:44:59,603 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0A0RU0 status=200 elapsed_ms=371
+2026-02-15 19:44:59,611 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0A0RU0 status=200 cache=False rows=56
+2026-02-15 19:44:59,993 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0A0RU0 status=200 elapsed_ms=380
+2026-02-15 19:45:00,002 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0A0RU0 status=200 cache=False rows=1
+2026-02-15 19:45:00,363 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0A0RU0 status=200 elapsed_ms=354
+2026-02-15 19:45:00,368 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0A0RU0 status=200 cache=False rows=1
+2026-02-15 19:45:00,738 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0A0RU0 status=200 elapsed_ms=364
+2026-02-15 19:45:00,743 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0A0RU0 status=200 cache=False rows=0
+2026-02-15 19:45:01,354 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0A0RU0 status=200 elapsed_ms=605
+2026-02-15 19:45:01,363 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0A0RU0 status=200 cache=False rows=1
+2026-02-15 19:45:01,770 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0A0RU0 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:01,772 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0A0RU0 status=None cache=False rows=0
+2026-02-15 19:45:02,197 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0A0RU0 status=200 elapsed_ms=423
+2026-02-15 19:45:02,213 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0A0RU0 status=200 cache=False rows=2
+2026-02-15 19:45:02,702 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=389
+2026-02-15 19:45:02,709 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0A0RV8: EQRP
+2026-02-15 19:45:03,078 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0A0RV8 status=200 elapsed_ms=368
+2026-02-15 19:45:03,086 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0A0RV8 status=200 cache=False rows=56
+2026-02-15 19:45:03,456 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0A0RV8 status=200 elapsed_ms=366
+2026-02-15 19:45:03,468 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0A0RV8 status=200 cache=False rows=1
+2026-02-15 19:45:03,845 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0A0RV8 status=200 elapsed_ms=375
+2026-02-15 19:45:03,851 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0A0RV8 status=200 cache=False rows=1
+2026-02-15 19:45:04,218 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0A0RV8 status=200 elapsed_ms=366
+2026-02-15 19:45:04,224 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0A0RV8 status=200 cache=False rows=0
+2026-02-15 19:45:04,818 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0A0RV8 status=200 elapsed_ms=593
+2026-02-15 19:45:04,824 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0A0RV8 status=200 cache=False rows=1
+2026-02-15 19:45:05,196 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0A0RV8 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:05,198 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0A0RV8 status=None cache=False rows=0
+2026-02-15 19:45:05,585 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0A0RV8 status=200 elapsed_ms=385
+2026-02-15 19:45:05,596 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0A0RV8 status=200 cache=False rows=2
+2026-02-15 19:45:06,072 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=383
+2026-02-15 19:45:06,079 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0A0RW6: EQRP
+2026-02-15 19:45:06,441 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0A0RW6 status=200 elapsed_ms=360
+2026-02-15 19:45:06,450 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0A0RW6 status=200 cache=False rows=56
+2026-02-15 19:45:06,841 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0A0RW6 status=200 elapsed_ms=385
+2026-02-15 19:45:06,855 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0A0RW6 status=200 cache=False rows=1
+2026-02-15 19:45:07,240 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0A0RW6 status=200 elapsed_ms=378
+2026-02-15 19:45:07,248 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0A0RW6 status=200 cache=False rows=1
+2026-02-15 19:45:07,622 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0A0RW6 status=200 elapsed_ms=364
+2026-02-15 19:45:07,627 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0A0RW6 status=200 cache=False rows=0
+2026-02-15 19:45:08,218 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0A0RW6 status=200 elapsed_ms=588
+2026-02-15 19:45:08,241 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0A0RW6 status=200 cache=False rows=1
+2026-02-15 19:45:08,649 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0A0RW6 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:08,650 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0A0RW6 status=None cache=False rows=0
+2026-02-15 19:45:09,056 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0A0RW6 status=200 elapsed_ms=399
+2026-02-15 19:45:09,079 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0A0RW6 status=200 cache=False rows=2
+2026-02-15 19:45:09,554 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=361
+2026-02-15 19:45:09,561 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0A0RZ9: EQRP
+2026-02-15 19:45:09,925 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0A0RZ9 status=200 elapsed_ms=361
+2026-02-15 19:45:09,931 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0A0RZ9 status=200 cache=False rows=56
+2026-02-15 19:45:10,334 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0A0RZ9 status=200 elapsed_ms=401
+2026-02-15 19:45:10,349 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0A0RZ9 status=200 cache=False rows=1
+2026-02-15 19:45:10,718 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0A0RZ9 status=200 elapsed_ms=366
+2026-02-15 19:45:10,722 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0A0RZ9 status=200 cache=False rows=1
+2026-02-15 19:45:11,094 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0A0RZ9 status=200 elapsed_ms=369
+2026-02-15 19:45:11,099 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0A0RZ9 status=200 cache=False rows=0
+2026-02-15 19:45:11,681 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0A0RZ9 status=200 elapsed_ms=576
+2026-02-15 19:45:11,690 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0A0RZ9 status=200 cache=False rows=1
+2026-02-15 19:45:12,061 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0A0RZ9 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:12,063 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0A0RZ9 status=None cache=False rows=0
+2026-02-15 19:45:12,430 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0A0RZ9 status=200 elapsed_ms=361
+2026-02-15 19:45:12,446 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0A0RZ9 status=200 cache=False rows=2
+2026-02-15 19:45:12,903 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=341
+2026-02-15 19:45:12,908 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0A0S39: EQRP
+2026-02-15 19:45:13,277 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0A0S39 status=200 elapsed_ms=367
+2026-02-15 19:45:13,285 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0A0S39 status=200 cache=False rows=56
+2026-02-15 19:45:13,690 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0A0S39 status=200 elapsed_ms=397
+2026-02-15 19:45:13,699 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0A0S39 status=200 cache=False rows=1
+2026-02-15 19:45:14,082 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0A0S39 status=200 elapsed_ms=376
+2026-02-15 19:45:14,087 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0A0S39 status=200 cache=False rows=1
+2026-02-15 19:45:14,478 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0A0S39 status=200 elapsed_ms=385
+2026-02-15 19:45:14,483 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0A0S39 status=200 cache=False rows=0
+2026-02-15 19:45:15,074 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0A0S39 status=200 elapsed_ms=585
+2026-02-15 19:45:15,081 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0A0S39 status=200 cache=False rows=1
+2026-02-15 19:45:15,471 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0A0S39 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:15,478 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0A0S39 status=None cache=False rows=0
+2026-02-15 19:45:15,861 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0A0S39 status=200 elapsed_ms=376
+2026-02-15 19:45:15,878 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0A0S39 status=200 cache=False rows=2
+2026-02-15 19:45:16,346 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=367
+2026-02-15 19:45:16,352 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0A0S47: EQRP
+2026-02-15 19:45:16,720 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0A0S47 status=200 elapsed_ms=363
+2026-02-15 19:45:16,740 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0A0S47 status=200 cache=False rows=56
+2026-02-15 19:45:17,142 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0A0S47 status=200 elapsed_ms=395
+2026-02-15 19:45:17,155 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0A0S47 status=200 cache=False rows=1
+2026-02-15 19:45:17,512 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0A0S47 status=200 elapsed_ms=352
+2026-02-15 19:45:17,523 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0A0S47 status=200 cache=False rows=1
+2026-02-15 19:45:17,881 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0A0S47 status=200 elapsed_ms=352
+2026-02-15 19:45:17,885 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0A0S47 status=200 cache=False rows=0
+2026-02-15 19:45:18,467 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0A0S47 status=200 elapsed_ms=576
+2026-02-15 19:45:18,487 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0A0S47 status=200 cache=False rows=1
+2026-02-15 19:45:18,847 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0A0S47 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:18,849 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0A0S47 status=None cache=False rows=0
+2026-02-15 19:45:19,252 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0A0S47 status=200 elapsed_ms=398
+2026-02-15 19:45:19,268 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0A0S47 status=200 cache=False rows=2
+2026-02-15 19:45:19,744 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=365
+2026-02-15 19:45:19,750 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0A0S62: EQRP
+2026-02-15 19:45:20,112 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0A0S62 status=200 elapsed_ms=360
+2026-02-15 19:45:20,123 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0A0S62 status=200 cache=False rows=56
+2026-02-15 19:45:20,501 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0A0S62 status=200 elapsed_ms=369
+2026-02-15 19:45:20,511 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0A0S62 status=200 cache=False rows=1
+2026-02-15 19:45:20,887 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0A0S62 status=200 elapsed_ms=364
+2026-02-15 19:45:20,894 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0A0S62 status=200 cache=False rows=1
+2026-02-15 19:45:21,306 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0A0S62 status=200 elapsed_ms=407
+2026-02-15 19:45:21,311 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0A0S62 status=200 cache=False rows=0
+2026-02-15 19:45:21,921 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0A0S62 status=200 elapsed_ms=608
+2026-02-15 19:45:21,928 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0A0S62 status=200 cache=False rows=1
+2026-02-15 19:45:22,540 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0A0S62 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:22,542 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0A0S62 status=None cache=False rows=0
+2026-02-15 19:45:23,108 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0A0S62 status=200 elapsed_ms=560
+2026-02-15 19:45:23,125 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0A0S62 status=200 cache=False rows=2
+2026-02-15 19:45:23,762 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=523
+2026-02-15 19:45:23,767 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0GN9A7: TQCB
+2026-02-15 19:45:24,275 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0GN9A7 status=200 elapsed_ms=506
+2026-02-15 19:45:24,281 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0GN9A7 status=200 cache=False rows=0
+2026-02-15 19:45:24,821 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0GN9A7 status=200 elapsed_ms=532
+2026-02-15 19:45:24,833 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0GN9A7 status=200 cache=False rows=1
+2026-02-15 19:45:25,420 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0GN9A7 status=200 elapsed_ms=585
+2026-02-15 19:45:25,426 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0GN9A7 status=200 cache=False rows=1
+2026-02-15 19:45:26,009 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0GN9A7 status=200 elapsed_ms=570
+2026-02-15 19:45:26,012 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0GN9A7 status=200 cache=False rows=0
+2026-02-15 19:45:26,825 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0GN9A7 status=200 elapsed_ms=809
+2026-02-15 19:45:26,834 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0GN9A7 status=200 cache=False rows=1
+2026-02-15 19:45:27,383 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0GN9A7 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:27,385 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0GN9A7 status=None cache=False rows=0
+2026-02-15 19:45:27,922 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0GN9A7 status=200 elapsed_ms=531
+2026-02-15 19:45:27,937 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0GN9A7 status=200 cache=False rows=0
+2026-02-15 19:45:29,556 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=1537
+2026-02-15 19:45:29,566 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0JQAM6: TQCB
+2026-02-15 19:45:30,106 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0JQAM6 status=200 elapsed_ms=528
+2026-02-15 19:45:30,114 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0JQAM6 status=200 cache=False rows=81
+2026-02-15 19:45:30,656 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0JQAM6 status=200 elapsed_ms=532
+2026-02-15 19:45:30,700 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0JQAM6 status=200 cache=False rows=4
+2026-02-15 19:45:31,233 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0JQAM6 status=200 elapsed_ms=527
+2026-02-15 19:45:31,245 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0JQAM6 status=200 cache=False rows=22
+2026-02-15 19:45:31,786 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0JQAM6 status=200 elapsed_ms=538
+2026-02-15 19:45:31,792 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0JQAM6 status=200 cache=False rows=10
+2026-02-15 19:45:32,546 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0JQAM6 status=200 elapsed_ms=751
+2026-02-15 19:45:32,559 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0JQAM6 status=200 cache=False rows=1
+2026-02-15 19:45:33,091 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0JQAM6 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:33,096 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0JQAM6 status=None cache=False rows=0
+2026-02-15 19:45:33,605 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0JQAM6 status=200 elapsed_ms=503
+2026-02-15 19:45:33,625 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0JQAM6 status=200 cache=False rows=7
+2026-02-15 19:45:34,283 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=468
+2026-02-15 19:45:34,291 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A0ZZ9P8: TQCB
+2026-02-15 19:45:34,789 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A0ZZ9P8 status=200 elapsed_ms=495
+2026-02-15 19:45:34,801 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A0ZZ9P8 status=200 cache=False rows=80
+2026-02-15 19:45:35,329 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A0ZZ9P8 status=200 elapsed_ms=521
+2026-02-15 19:45:35,360 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A0ZZ9P8 status=200 cache=False rows=4
+2026-02-15 19:45:35,874 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A0ZZ9P8 status=200 elapsed_ms=511
+2026-02-15 19:45:35,888 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A0ZZ9P8 status=200 cache=False rows=22
+2026-02-15 19:45:36,415 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A0ZZ9P8 status=200 elapsed_ms=525
+2026-02-15 19:45:36,421 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A0ZZ9P8 status=200 cache=False rows=21
+2026-02-15 19:45:37,168 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A0ZZ9P8 status=200 elapsed_ms=740
+2026-02-15 19:45:37,184 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A0ZZ9P8 status=200 cache=False rows=53
+2026-02-15 19:45:37,677 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A0ZZ9P8 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:37,682 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A0ZZ9P8 status=None cache=False rows=0
+2026-02-15 19:45:38,393 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A0ZZ9P8 status=200 elapsed_ms=709
+2026-02-15 19:45:38,412 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A0ZZ9P8 status=200 cache=False rows=3
+2026-02-15 19:45:39,428 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=791
+2026-02-15 19:45:39,436 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A100MZ6: TQCB
+2026-02-15 19:45:40,213 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A100MZ6 status=200 elapsed_ms=774
+2026-02-15 19:45:40,227 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A100MZ6 status=200 cache=False rows=79
+2026-02-15 19:45:40,953 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A100MZ6 status=200 elapsed_ms=724
+2026-02-15 19:45:40,981 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A100MZ6 status=200 cache=False rows=3
+2026-02-15 19:45:41,621 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A100MZ6 status=200 elapsed_ms=633
+2026-02-15 19:45:41,636 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A100MZ6 status=200 cache=False rows=22
+2026-02-15 19:45:42,125 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A100MZ6 status=200 elapsed_ms=485
+2026-02-15 19:45:42,132 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A100MZ6 status=200 cache=False rows=0
+2026-02-15 19:45:42,929 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A100MZ6 status=200 elapsed_ms=789
+2026-02-15 19:45:42,939 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A100MZ6 status=200 cache=False rows=1
+2026-02-15 19:45:43,456 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A100MZ6 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:43,459 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A100MZ6 status=None cache=False rows=0
+2026-02-15 19:45:44,016 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A100MZ6 status=200 elapsed_ms=555
+2026-02-15 19:45:44,033 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A100MZ6 status=200 cache=False rows=4
+2026-02-15 19:45:44,726 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=515
+2026-02-15 19:45:44,733 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A105YH8: TQCB
+2026-02-15 19:45:45,273 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A105YH8 status=200 elapsed_ms=536
+2026-02-15 19:45:45,283 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A105YH8 status=200 cache=False rows=76
+2026-02-15 19:45:45,814 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A105YH8 status=200 elapsed_ms=523
+2026-02-15 19:45:45,848 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A105YH8 status=200 cache=False rows=4
+2026-02-15 19:45:46,401 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A105YH8 status=200 elapsed_ms=548
+2026-02-15 19:45:46,417 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A105YH8 status=200 cache=False rows=22
+2026-02-15 19:45:46,983 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A105YH8 status=200 elapsed_ms=562
+2026-02-15 19:45:46,988 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A105YH8 status=200 cache=False rows=21
+2026-02-15 19:45:47,768 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A105YH8 status=200 elapsed_ms=777
+2026-02-15 19:45:47,786 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A105YH8 status=200 cache=False rows=91
+2026-02-15 19:45:48,365 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A105YH8 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:48,367 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A105YH8 status=None cache=False rows=0
+2026-02-15 19:45:48,906 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A105YH8 status=200 elapsed_ms=535
+2026-02-15 19:45:48,926 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A105YH8 status=200 cache=False rows=20
+2026-02-15 19:45:49,791 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=563
+2026-02-15 19:45:49,796 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A106P89: EQRP
+2026-02-15 19:45:50,364 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A106P89 status=200 elapsed_ms=565
+2026-02-15 19:45:50,372 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A106P89 status=200 cache=False rows=56
+2026-02-15 19:45:50,925 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A106P89 status=200 elapsed_ms=551
+2026-02-15 19:45:50,933 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A106P89 status=200 cache=False rows=1
+2026-02-15 19:45:51,348 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A106P89 status=200 elapsed_ms=412
+2026-02-15 19:45:51,353 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A106P89 status=200 cache=False rows=1
+2026-02-15 19:45:51,762 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A106P89 status=200 elapsed_ms=407
+2026-02-15 19:45:51,766 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A106P89 status=200 cache=False rows=0
+2026-02-15 19:45:52,501 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A106P89 status=200 elapsed_ms=732
+2026-02-15 19:45:52,509 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A106P89 status=200 cache=False rows=1
+2026-02-15 19:45:53,068 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A106P89 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:53,071 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A106P89 status=None cache=False rows=0
+2026-02-15 19:45:53,592 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A106P89 status=200 elapsed_ms=516
+2026-02-15 19:45:53,611 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A106P89 status=200 cache=False rows=2
+2026-02-15 19:45:54,322 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=594
+2026-02-15 19:45:54,332 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A10A539: TQCB
+2026-02-15 19:45:54,867 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A10A539 status=200 elapsed_ms=533
+2026-02-15 19:45:54,878 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A10A539 status=200 cache=False rows=66
+2026-02-15 19:45:55,464 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A10A539 status=200 elapsed_ms=581
+2026-02-15 19:45:55,490 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A10A539 status=200 cache=False rows=3
+2026-02-15 19:45:56,068 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A10A539 status=200 elapsed_ms=575
+2026-02-15 19:45:56,077 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A10A539 status=200 cache=False rows=22
+2026-02-15 19:45:56,608 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A10A539 status=200 elapsed_ms=528
+2026-02-15 19:45:56,615 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A10A539 status=200 cache=False rows=0
+2026-02-15 19:45:57,398 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A10A539 status=200 elapsed_ms=781
+2026-02-15 19:45:57,411 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A10A539 status=200 cache=False rows=1
+2026-02-15 19:45:57,927 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A10A539 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:45:57,931 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A10A539 status=None cache=False rows=0
+2026-02-15 19:45:58,462 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A10A539 status=200 elapsed_ms=528
+2026-02-15 19:45:58,481 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A10A539 status=200 cache=False rows=21
+2026-02-15 19:45:59,195 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=539
+2026-02-15 19:45:59,204 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A10ASE2: TQCB
+2026-02-15 19:45:59,698 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A10ASE2 status=200 elapsed_ms=492
+2026-02-15 19:45:59,709 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A10ASE2 status=200 cache=False rows=64
+2026-02-15 19:46:00,279 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A10ASE2 status=200 elapsed_ms=567
+2026-02-15 19:46:00,355 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A10ASE2 status=200 cache=False rows=4
+2026-02-15 19:46:00,915 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A10ASE2 status=200 elapsed_ms=557
+2026-02-15 19:46:00,931 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A10ASE2 status=200 cache=False rows=22
+2026-02-15 19:46:01,480 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A10ASE2 status=200 elapsed_ms=546
+2026-02-15 19:46:01,485 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A10ASE2 status=200 cache=False rows=21
+2026-02-15 19:46:02,408 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A10ASE2 status=200 elapsed_ms=915
+2026-02-15 19:46:02,428 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A10ASE2 status=200 cache=False rows=1367
+2026-02-15 19:46:02,940 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A10ASE2 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:46:02,942 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A10ASE2 status=None cache=False rows=0
+2026-02-15 19:46:03,476 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A10ASE2 status=200 elapsed_ms=529
+2026-02-15 19:46:03,489 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A10ASE2 status=200 cache=False rows=14
+2026-02-15 19:46:05,174 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=363
+2026-02-15 19:46:05,179 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A10AX13: TQCB
+2026-02-15 19:46:05,577 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A10AX13 status=200 elapsed_ms=392
+2026-02-15 19:46:05,583 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A10AX13 status=200 cache=False rows=65
+2026-02-15 19:46:06,204 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A10AX13 status=200 elapsed_ms=619
+2026-02-15 19:46:06,225 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A10AX13 status=200 cache=False rows=4
+2026-02-15 19:46:06,625 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A10AX13 status=200 elapsed_ms=398
+2026-02-15 19:46:06,634 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A10AX13 status=200 cache=False rows=22
+2026-02-15 19:46:07,016 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A10AX13 status=200 elapsed_ms=381
+2026-02-15 19:46:07,020 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A10AX13 status=200 cache=False rows=1
+2026-02-15 19:46:07,656 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A10AX13 status=200 elapsed_ms=634
+2026-02-15 19:46:07,670 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A10AX13 status=200 cache=False rows=1
+2026-02-15 19:46:09,033 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A10AX13 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:46:09,035 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A10AX13 status=None cache=False rows=0
+2026-02-15 19:46:09,409 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A10AX13 status=200 elapsed_ms=371
+2026-02-15 19:46:09,425 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A10AX13 status=200 cache=False rows=2
+2026-02-15 19:46:09,945 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=375
+2026-02-15 19:46:09,950 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A10BX95: TQCB
+2026-02-15 19:46:10,358 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A10BX95 status=200 elapsed_ms=406
+2026-02-15 19:46:10,367 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A10BX95 status=200 cache=False rows=62
+2026-02-15 19:46:10,759 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A10BX95 status=200 elapsed_ms=390
+2026-02-15 19:46:10,787 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A10BX95 status=200 cache=False rows=3
+2026-02-15 19:46:11,177 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A10BX95 status=200 elapsed_ms=385
+2026-02-15 19:46:11,187 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A10BX95 status=200 cache=False rows=22
+2026-02-15 19:46:11,553 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A10BX95 status=200 elapsed_ms=360
+2026-02-15 19:46:11,556 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A10BX95 status=200 cache=False rows=0
+2026-02-15 19:46:12,251 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A10BX95 status=200 elapsed_ms=688
+2026-02-15 19:46:12,260 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A10BX95 status=200 cache=False rows=1
+2026-02-15 19:46:12,640 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A10BX95 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:46:12,641 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A10BX95 status=None cache=False rows=0
+2026-02-15 19:46:13,009 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A10BX95 status=200 elapsed_ms=361
+2026-02-15 19:46:13,030 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A10BX95 status=200 cache=False rows=1
+2026-02-15 19:46:13,504 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=356
+2026-02-15 19:46:13,513 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A10CH37: TQCB
+2026-02-15 19:46:13,875 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A10CH37 status=200 elapsed_ms=360
+2026-02-15 19:46:13,885 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A10CH37 status=200 cache=False rows=66
+2026-02-15 19:46:14,272 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A10CH37 status=200 elapsed_ms=372
+2026-02-15 19:46:14,289 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A10CH37 status=200 cache=False rows=4
+2026-02-15 19:46:14,698 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A10CH37 status=200 elapsed_ms=404
+2026-02-15 19:46:14,708 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A10CH37 status=200 cache=False rows=22
+2026-02-15 19:46:15,087 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A10CH37 status=200 elapsed_ms=371
+2026-02-15 19:46:15,090 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A10CH37 status=200 cache=False rows=21
+2026-02-15 19:46:15,724 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A10CH37 status=200 elapsed_ms=631
+2026-02-15 19:46:15,733 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A10CH37 status=200 cache=False rows=75
+2026-02-15 19:46:16,133 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A10CH37 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:46:16,135 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A10CH37 status=None cache=False rows=0
+2026-02-15 19:46:16,520 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A10CH37 status=200 elapsed_ms=379
+2026-02-15 19:46:16,532 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A10CH37 status=200 cache=False rows=21
+2026-02-15 19:46:17,331 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=646
+2026-02-15 19:46:17,337 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU000A10DDT6: TQCB
+2026-02-15 19:46:17,776 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU000A10DDT6 status=200 elapsed_ms=437
+2026-02-15 19:46:17,782 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=securities isin=RU000A10DDT6 status=200 cache=False rows=64
+2026-02-15 19:46:18,185 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU000A10DDT6 status=200 elapsed_ms=396
+2026-02-15 19:46:18,202 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=marketdata isin=RU000A10DDT6 status=200 cache=False rows=4
+2026-02-15 19:46:18,580 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU000A10DDT6 status=200 elapsed_ms=372
+2026-02-15 19:46:18,587 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=history isin=RU000A10DDT6 status=200 cache=False rows=22
+2026-02-15 19:46:18,988 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU000A10DDT6 status=200 elapsed_ms=396
+2026-02-15 19:46:18,991 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=candles isin=RU000A10DDT6 status=200 cache=False rows=21
+2026-02-15 19:46:19,589 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU000A10DDT6 status=200 elapsed_ms=596
+2026-02-15 19:46:19,599 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=trades isin=RU000A10DDT6 status=200 cache=False rows=251
+2026-02-15 19:46:20,048 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=orderbook isin=RU000A10DDT6 error=Expecting value: line 1 column 1 (char 0)
+2026-02-15 19:46:20,049 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=orderbook isin=RU000A10DDT6 status=None cache=False rows=0
+2026-02-15 19:46:20,424 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU000A10DDT6 status=200 elapsed_ms=374
+2026-02-15 19:46:20,440 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe endpoint=bondization isin=RU000A10DDT6 status=200 cache=False rows=24
+2026-02-15 19:46:20,685 root INFO: Probe complete: out_dir=data\curated\moex\endpoints_probe\20260215 files_written=20 total_isins=20
