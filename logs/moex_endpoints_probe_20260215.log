@@ -1657,3 +1657,22 @@
 2026-02-15 21:39:11,613 vibe.data_sources.moex_bonds_endpoints ERROR: Fetch failed: endpoint=bondization isin=RU0002868001 error='HTTPResponse' object has no attribute 'headers'
 2026-02-15 21:39:11,615 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=bondization status=None cache_hit=False rows=0
 2026-02-15 21:39:11,900 root INFO: Probe complete: out_dir=data\curated\moex\endpoints_probe\20260215 files_written=1 total_isins=1
+2026-02-15 21:46:51,379 root INFO: Logging initialized: file=logs\moex_endpoints_probe_20260215.log level=INFO
+2026-02-15 21:46:51,457 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe started: isins=1 out_dir=data\curated\moex\endpoints_probe\20260215 from=2026-01-16 till=2026-02-15 interval=24
+2026-02-15 21:46:51,938 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=451
+2026-02-15 21:46:51,941 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU0002868001: TQCB
+2026-02-15 21:46:52,306 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU0002868001 status=200 elapsed_ms=365
+2026-02-15 21:46:52,314 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=securities status=200 cache_hit=False rows=0
+2026-02-15 21:46:52,704 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU0002868001 status=200 elapsed_ms=388
+2026-02-15 21:46:52,725 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=marketdata status=200 cache_hit=False rows=1
+2026-02-15 21:46:53,106 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU0002868001 status=200 elapsed_ms=380
+2026-02-15 21:46:53,112 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=history status=200 cache_hit=False rows=1
+2026-02-15 21:46:53,491 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU0002868001 status=200 elapsed_ms=377
+2026-02-15 21:46:53,495 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=candles status=200 cache_hit=False rows=0
+2026-02-15 21:46:54,090 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU0002868001 status=200 elapsed_ms=595
+2026-02-15 21:46:54,099 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=trades status=200 cache_hit=False rows=1
+2026-02-15 21:46:54,462 vibe.data_sources.moex_bonds_endpoints WARNING: Fetch non-JSON response: endpoint=orderbook isin=RU0002868001 status=200 content_type=text/html
+2026-02-15 21:46:54,463 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=orderbook status=200 cache_hit=False rows=0
+2026-02-15 21:46:54,812 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU0002868001 status=200 elapsed_ms=347
+2026-02-15 21:46:54,818 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=bondization status=200 cache_hit=False rows=0
+2026-02-15 21:46:55,096 root INFO: Probe complete: out_dir=data\curated\moex\endpoints_probe\20260215 files_written=1 total_isins=1
