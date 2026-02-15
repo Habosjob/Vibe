@@ -1,23 +1,27 @@
 from __future__ import annotations
 
+import json
 import logging
 import random
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from vibe.data_sources.moex_bonds_endpoints import (
     BOARD_FALLBACKS,
+    FetchMeta,
     MoexBondEndpointsClient,
     default_endpoint_params,
     default_endpoint_specs,
+    iss_json_to_frames,
     iss_json_to_single_frame,
 )
 from vibe.ingest.moex_bond_rates import DEFAULT_OUT_XLSX
-from vibe.storage.excel import write_workbook_multi_sheet_atomic
-from vibe.utils.fs import ensure_parent_dir
+from vibe.utils.fs import atomic_replace_with_retry, ensure_parent_dir
 
 logger = logging.getLogger(__name__)
 
@@ -84,31 +88,98 @@ def _pick_bondization_frames(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
 def _choose_working_fallback_board(client: MoexBondEndpointsClient, isin: str) -> str:
     marketdata_spec = next(spec for spec in default_endpoint_specs() if spec.name == "marketdata")
     for board in BOARD_FALLBACKS:
-        try:
-            payload = client.fetch_endpoint(isin=isin, board=board, spec=marketdata_spec, params={})
-            frame = iss_json_to_single_frame(payload)
-            if not frame.empty:
-                logger.info("Fallback board selected for %s: %s", isin, board)
-                return board
-        except Exception:
+        payload, _meta = client.fetch_endpoint(isin=isin, board=board, spec=marketdata_spec, params={})
+        if not payload:
             continue
+        frame = iss_json_to_single_frame(payload)
+        if not frame.empty:
+            logger.info("Fallback board selected for %s: %s", isin, board)
+            return board
     return BOARD_FALLBACKS[0]
+
+
+def build_probe_summary_df(
+    *,
+    meta: FetchMeta,
+    payload: dict[str, Any] | None,
+    board: str,
+    from_date: date,
+    till_date: date,
+    interval: int,
+) -> pd.DataFrame:
+    tables = []
+    rows_by_table: dict[str, int] = {}
+    if payload:
+        tables_payload = iss_json_to_frames(payload)
+        tables = sorted(tables_payload.keys())
+        rows_by_table = {name: len(df) for name, df in tables_payload.items()}
+
+    if meta.error:
+        status = "ERROR"
+        reason = "request_error"
+    elif not payload:
+        status = "NO_DATA"
+        reason = "no_tables_in_payload"
+    elif not tables:
+        status = "NO_DATA"
+        reason = "no_tables_in_payload"
+    elif all(rows == 0 for rows in rows_by_table.values()):
+        status = "NO_DATA"
+        reason = "empty_table"
+    else:
+        status = "OK"
+        reason = ""
+
+    return pd.DataFrame(
+        [
+            {
+                "__status": status,
+                "reason": reason,
+                "http_status": meta.status_code,
+                "from_cache": meta.from_cache,
+                "elapsed_ms": meta.elapsed_ms,
+                "tables": ",".join(tables),
+                "rows_by_table": json.dumps(rows_by_table, ensure_ascii=False, sort_keys=True),
+                "board": board,
+                "from": from_date.isoformat(),
+                "till": till_date.isoformat(),
+                "interval": interval,
+                "params": json.dumps(meta.params, ensure_ascii=False, sort_keys=True),
+                "error": meta.error or "",
+            }
+        ]
+    )
 
 
 def write_isin_workbook(
     isin: str,
     endpoint_frames_map: dict[str, pd.DataFrame],
+    endpoint_summaries_map: dict[str, pd.DataFrame],
     meta: dict[str, str],
     out_path: Path,
     max_rows_per_sheet: int = 200_000,
 ) -> None:
-    normalized_sheets: dict[str, pd.DataFrame] = {}
-    for sheet_name, frame in endpoint_frames_map.items():
-        safe_name = sheet_name[:31]
-        normalized_sheets[safe_name] = frame.head(max_rows_per_sheet)
+    ensure_parent_dir(out_path)
 
-    meta_df = pd.DataFrame([meta])
-    write_workbook_multi_sheet_atomic(normalized_sheets, meta_df, out_path=out_path)
+    with tempfile.NamedTemporaryFile(dir=out_path.parent, suffix=".xlsx", delete=False) as tmp:
+        temp_path = Path(tmp.name)
+
+    try:
+        with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+            for sheet_name, frame in endpoint_frames_map.items():
+                safe_name = sheet_name[:31]
+                summary_df = endpoint_summaries_map[sheet_name]
+                summary_df.to_excel(writer, sheet_name=safe_name, index=False)
+
+                data_df = frame.head(max_rows_per_sheet)
+                if not data_df.empty:
+                    data_df.to_excel(writer, sheet_name=safe_name, index=False, startrow=len(summary_df) + 2)
+
+            pd.DataFrame([meta]).to_excel(writer, sheet_name="meta", index=False)
+        atomic_replace_with_retry(temp_path, out_path)
+    finally:
+        if temp_path.exists() and temp_path != out_path:
+            temp_path.unlink(missing_ok=True)
 
 
 def run_probe(
@@ -121,12 +192,14 @@ def run_probe(
     timeout: int = 30,
     retries: int = 3,
     max_rows_per_sheet: int = 200_000,
+    cache_dir: Path | None = None,
+    use_cache: bool = True,
 ) -> ProbeResult:
     ensure_parent_dir(out_dir / "placeholder")
 
     endpoint_specs = default_endpoint_specs()
     params_map = default_endpoint_params(from_date=from_date, till_date=till_date, interval=interval)
-    client = MoexBondEndpointsClient(timeout=timeout, retries=retries)
+    client = MoexBondEndpointsClient(timeout=timeout, retries=retries, cache_dir=cache_dir, use_cache=use_cache)
 
     files_written = 0
     run_date = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -134,37 +207,62 @@ def run_probe(
 
     for isin in isins:
         endpoint_sheets: dict[str, pd.DataFrame] = {}
+        endpoint_summaries: dict[str, pd.DataFrame] = {}
         ok: list[str] = []
         failed: list[str] = []
 
         try:
             board = client.resolve_board(isin)
+            logger.info("Resolved board for %s: %s", isin, board)
         except Exception as exc:
             board = _choose_working_fallback_board(client, isin)
             failed.append(f"board_resolve={exc}")
+            logger.warning("Board resolve failed for %s, fallback board: %s", isin, board)
 
         for spec in endpoint_specs:
             params = params_map.get(spec.name, {})
-            try:
-                payload = client.fetch_endpoint(isin=isin, board=board, spec=spec, params=params)
-                if spec.name == "bondization" and "offers" not in str(payload).lower():
-                    fallback_params = dict(params)
-                    fallback_params["iss.only"] = "coupons,amortizations"
-                    payload = client.fetch_endpoint(isin=isin, board=board, spec=spec, params=fallback_params)
+            payload, fetch_meta = client.fetch_endpoint(isin=isin, board=board, spec=spec, params=params)
+            if spec.name == "bondization" and payload and "offers" not in str(payload).lower():
+                fallback_params = dict(params)
+                fallback_params["iss.only"] = "coupons,amortizations"
+                payload, fetch_meta = client.fetch_endpoint(
+                    isin=isin,
+                    board=board,
+                    spec=spec,
+                    params=fallback_params,
+                )
 
-                frame = iss_json_to_single_frame(payload)
-                if spec.name == "bondization":
-                    endpoint_sheets.update(_pick_bondization_frames(frame))
-                else:
-                    endpoint_sheets[spec.name] = frame
+            frame = iss_json_to_single_frame(payload or {})
+            summary_df = build_probe_summary_df(
+                meta=fetch_meta,
+                payload=payload,
+                board=board,
+                from_date=from_date,
+                till_date=till_date,
+                interval=interval,
+            )
+
+            if spec.name == "bondization":
+                for sheet_name, split_frame in _pick_bondization_frames(frame).items():
+                    endpoint_sheets[sheet_name] = split_frame
+                    endpoint_summaries[sheet_name] = summary_df.copy()
+            else:
+                endpoint_sheets[spec.name] = frame
+                endpoint_summaries[spec.name] = summary_df
+
+            if fetch_meta.error:
+                failed.append(f"{spec.name}={fetch_meta.error}")
+            else:
                 ok.append(spec.name)
-            except Exception as exc:
-                failed.append(f"{spec.name}={exc}")
-                if spec.name == "bondization":
-                    for name in ["bondization_coupons", "bondization_amort", "bondization_offers"]:
-                        endpoint_sheets.setdefault(name, pd.DataFrame())
-                else:
-                    endpoint_sheets.setdefault(spec.name, pd.DataFrame())
+
+            logger.info(
+                "Probe endpoint=%s isin=%s status=%s cache=%s rows=%s",
+                spec.name,
+                isin,
+                fetch_meta.status_code,
+                fetch_meta.from_cache,
+                len(frame),
+            )
 
         out_path = out_dir / f"{isin}.xlsx"
         meta = {
@@ -178,6 +276,7 @@ def run_probe(
         write_isin_workbook(
             isin=isin,
             endpoint_frames_map=endpoint_sheets,
+            endpoint_summaries_map=endpoint_summaries,
             meta=meta,
             out_path=out_path,
             max_rows_per_sheet=max_rows_per_sheet,
@@ -199,6 +298,8 @@ def run_probe_for_latest_bond_rates(
     timeout: int = 30,
     retries: int = 3,
     max_rows_per_sheet: int = 200_000,
+    cache_dir: Path | None = None,
+    use_cache: bool = True,
 ) -> ProbeResult:
     today = datetime.now(timezone.utc).date()
     from_date = from_date or (today - timedelta(days=30))
@@ -212,6 +313,9 @@ def run_probe_for_latest_bond_rates(
     if out_dir is None:
         out_dir = Path("data/curated/moex/endpoints_probe") / today.strftime("%Y%m%d")
 
+    if cache_dir is None:
+        cache_dir = Path("data/cache/moex_iss/endpoint_probe") / today.strftime("%Y%m%d")
+
     return run_probe(
         isins=selected,
         out_dir=out_dir,
@@ -221,4 +325,6 @@ def run_probe_for_latest_bond_rates(
         timeout=timeout,
         retries=retries,
         max_rows_per_sheet=max_rows_per_sheet,
+        cache_dir=cache_dir,
+        use_cache=use_cache,
     )
