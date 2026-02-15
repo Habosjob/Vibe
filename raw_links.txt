@@ -28,7 +28,9 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_excel_atomic_wri
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_iss_json_normalize.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_ingest_features.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_rates_parse.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_resolve_board.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_probe_writes_summary_for_empty.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_retention_cleanup.py
 
 ------------------------------------------------------------
 Директория: vibe/
@@ -76,6 +78,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/utils/__init__.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/utils/fs.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/utils/http.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/utils/logging.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/utils/retention.py
 
         ----------------------------------------------------
         Директория: data/cache/moex_iss/endpoint_probe/20260215/
