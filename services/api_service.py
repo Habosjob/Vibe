@@ -22,7 +22,7 @@ def health() -> dict[str, str]:
 @app.get("/bonds")
 def get_bonds(limit: int = Query(default=200, ge=1, le=5000), secid: str | None = None) -> list[dict]:
     with sqlite3.connect(CACHE_DB_PATH) as connection:
-        query = "SELECT * FROM bonds_enriched"
+        query = "SELECT * FROM bonds_read_model"
         params: list[str | int] = []
         if secid:
             query += " WHERE SECID = ?"
@@ -31,8 +31,18 @@ def get_bonds(limit: int = Query(default=200, ge=1, le=5000), secid: str | None 
         params.append(limit)
         try:
             df = pd.read_sql_query(query, connection, params=params)
-        except Exception as error:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=str(error)) from error
+        except Exception:  # noqa: BLE001
+            query = "SELECT * FROM bonds_enriched"
+            if secid:
+                query += " WHERE SECID = ?"
+                params = [secid, limit]
+            else:
+                params = [limit]
+            query += " LIMIT ?"
+            try:
+                df = pd.read_sql_query(query, connection, params=params)
+            except Exception as error:  # noqa: BLE001
+                raise HTTPException(status_code=500, detail=str(error)) from error
     return df.fillna("").to_dict(orient="records")
 
 

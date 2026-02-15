@@ -15,7 +15,7 @@ def main() -> int:
     init_db()
     session = build_retry_session()
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
-    dataframe, source, export_date = run_rates_ingest(session, logger, run_id=run_id, debug=False)
+    dataframe, source, export_date, incremental_secids = run_rates_ingest(session, logger, run_id=run_id, debug=False)
     workers = _resolve_details_worker_processes(None, logger)
     run_details_enricher(
         dataframe,
@@ -26,6 +26,7 @@ def main() -> int:
         export_date=export_date,
         details_worker_processes=workers,
         debug=False,
+        incremental_secids=incremental_secids,
     )
     return 0
 
