@@ -46,7 +46,7 @@ class FetchMeta:
 
 
 def _extract_headers_subset(headers: dict[str, str]) -> dict[str, str]:
-    wanted = {"content-type", "server", "location"}
+    wanted = {"content-type", "server", "location", "set-cookie", "cache-control"}
     subset: dict[str, str] = {}
     for key, value in headers.items():
         key_lc = str(key).lower()
@@ -140,7 +140,7 @@ class MoexBondEndpointsClient:
             elapsed_ms = int((perf_counter() - start) * 1000)
             content_type = response.headers.get("Content-Type")
             headers_subset = _extract_headers_subset(response.headers)
-            final_url = getattr(response, "final_url", None) or getattr(response, "url", None) or url
+            final_url = getattr(response, "final_url", None) or getattr(response, "url", None) or None
             response_text = response.content.decode("utf-8", errors="replace")
             try:
                 payload = json.loads(response_text)
@@ -192,7 +192,7 @@ class MoexBondEndpointsClient:
                     response.status_code,
                     content_type,
                     url,
-                    meta.final_url if meta.final_url and meta.final_url != url else "",
+                    meta.final_url or "-",
                     response_text[:200],
                 )
                 return None, meta

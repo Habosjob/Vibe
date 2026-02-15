@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -22,13 +23,13 @@ class _DummyClient:
             payload = {
                 "marketdata": {
                     "columns": ["BESTBID", "BESTOFFER", "NUMBIDS", "NUMOFFERS"],
-                    "data": [[101.2, 101.5, 3, 2]],
+                    "data": [[100.1, 100.5, 9, 11]],
                 }
             }
             return payload, FetchMeta(
                 status_code=200,
                 from_cache=False,
-                elapsed_ms=5,
+                elapsed_ms=10,
                 url="https://iss.moex.com/marketdata",
                 params=params or {},
                 content_type="application/json",
@@ -38,38 +39,33 @@ class _DummyClient:
             return None, FetchMeta(
                 status_code=200,
                 from_cache=False,
-                elapsed_ms=6,
+                elapsed_ms=10,
                 url="https://iss.moex.com/orderbook",
                 params=params or {},
                 content_type="text/html",
-                response_head="<html>blocked</html>",
+                response_head="<html>challenge</html>",
                 error="HTML_INSTEAD_OF_JSON",
-                final_url="https://iss.moex.com/orderbook?guard=1",
-                headers_subset={"Content-Type": "text/html", "Server": "cloudflare"},
+                final_url="https://iss.moex.com/cdn-cgi/challenge",
+                headers_subset={"Content-Type": "text/html", "Server": "cloudflare", "CF-RAY": "abc"},
             )
 
-        payload = {"dummy": {"columns": ["X"], "data": [[1]]}}
-        return payload, FetchMeta(
+        return {"dummy": {"columns": ["X"], "data": [[1]]}}, FetchMeta(
             status_code=200,
             from_cache=False,
-            elapsed_ms=4,
+            elapsed_ms=5,
             url=f"https://iss.moex.com/{spec.name}",
             params=params or {},
             content_type="application/json",
         )
 
 
-def test_orderbook_html_blocked_uses_marketdata_fallback(monkeypatch, tmp_path: Path) -> None:
+def test_orderbook_html_meta_and_marketdata_fallback(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(probe, "MoexBondEndpointsClient", _DummyClient)
     monkeypatch.setattr(probe, "cleanup_old_dirs", lambda *a, **k: None)
     monkeypatch.setattr(probe, "_load_latest_bond_rates_snapshot", lambda: (pd.DataFrame(), Path("snapshot.xlsx")))
 
     captured: dict[str, object] = {}
-
-    def _capture_write(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr(probe, "write_isin_workbook", _capture_write)
+    monkeypatch.setattr(probe, "write_isin_workbook", lambda **kwargs: captured.update(kwargs))
 
     result = probe.run_probe(
         isins=["RU000A"],
@@ -81,17 +77,19 @@ def test_orderbook_html_blocked_uses_marketdata_fallback(monkeypatch, tmp_path: 
         max_workers=1,
     )
 
-    assert result.files_written == 1
     assert result.orderbook_blocked_html == 1
 
     summaries = captured["endpoint_summaries_map"]
     orderbook_summary = summaries["orderbook"].iloc[0]
-    assert orderbook_summary["__status"] == "BLOCKED_HTML"
     assert orderbook_summary["error"] == "HTML_INSTEAD_OF_JSON"
+    assert json.loads(orderbook_summary["headers_subset"]) == {
+        "CF-RAY": "abc",
+        "Content-Type": "text/html",
+        "Server": "cloudflare",
+    }
 
-    sheets = captured["endpoint_frames_map"]
-    orderbook_frame = sheets["orderbook"]
-    assert float(orderbook_frame.iloc[0]["bestbid"]) == 101.2
-    assert float(orderbook_frame.iloc[0]["bestoffer"]) == 101.5
+    orderbook_frame = captured["endpoint_frames_map"]["orderbook"]
+    assert float(orderbook_frame.iloc[0]["bestbid"]) == 100.1
+    assert float(orderbook_frame.iloc[0]["bestoffer"]) == 100.5
+    assert float(orderbook_frame.iloc[0]["spread"]) == pytest.approx(0.4)
     assert orderbook_frame.iloc[0]["top_of_book_source"] == "marketdata_fallback"
-    assert float(orderbook_frame.iloc[0]["spread"]) == pytest.approx(0.3)

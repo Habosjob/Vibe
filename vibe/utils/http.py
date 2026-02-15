@@ -50,7 +50,7 @@ def get_with_retries(
                 elapsed_seconds=elapsed,
                 status_code=response.status_code,
                 headers=dict(response.headers),
-                final_url=str(getattr(response, "url", "") or url),
+                final_url=(getattr(response, "url", None) or None),
             )
         except (requests.RequestException, HTTPRequestError) as exc:
             last_error = exc
