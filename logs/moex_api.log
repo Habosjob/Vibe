@@ -1,28 +1,28 @@
-2026-02-15 14:01:55,079 | INFO | Details worker processes resolved to 48 (env/default)
-2026-02-15 14:01:55,254 | INFO | SQLite maintenance completed (WAL + ANALYZE + PRAGMA optimize)
-2026-02-15 14:01:55,254 | INFO | MOEX API script started
-2026-02-15 14:01:55,266 | INFO | Using cached data for 2026-02-15
-2026-02-15 14:01:55,394 | INFO | Debug mode disabled: skip Moex_Bonds.xlsx generation
-2026-02-15 14:01:55,410 | INFO | DQ check: ok (row_count=3906, empty SECID 0.00%, empty ISIN 0.00%)
-2026-02-15 14:01:56,525 | INFO | Добавлено 0 облигаций
-2026-02-15 14:01:56,526 | INFO | Погашено 4 бумаг
-2026-02-15 14:01:56,526 | INFO |   - RU000A0NNM36, ВТБС1-358
-2026-02-15 14:01:56,526 | INFO |   - RU000A10A8R0, ВТБС1-1381
-2026-02-15 14:01:56,526 | INFO |   - RU000A10AEK9, АЛЬФС1-547
-2026-02-15 14:01:56,526 | INFO |   - RU000A10AV72, ПСБ 3P-11
-2026-02-15 14:01:57,467 | INFO | Endpoint security_overview is available (blocks: description, boards)
-2026-02-15 14:01:57,492 | INFO | Endpoint bondization is available (blocks: amortizations, coupons, offers)
-2026-02-15 14:01:57,519 | INFO | Endpoint bondization_stats is available (blocks: amortizations, amortizations.cursor, coupons, coupons.cursor, offers)
-2026-02-15 14:01:57,539 | INFO | Endpoint security_events is available (blocks: description, boards)
-2026-02-15 14:07:41,788 | INFO | Debug mode disabled: skip Moex_Bonds_Details.xlsx generation
-2026-02-15 14:08:51,175 | INFO | Daily DQ report saved to C:\Users\user\Documents\Vibe\logs\dq_daily_report_2026-02-15.txt
-2026-02-15 14:09:15,775 | WARNING | Intraday snapshot stopped by safety guard: pages > 200
-2026-02-15 14:09:21,566 | INFO | Intraday quotes snapshot saved: 608800 rows
-2026-02-15 14:09:33,928 | INFO | Data source: cache
-2026-02-15 14:09:33,928 | INFO | Saved extended details for 3906 securities into 0 endpoint sheets
-2026-02-15 14:09:33,928 | INFO | Updated 4 parquet detail files in C:\Users\user\Documents\Vibe\details_parquet
-2026-02-15 14:09:33,928 | INFO | Saved enriched finish dataset with 3906 rows to C:\Users\user\Documents\Vibe\Moex_Bonds_Finish.xlsx
-2026-02-15 14:09:33,928 | INFO | Saved incremental finish batch to C:\Users\user\Documents\Vibe\finish_batches\Moex_Bonds_Finish_2026-02-15_20260215T140747.xlsx
-2026-02-15 14:09:33,928 | INFO | DQ daily report path: C:\Users\user\Documents\Vibe\logs\dq_daily_report_2026-02-15.txt
-2026-02-15 14:09:33,928 | INFO | Intraday quotes snapshot rows: 608800
-2026-02-15 14:09:33,928 | INFO | Execution time: 458.668 seconds
+2026-02-15 14:20:48,650 | INFO | Details worker processes resolved to 48 (env/default)
+2026-02-15 14:20:48,845 | INFO | SQLite maintenance completed (WAL + ANALYZE + PRAGMA optimize)
+2026-02-15 14:20:48,845 | INFO | MOEX API script started
+2026-02-15 14:20:48,856 | INFO | Using cached data for 2026-02-15
+2026-02-15 14:20:48,992 | INFO | Debug mode disabled: skip Moex_Bonds.xlsx generation
+2026-02-15 14:20:49,010 | INFO | DQ check: ok (row_count=3906, empty SECID 0.00%, empty ISIN 0.00%)
+2026-02-15 14:20:50,067 | INFO | Добавлено 0 облигаций
+2026-02-15 14:20:50,067 | INFO | Погашено 4 бумаг
+2026-02-15 14:20:50,067 | INFO |   - RU000A0NNM36, ВТБС1-358
+2026-02-15 14:20:50,067 | INFO |   - RU000A10A8R0, ВТБС1-1381
+2026-02-15 14:20:50,067 | INFO |   - RU000A10AEK9, АЛЬФС1-547
+2026-02-15 14:20:50,067 | INFO |   - RU000A10AV72, ПСБ 3P-11
+2026-02-15 14:20:52,181 | INFO | Endpoint security_overview is available (blocks: description, boards)
+2026-02-15 14:20:52,308 | INFO | Endpoint bondization is available (blocks: amortizations, coupons, offers)
+2026-02-15 14:20:52,324 | INFO | Endpoint bondization_stats is available (blocks: amortizations, amortizations.cursor, coupons, coupons.cursor, offers)
+2026-02-15 14:20:52,345 | INFO | Endpoint security_events is available (blocks: description, boards)
+2026-02-15 14:24:32,840 | INFO | Debug mode disabled: skip Moex_Bonds_Details.xlsx generation
+2026-02-15 14:25:34,001 | INFO | Daily DQ report saved to C:\Users\user\Documents\Vibe\logs\dq_daily_report_2026-02-15.txt
+2026-02-15 14:25:53,780 | WARNING | Intraday snapshot stopped by safety guard: pages > 200
+2026-02-15 14:25:58,470 | INFO | Intraday quotes snapshot saved: 608800 rows
+2026-02-15 14:26:08,660 | INFO | Data source: cache
+2026-02-15 14:26:08,660 | INFO | Saved extended details for 3906 securities into 0 endpoint sheets
+2026-02-15 14:26:08,660 | INFO | Updated 4 parquet detail files in C:\Users\user\Documents\Vibe\details_parquet
+2026-02-15 14:26:08,660 | INFO | Saved enriched finish dataset with 3906 rows to C:\Users\user\Documents\Vibe\Moex_Bonds_Finish.xlsx
+2026-02-15 14:26:08,660 | INFO | Saved incremental finish batch to C:\Users\user\Documents\Vibe\finish_batches\Moex_Bonds_Finish_2026-02-15_20260215T142438.xlsx
+2026-02-15 14:26:08,660 | INFO | DQ daily report path: C:\Users\user\Documents\Vibe\logs\dq_daily_report_2026-02-15.txt
+2026-02-15 14:26:08,660 | INFO | Intraday quotes snapshot rows: 608800
+2026-02-15 14:26:08,660 | INFO | Execution time: 319.816 seconds

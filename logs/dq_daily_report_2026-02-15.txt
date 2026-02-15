@@ -1,5 +1,5 @@
 DQ daily report for 2026-02-15
-Runs today: 15
+Runs today: 16
 Top warnings:
 - none
 Row count trend (last <=7 days):
