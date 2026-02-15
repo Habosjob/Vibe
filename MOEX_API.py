@@ -11,7 +11,7 @@ import sqlite3
 import time
 import re
 from functools import reduce
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -1013,6 +1013,25 @@ def _autosize_worksheet(worksheet) -> None:
         worksheet.column_dimensions[column].width = min(max(12, max_length + 2), 60)
 
 
+def _build_block_feature_frame_worker(endpoint_name: str, block_name: str, frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["secid"])
+
+    prepared = frame.copy()
+    prepared["secid"] = prepared["secid"].astype(str).str.strip().str.upper()
+    payload_columns = [c for c in prepared.columns if c not in {"secid", "block_name"}]
+
+    grouped = prepared.groupby("secid", as_index=False).size().rename(columns={"size": f"{endpoint_name}_{block_name}_rows"})
+    for col in payload_columns:
+        cleaned = prepared[col].astype(str).str.strip()
+        prepared[col] = cleaned.where(cleaned != "", pd.NA)
+        series = prepared.groupby("secid", as_index=False)[col].first()
+        series = series.rename(columns={col: f"{endpoint_name}_{block_name}_{col}"})
+        grouped = grouped.merge(series, on="secid", how="left")
+
+    return grouped
+
+
 def _build_enrichment_frame(
     endpoint_frames: dict[str, dict[str, pd.DataFrame]],
     progress_callback: Callable[[int, int, str, str], None] | None = None,
@@ -1026,46 +1045,40 @@ def _build_enrichment_frame(
     if total_blocks == 0:
         return pd.DataFrame(columns=["secid"])
 
-    def _build_block_feature_frame(endpoint_name: str, block_name: str, frame: pd.DataFrame) -> pd.DataFrame:
-        if frame.empty:
-            return pd.DataFrame(columns=["secid"])
-
-        prepared = frame.copy()
-        prepared["secid"] = prepared["secid"].astype(str).str.strip().str.upper()
-        payload_columns = [c for c in prepared.columns if c not in {"secid", "block_name"}]
-        grouped = prepared.groupby("secid", as_index=False).size().rename(columns={"size": f"{endpoint_name}_{block_name}_rows"})
-
-        for col in payload_columns:
-            series = (
-                prepared.groupby("secid")[col]
-                .agg(
-                    lambda s: " | ".join(
-                        list(dict.fromkeys(str(v) for v in s.dropna().tolist() if str(v).strip()))[:5]
-                    )
-                )
-                .reset_index(name=f"{endpoint_name}_{block_name}_{col}")
-            )
-            grouped = grouped.merge(series, on="secid", how="left")
-
-        return grouped
-
     cpu = max(os.cpu_count() or 2, 2)
-    enrichment_workers = min(16, max(2, cpu // 2))
+    raw_workers = os.getenv("ENRICHMENT_WORKERS", "").strip()
+    if raw_workers:
+        try:
+            enrichment_workers = max(1, int(raw_workers))
+        except ValueError:
+            enrichment_workers = min(12, max(2, cpu - 1))
+    else:
+        enrichment_workers = min(12, max(2, cpu - 1))
+
     feature_frames: list[pd.DataFrame] = []
     completed = 0
-    with ThreadPoolExecutor(max_workers=enrichment_workers) as pool:
-        futures: dict[Future[pd.DataFrame], tuple[str, str]] = {}
-        for endpoint_name, block_name, frame in block_tasks:
-            futures[pool.submit(_build_block_feature_frame, endpoint_name, block_name, frame)] = (endpoint_name, block_name)
 
-        for future in as_completed(futures):
-            block_df = future.result()
-            endpoint_name, block_name = futures[future]
-            completed += 1
-            if progress_callback is not None:
-                progress_callback(completed, total_blocks, endpoint_name, block_name)
-            if not block_df.empty:
-                feature_frames.append(block_df)
+    if len(block_tasks) == 1:
+        endpoint_name, block_name, frame = block_tasks[0]
+        only_frame = _build_block_feature_frame_worker(endpoint_name, block_name, frame)
+        if progress_callback is not None:
+            progress_callback(1, 1, endpoint_name, block_name)
+        if not only_frame.empty:
+            feature_frames.append(only_frame)
+    else:
+        with ProcessPoolExecutor(max_workers=enrichment_workers) as pool:
+            futures: dict[Future[pd.DataFrame], tuple[str, str]] = {}
+            for endpoint_name, block_name, frame in block_tasks:
+                futures[pool.submit(_build_block_feature_frame_worker, endpoint_name, block_name, frame)] = (endpoint_name, block_name)
+
+            for future in as_completed(futures):
+                block_df = future.result()
+                endpoint_name, block_name = futures[future]
+                completed += 1
+                if progress_callback is not None:
+                    progress_callback(completed, total_blocks, endpoint_name, block_name)
+                if not block_df.empty:
+                    feature_frames.append(block_df)
 
     if not feature_frames:
         return pd.DataFrame(columns=["secid"])
@@ -1307,8 +1320,6 @@ def _persist_finish_to_sqlite(finish_df: pd.DataFrame, batch_id: str, export_dat
             payload_rows,
         )
         connection.commit()
-
-    _refresh_bonds_read_model()
 
 
 def _refresh_bonds_read_model() -> None:

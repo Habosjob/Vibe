@@ -28,3 +28,6 @@
 - Cache-stage scheduler переведён на bounded in-flight модель (ограниченное число pending futures).
 - Enrichment собирается параллельно по блокам (thread pool), что уменьшает время CPU-bound шага на больших объёмах.
 - Export stage получил heartbeat по intraday pagination + safety guard по числу страниц, чтобы не выглядело как зависание.
+
+- Enrichment вынесен в process pool (env `ENRICHMENT_WORKERS`) для реального multi-core CPU использования на 3-м этапе.
+- Пересборка `bonds_read_model` оставлена в stage 4 (убрана из stage 3), чтобы сократить критический путь details-этапа.
