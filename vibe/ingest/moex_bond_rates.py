@@ -10,9 +10,41 @@ import pandas as pd
 
 from vibe.data_sources.moex_iss import MOEXBondRatesClient
 from vibe.storage.excel import write_dataframe_to_excel_atomic
-from vibe.utils.fs import write_bytes_atomic
+from vibe.utils.fs import ensure_parent_dir, write_bytes_atomic
 
 logger = logging.getLogger(__name__)
+
+DROP_COLUMNS = [
+    "RTL1",
+    "RTH1",
+    "RTL2",
+    "RTH2",
+    "RTL3",
+    "RTH3",
+    "DISCOUNT1",
+    "LIMIT1",
+    "DISCOUNT2",
+    "LIMIT2",
+    "DISCOUNT3",
+    "DISCOUNTL0",
+    "DISCOUNTH0",
+    "FULLCOVERED",
+    "FULL_COVERED_LIMIT",
+    "REGISTRYCLOSEDATE",
+    "DIVIDENDVALUE",
+    "DIVIDENDYIELD",
+    "REGISTRYCLOSETYPE",
+    "SUSPENSION_LISTING",
+    "EVENINGSESSION",
+    "MORNINGSESSION",
+    "WEEKENDSESSION",
+    "S_RII",
+    "INCLUDEDBYMOEX",
+    "PRIMARY_BOARD_TITLE",
+    "PRIMARY_BOARDID",
+    "IS_COLLATERAL",
+    "IS_EXTERNAL",
+]
 
 KNOWN_ID_COLUMNS = {"SECID", "ISIN", "REGNUMBER", "SHORTNAME", "SECNAME"}
 KNOWN_RATE_COLUMNS = {
@@ -38,6 +70,106 @@ class IngestResult:
     cols: int
     downloaded_at_utc: str
     sha256_raw_csv: str
+
+
+def _normalize_empty_strings(df: pd.DataFrame) -> pd.DataFrame:
+    return df.replace(r"^\s*$", pd.NA, regex=True)
+
+
+def _select_identifier_column(df: pd.DataFrame) -> str:
+    if "ISIN" not in df.columns:
+        logger.warning("ISIN column is missing. Falling back to SECID as identifier.")
+        return "SECID"
+
+    isin_blank_ratio = df["ISIN"].isna().mean()
+    if isin_blank_ratio > 0.5:
+        logger.warning(
+            "ISIN has too many empty values (%.1f%%). Falling back to SECID as identifier.",
+            isin_blank_ratio * 100,
+        )
+        return "SECID"
+    return "ISIN"
+
+
+def _drop_duplicate_by_key(df: pd.DataFrame, key: str) -> pd.DataFrame:
+    if key not in df.columns:
+        raise ValueError(f"Identifier column '{key}' is missing in DataFrame.")
+
+    df = df.dropna(subset=[key]).copy()
+    if df.empty:
+        return df
+
+    completeness = df.notna().sum(axis=1)
+    df = (
+        df.assign(_completeness=completeness)
+        .sort_values(by=[key, "_completeness"], ascending=[True, False], kind="stable")
+        .drop_duplicates(subset=[key], keep="first")
+        .drop(columns=["_completeness"])
+    )
+
+    if df[key].duplicated().sum() != 0:
+        raise ValueError(f"Duplicate rows by '{key}' still exist after deduplication.")
+
+    return df
+
+
+def clean_bond_rates_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    cleaned = _normalize_empty_strings(df.copy())
+    cleaned = cleaned.drop(columns=DROP_COLUMNS, errors="ignore")
+
+    key = _select_identifier_column(cleaned)
+    if key == "ISIN":
+        cleaned = cleaned.drop(columns=["SECID"], errors="ignore")
+    else:
+        cleaned = cleaned.drop(columns=["ISIN"], errors="ignore")
+
+    cleaned = _drop_duplicate_by_key(cleaned, key)
+    return cleaned, key
+
+
+def _snapshot_path_for_date(base_path: Path, date_tag: str, suffix: str) -> Path:
+    return base_path.with_name(f"{base_path.stem}_{date_tag}.{suffix}")
+
+
+def _load_previous_snapshot(curated_dir: Path, stem: str, date_tag: str) -> pd.DataFrame | None:
+    candidates = sorted(curated_dir.glob(f"{stem}_*.parquet"))
+    previous = [path for path in candidates if path.stem.rsplit("_", 1)[-1] < date_tag]
+    if not previous:
+        return None
+    return pd.read_parquet(previous[-1])
+
+
+def _print_changes(current_df: pd.DataFrame, previous_df: pd.DataFrame | None, key: str) -> None:
+    if previous_df is None:
+        print("Предыдущий снапшот не найден — сравнение пропущено")
+        return
+
+    if key not in current_df.columns or key not in previous_df.columns:
+        logger.warning("Comparison skipped: identifier column '%s' is absent in one of snapshots.", key)
+        return
+
+    current = set(current_df[key].dropna())
+    previous = set(previous_df[key].dropna())
+
+    added = sorted(current - previous)
+    expired = sorted(previous - current)
+
+    def _shortname_map(df: pd.DataFrame) -> dict[str, str]:
+        if "SHORTNAME" not in df.columns:
+            return {}
+        series = df[[key, "SHORTNAME"]].dropna(subset=[key]).drop_duplicates(subset=[key], keep="first")
+        return dict(zip(series[key], series["SHORTNAME"]))
+
+    current_names = _shortname_map(current_df)
+    previous_names = _shortname_map(previous_df)
+
+    print(f"Добавлено {len(added)} бумаг:")
+    for value in added:
+        print(f"{value} | {current_names.get(value, '')}")
+
+    print(f"Погашено {len(expired)} бумаг:")
+    for value in expired:
+        print(f"{value} | {previous_names.get(value, '')}")
 
 
 def _validate_and_cast(df: pd.DataFrame) -> pd.DataFrame:
@@ -82,21 +214,52 @@ def _validate_and_cast(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def run_moex_bond_rates_ingest(out_xlsx: Path, raw_csv: Path, url: str, *, timeout: int = 30, retries: int = 3) -> IngestResult:
-    client = MOEXBondRatesClient(timeout=timeout, retries=retries)
-    raw_bytes = client.fetch_rates_csv_bytes(url)
+def run_moex_bond_rates_ingest(
+    out_xlsx: Path,
+    raw_csv: Path,
+    url: str,
+    *,
+    timeout: int = 30,
+    retries: int = 3,
+    no_cache: bool = False,
+) -> IngestResult:
+    date_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
+    daily_raw_csv = _snapshot_path_for_date(raw_csv, date_tag, "csv")
+    daily_parquet = _snapshot_path_for_date(out_xlsx.with_suffix(""), date_tag, "parquet")
 
-    write_bytes_atomic(raw_bytes, raw_csv)
+    source_url = url
+    ensure_parent_dir(daily_parquet)
 
-    df = client.fetch_rates_df_from_bytes(raw_bytes)
-    df = _validate_and_cast(df)
+    raw_bytes: bytes | None = None
+    if daily_parquet.exists() and not no_cache:
+        logger.info("Cache hit for %s", date_tag)
+        df = pd.read_parquet(daily_parquet)
+        sha256_raw_csv = ""
+    else:
+        client = MOEXBondRatesClient(timeout=timeout, retries=retries)
+        raw_bytes = client.fetch_rates_csv_bytes(url)
+        write_bytes_atomic(raw_bytes, daily_raw_csv)
+
+        df = client.fetch_rates_df_from_bytes(raw_bytes)
+        df = _validate_and_cast(df)
+        df, key = clean_bond_rates_dataframe(df)
+        df.to_parquet(daily_parquet, index=False)
+        sha256_raw_csv = hashlib.sha256(raw_bytes).hexdigest()
+
+        previous_snapshot = _load_previous_snapshot(daily_parquet.parent, out_xlsx.stem, date_tag)
+        _print_changes(df, previous_snapshot, key)
+
+    if raw_bytes is None:
+        # cache branch
+        df, key = clean_bond_rates_dataframe(df)
+        previous_snapshot = _load_previous_snapshot(daily_parquet.parent, out_xlsx.stem, date_tag)
+        _print_changes(df, previous_snapshot, key)
 
     downloaded_at_utc = datetime.now(timezone.utc).isoformat()
-    sha256_raw_csv = hashlib.sha256(raw_bytes).hexdigest()
 
     meta = {
         "downloaded_at_utc": downloaded_at_utc,
-        "source_url": url,
+        "source_url": source_url,
         "rows": len(df),
         "cols": len(df.columns),
         "sha256_raw_csv": sha256_raw_csv,
@@ -105,7 +268,7 @@ def run_moex_bond_rates_ingest(out_xlsx: Path, raw_csv: Path, url: str, *, timeo
 
     return IngestResult(
         out_xlsx=out_xlsx,
-        raw_csv=raw_csv,
+        raw_csv=daily_raw_csv,
         rows=len(df),
         cols=len(df.columns),
         downloaded_at_utc=downloaded_at_utc,

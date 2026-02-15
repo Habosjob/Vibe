@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     moex.add_argument("--url", default=DEFAULT_MOEX_RATES_URL)
     moex.add_argument("--timeout", type=int, default=DEFAULT_HTTP_TIMEOUT_SECONDS)
     moex.add_argument("--retries", type=int, default=DEFAULT_HTTP_RETRIES)
+    moex.add_argument("--no-cache", action="store_true", help="Bypass daily parquet cache and force download")
 
     return parser
 
@@ -42,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
                 url=args.url,
                 timeout=args.timeout,
                 retries=args.retries,
+                no_cache=args.no_cache,
             )
             logging.info(
                 "Ingest complete: out=%s raw=%s rows=%s cols=%s",
