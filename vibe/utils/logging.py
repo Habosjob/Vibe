@@ -6,7 +6,7 @@ from pathlib import Path
 from vibe.utils.fs import ensure_parent_dir
 
 
-def setup_logging(log_path: Path | None, level: str = "INFO") -> None:
+def setup_logging(log_path: Path | None, level: str = "INFO", also_print_header: bool = True) -> None:
     formatter = logging.Formatter("%(asctime)s %(name)s %(levelname)s: %(message)s")
     root = logging.getLogger()
     root.setLevel(level.upper())
@@ -21,3 +21,7 @@ def setup_logging(log_path: Path | None, level: str = "INFO") -> None:
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
+
+        if also_print_header:
+            root.info("Logging initialized: file=%s level=%s", log_path, level.upper())
+            file_handler.flush()

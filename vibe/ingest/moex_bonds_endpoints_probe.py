@@ -203,6 +203,14 @@ def run_probe(
 ) -> ProbeResult:
     ensure_parent_dir(out_dir / "placeholder")
     cleanup_old_dirs(Path("data/curated/moex/endpoints_probe"), keep_days=7)
+    logger.info(
+        "Probe started: isins=%s out_dir=%s from=%s till=%s interval=%s",
+        len(isins),
+        out_dir,
+        from_date,
+        till_date,
+        interval,
+    )
 
     endpoint_specs = default_endpoint_specs()
     params_map = default_endpoint_params(from_date=from_date, till_date=till_date, interval=interval)

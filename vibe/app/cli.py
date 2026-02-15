@@ -121,9 +121,11 @@ def main(argv: list[str] | None = None) -> int:
                 result.total_isins,
             )
             return 0
-        except Exception as exc:
-            logging.error("MOEX endpoints probe failed: %s", exc)
+        except Exception:
+            logging.exception("MOEX endpoints probe failed")
             return 1
+        finally:
+            logging.shutdown()
 
     parser.print_help()
     return 2
