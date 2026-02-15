@@ -4,7 +4,6 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
@@ -87,7 +86,7 @@ def run_moex_bond_rates_ingest(out_xlsx: Path, raw_csv: Path, url: str, *, timeo
 
     write_bytes_atomic(raw_bytes, raw_csv)
 
-    df = pd.read_csv(BytesIO(raw_bytes))
+    df = client.fetch_rates_df_from_bytes(raw_bytes)
     df = _validate_and_cast(df)
 
     downloaded_at_utc = datetime.now(timezone.utc).isoformat()
