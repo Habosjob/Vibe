@@ -61,6 +61,12 @@ KNOWN_RATE_COLUMNS = {
 }
 KNOWN_DATE_COLUMNS = {"MATDATE", "PREVDATE", "SETTLEDATE", "TRADEDATE", "OFFERDATE"}
 
+DEFAULT_OUT_XLSX = Path("data/curated/moex/bond_rates.xlsx")
+DEFAULT_RAW_DIR = Path("data/raw/moex")
+DEFAULT_RAW_BASENAME = "bond_rates"
+DEFAULT_MAX_PRINT = 200
+DEFAULT_KEEP_ID = "ISIN"
+
 
 @dataclass
 class IngestResult:
@@ -76,7 +82,16 @@ def _normalize_empty_strings(df: pd.DataFrame) -> pd.DataFrame:
     return df.replace(r"^\s*$", pd.NA, regex=True)
 
 
-def _select_identifier_column(df: pd.DataFrame) -> str:
+def _select_identifier_column(df: pd.DataFrame, keep_id: str = DEFAULT_KEEP_ID) -> str:
+    if keep_id not in {"ISIN", "SECID"}:
+        raise ValueError(f"Unsupported keep_id='{keep_id}'. Use 'ISIN' or 'SECID'.")
+
+    if keep_id == "SECID":
+        if "SECID" in df.columns:
+            return "SECID"
+        logger.warning("SECID column is missing. Falling back to ISIN as identifier.")
+        return "ISIN"
+
     if "ISIN" not in df.columns:
         logger.warning("ISIN column is missing. Falling back to SECID as identifier.")
         return "SECID"
@@ -113,11 +128,11 @@ def _drop_duplicate_by_key(df: pd.DataFrame, key: str) -> pd.DataFrame:
     return df
 
 
-def clean_bond_rates_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+def clean_bond_rates_dataframe(df: pd.DataFrame, keep_id: str = DEFAULT_KEEP_ID) -> tuple[pd.DataFrame, str]:
     cleaned = _normalize_empty_strings(df.copy())
     cleaned = cleaned.drop(columns=DROP_COLUMNS, errors="ignore")
 
-    key = _select_identifier_column(cleaned)
+    key = _select_identifier_column(cleaned, keep_id=keep_id)
     if key == "ISIN":
         cleaned = cleaned.drop(columns=["SECID"], errors="ignore")
     else:
@@ -139,7 +154,12 @@ def _load_previous_snapshot(curated_dir: Path, stem: str, date_tag: str) -> pd.D
     return pd.read_parquet(previous[-1])
 
 
-def _print_changes(current_df: pd.DataFrame, previous_df: pd.DataFrame | None, key: str) -> None:
+def _print_changes(
+    current_df: pd.DataFrame,
+    previous_df: pd.DataFrame | None,
+    key: str,
+    max_print: int = DEFAULT_MAX_PRINT,
+) -> None:
     if previous_df is None:
         print("Предыдущий снапшот не найден — сравнение пропущено")
         return
@@ -164,12 +184,30 @@ def _print_changes(current_df: pd.DataFrame, previous_df: pd.DataFrame | None, k
     previous_names = _shortname_map(previous_df)
 
     print(f"Добавлено {len(added)} бумаг:")
-    for value in added:
+    for value in added[:max_print]:
         print(f"{value} | {current_names.get(value, '')}")
+    if len(added) > max_print:
+        print(f"... and {len(added) - max_print} more")
 
     print(f"Погашено {len(expired)} бумаг:")
-    for value in expired:
+    for value in expired[:max_print]:
         print(f"{value} | {previous_names.get(value, '')}")
+    if len(expired) > max_print:
+        print(f"... and {len(expired) - max_print} more")
+
+
+def _resolve_ingest_paths(out_xlsx: Path | None, raw_path: Path | None) -> tuple[Path, Path]:
+    resolved_out = out_xlsx or DEFAULT_OUT_XLSX
+    if raw_path is None:
+        resolved_raw_csv = DEFAULT_RAW_DIR / f"{DEFAULT_RAW_BASENAME}.csv"
+    elif raw_path.suffix.lower() == ".csv":
+        resolved_raw_csv = raw_path
+    else:
+        resolved_raw_csv = raw_path / f"{DEFAULT_RAW_BASENAME}.csv"
+
+    ensure_parent_dir(resolved_out)
+    ensure_parent_dir(resolved_raw_csv)
+    return resolved_out, resolved_raw_csv
 
 
 def _validate_and_cast(df: pd.DataFrame) -> pd.DataFrame:
@@ -215,14 +253,17 @@ def _validate_and_cast(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_moex_bond_rates_ingest(
-    out_xlsx: Path,
-    raw_csv: Path,
+    out_xlsx: Path | None,
+    raw_csv: Path | None,
     url: str,
     *,
     timeout: int = 30,
     retries: int = 3,
     no_cache: bool = False,
+    max_print: int = DEFAULT_MAX_PRINT,
+    keep_id: str = DEFAULT_KEEP_ID,
 ) -> IngestResult:
+    out_xlsx, raw_csv = _resolve_ingest_paths(out_xlsx, raw_csv)
     date_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
     daily_raw_csv = _snapshot_path_for_date(raw_csv, date_tag, "csv")
     daily_parquet = _snapshot_path_for_date(out_xlsx.with_suffix(""), date_tag, "parquet")
@@ -242,18 +283,18 @@ def run_moex_bond_rates_ingest(
 
         df = client.fetch_rates_df_from_bytes(raw_bytes)
         df = _validate_and_cast(df)
-        df, key = clean_bond_rates_dataframe(df)
+        df, key = clean_bond_rates_dataframe(df, keep_id=keep_id)
         df.to_parquet(daily_parquet, index=False)
         sha256_raw_csv = hashlib.sha256(raw_bytes).hexdigest()
 
         previous_snapshot = _load_previous_snapshot(daily_parquet.parent, out_xlsx.stem, date_tag)
-        _print_changes(df, previous_snapshot, key)
+        _print_changes(df, previous_snapshot, key, max_print=max_print)
 
     if raw_bytes is None:
         # cache branch
-        df, key = clean_bond_rates_dataframe(df)
+        df, key = clean_bond_rates_dataframe(df, keep_id=keep_id)
         previous_snapshot = _load_previous_snapshot(daily_parquet.parent, out_xlsx.stem, date_tag)
-        _print_changes(df, previous_snapshot, key)
+        _print_changes(df, previous_snapshot, key, max_print=max_print)
 
     downloaded_at_utc = datetime.now(timezone.utc).isoformat()
 
