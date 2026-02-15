@@ -3,32 +3,6 @@
 КОРНЕВАЯ ДИРЕКТОРИЯ:
 ============================================================
 
-https://raw.githubusercontent.com/Habosjob/Vibe/main/.gitignore
-https://raw.githubusercontent.com/Habosjob/Vibe/main/MOEX_API.py
-https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bonds_Details.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/Moex_Bonds_Finish.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
-
-------------------------------------------------------------
-Директория: details_parquet/
-------------------------------------------------------------
-
-https://raw.githubusercontent.com/Habosjob/Vibe/main/details_parquet/bondization.parquet
-https://raw.githubusercontent.com/Habosjob/Vibe/main/details_parquet/bondization_stats.parquet
-https://raw.githubusercontent.com/Habosjob/Vibe/main/details_parquet/security_events.parquet
-https://raw.githubusercontent.com/Habosjob/Vibe/main/details_parquet/security_overview.parquet
-
-------------------------------------------------------------
-Директория: docs/
-------------------------------------------------------------
-
-https://raw.githubusercontent.com/Habosjob/Vibe/main/docs/DB_STRUCTURE.md
-
-------------------------------------------------------------
-Директория: logs/
-------------------------------------------------------------
-
-https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_api.log
-https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/raw_response_latest.csv
