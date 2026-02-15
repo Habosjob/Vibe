@@ -1524,6 +1524,10 @@ def fetch_and_save_bond_details(
     pending_by_secid: dict[str, list[tuple[str, str]]] = {}
     network_targets = set(incremental_target) if incremental_target else set(secids)
     stale_cache_loaded = 0
+    _print_details_stage_note("подготовка задач: проверяем кэш и формируем сетевой список SECID", stage_started_at=progress_anchor)
+    prep_total = len(secids)
+    prep_completed = 0
+    prep_last_note_at = time.perf_counter()
     for secid in secids:
         missing_endpoints: list[tuple[str, str]] = []
         for endpoint_name, endpoint_url in working_endpoints:
@@ -1546,6 +1550,17 @@ def fetch_and_save_bond_details(
                     endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
         if missing_endpoints:
             pending_by_secid[secid] = missing_endpoints
+
+        prep_completed += 1
+        now = time.perf_counter()
+        if now - prep_last_note_at >= 5 or prep_completed == prep_total:
+            prep_percent = (prep_completed / prep_total * 100) if prep_total else 100.0
+            _print_details_stage_note(
+                f"подготовка задач: {prep_percent:5.1f}% ({prep_completed}/{prep_total}), сетевых SECID {len(pending_by_secid)}",
+                stage_started_at=progress_anchor,
+            )
+            prep_last_note_at = now
+
     _print_details_stage_note(
         f"подготовка задач завершена: сетевых SECID {len(pending_by_secid)}, кэшированных {len(secids) - len(pending_by_secid)}, stale-cache {stale_cache_loaded}",
         stage_started_at=progress_anchor,
