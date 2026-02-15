@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -138,6 +139,7 @@ def build_probe_summary_df(
                 "__status": status,
                 "reason": reason,
                 "http_status": meta.status_code,
+                "content_type": meta.content_type or "",
                 "from_cache": meta.from_cache,
                 "elapsed_ms": meta.elapsed_ms,
                 "tables_returned": ",".join(tables),
@@ -148,6 +150,7 @@ def build_probe_summary_df(
                 "interval": interval,
                 "params": json.dumps(meta.params, ensure_ascii=False, sort_keys=True),
                 "error": meta.error or "",
+                "response_head": (meta.response_head or "")[:200],
             }
         ]
     )
@@ -223,6 +226,7 @@ def run_probe(
             logger.warning("Board resolve failed for %s, fallback board: %s", isin, board)
 
         for spec in endpoint_specs:
+            worker_name = threading.current_thread().name
             params = params_map.get(spec.name, {})
             payload, fetch_meta = client.fetch_endpoint(isin=isin, board=board, spec=spec, params=params)
             if spec.name == "bondization" and payload and "offers" not in str(payload).lower():
@@ -259,9 +263,10 @@ def run_probe(
                 ok.append(spec.name)
 
             logger.info(
-                "Probe endpoint=%s isin=%s status=%s cache=%s rows=%s",
-                spec.name,
+                "Probe worker=%s isin=%s endpoint=%s status=%s cache_hit=%s rows=%s",
+                worker_name,
                 isin,
+                spec.name,
                 fetch_meta.status_code,
                 fetch_meta.from_cache,
                 len(frame),

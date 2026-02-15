@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 MOEX_ISS_BASE_URL = "https://iss.moex.com"
 BOARD_FALLBACKS = ("TQCB", "TQOB", "TQOD")
-PREFERRED_BONDS_BOARDS = ["TQOB", "TQCB", "TQOD", "TQIR", "TQOY"]
+PREFERRED_BONDS_BOARDS = ["TQCB", "TQOB", "TQOD", "TQIR", "TQOY"]
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,8 @@ class FetchMeta:
     elapsed_ms: int
     url: str
     params: dict[str, Any]
+    content_type: str | None = None
+    response_head: str | None = None
     error: str | None = None
 
 
@@ -107,10 +109,12 @@ class MoexBondEndpointsClient:
                 logger.info("Cache hit: endpoint=%s isin=%s url=%s", endpoint_name, isin, url)
                 return payload, FetchMeta(
                     status_code=cached_meta.get("status_code"),
+                    content_type=cached_meta.get("content_type"),
                     from_cache=True,
                     elapsed_ms=int(cached_meta.get("elapsed_ms", 0)),
                     url=url,
                     params=params or {},
+                    response_head=cached_meta.get("response_head"),
                     error=cached_meta.get("error"),
                 )
             except Exception as exc:
@@ -119,10 +123,58 @@ class MoexBondEndpointsClient:
         start = perf_counter()
         try:
             response = get_with_retries(url, timeout=self.timeout, retries=self.retries)
-            payload = json.loads(response.content.decode("utf-8"))
             elapsed_ms = int((perf_counter() - start) * 1000)
+            content_type = response.headers.get("Content-Type")
+            response_text = response.content.decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(response_text)
+            except json.JSONDecodeError as exc:
+                error = f"invalid_json: {exc}"
+                meta = FetchMeta(
+                    status_code=response.status_code,
+                    content_type=content_type,
+                    from_cache=False,
+                    elapsed_ms=elapsed_ms,
+                    url=url,
+                    params=params or {},
+                    response_head=response_text[:200],
+                    error=error,
+                )
+                if self.use_cache and cache_path is not None:
+                    ensure_parent_dir(cache_path)
+                    cache_path.write_text(
+                        json.dumps(
+                            {
+                                "payload": None,
+                                "meta": {
+                                    "endpoint_name": endpoint_name,
+                                    "isin": isin,
+                                    "url": url,
+                                    "params": params or {},
+                                    "status_code": meta.status_code,
+                                    "content_type": meta.content_type,
+                                    "elapsed_ms": meta.elapsed_ms,
+                                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                                    "response_head": meta.response_head,
+                                    "error": meta.error,
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                logger.warning(
+                    "Fetch non-JSON response: endpoint=%s isin=%s status=%s content_type=%s",
+                    endpoint_name,
+                    isin,
+                    response.status_code,
+                    content_type,
+                )
+                return None, meta
+
             meta = FetchMeta(
                 status_code=response.status_code,
+                content_type=content_type,
                 from_cache=False,
                 elapsed_ms=elapsed_ms,
                 url=url,
@@ -141,8 +193,10 @@ class MoexBondEndpointsClient:
                                 "url": url,
                                 "params": params or {},
                                 "status_code": meta.status_code,
+                                "content_type": meta.content_type,
                                 "elapsed_ms": meta.elapsed_ms,
                                 "fetched_at": datetime.now(timezone.utc).isoformat(),
+                                "response_head": meta.response_head,
                                 "error": meta.error,
                             },
                         },
@@ -164,10 +218,12 @@ class MoexBondEndpointsClient:
             logger.error("Fetch failed: endpoint=%s isin=%s error=%s", endpoint_name, isin, error)
             return None, FetchMeta(
                 status_code=None,
+                content_type=None,
                 from_cache=False,
                 elapsed_ms=elapsed_ms,
                 url=url,
                 params=params or {},
+                response_head=None,
                 error=error,
             )
 
@@ -185,41 +241,62 @@ class MoexBondEndpointsClient:
                 return pd.Series([None] * len(frame), index=frame.index)
             return frame[col]
 
-        filtered = boards_df.copy()
-        engine_series = _value(filtered, "ENGINE").astype("string").fillna("").str.lower()
-        market_series = _value(filtered, "MARKET").astype("string").fillna("").str.lower()
-        traded_series = pd.to_numeric(_value(filtered, "IS_TRADED"), errors="coerce")
-        has_is_traded = normalized.get("IS_TRADED") is not None
+        def _pick_board(frame: pd.DataFrame, *, bonds_only: bool) -> str | None:
+            working = frame.copy()
+            engine_series = _value(working, "ENGINE").astype("string").fillna("").str.lower()
+            market_series = _value(working, "MARKET").astype("string").fillna("").str.lower()
+            traded_series = pd.to_numeric(_value(working, "IS_TRADED"), errors="coerce")
+            has_is_traded = normalized.get("IS_TRADED") is not None
 
-        base_mask = engine_series.eq("stock") & market_series.eq("bonds")
-        if has_is_traded:
-            base_mask = base_mask & traded_series.eq(1)
+            mask = engine_series.eq("stock")
+            if bonds_only:
+                mask = mask & market_series.eq("bonds")
+            if has_is_traded:
+                mask = mask & traded_series.eq(1)
 
-        filtered = filtered[base_mask]
-        if filtered.empty:
-            logger.warning("resolve_board: no bonds boards found for %s, using fallback behavior", isin)
-            filtered = boards_df
+            working = working[mask]
+            if working.empty:
+                return None
 
-        primary_flags = ["IS_PRIMARY", "PRIMARY", "IS_DEFAULT"]
-        primary_mask = pd.Series([False] * len(filtered), index=filtered.index)
-        for key in primary_flags:
-            series = _value(filtered, key).astype("string").fillna("0")
-            primary_mask = primary_mask | series.isin(["1", "True", "true"])
+            primary_flags = ["IS_PRIMARY", "PRIMARY", "IS_DEFAULT"]
+            primary_mask = pd.Series([False] * len(working), index=working.index)
+            for key in primary_flags:
+                series = _value(working, key).astype("string").fillna("0")
+                primary_mask = primary_mask | series.isin(["1", "True", "true"])
 
-        if primary_mask.any():
-            filtered = filtered[primary_mask]
+            if primary_mask.any():
+                primary = working[primary_mask]
+                if not primary.empty:
+                    working = primary
+
+            board_col = normalized.get("BOARDID") or normalized.get("BOARD")
+            if board_col is None or working.empty:
+                return None
+
+            boards = working[board_col].astype("string").fillna("")
+            for preferred_board in PREFERRED_BONDS_BOARDS:
+                matched = working[boards.eq(preferred_board)]
+                if not matched.empty:
+                    return str(matched.iloc[0][board_col])
+
+            return str(working.iloc[0][board_col])
+
+        board = _pick_board(boards_df, bonds_only=True)
+        if board:
+            return board
+
+        logger.warning("resolve_board: no bonds boards found for %s, using fallback behavior", isin)
+        board = _pick_board(boards_df, bonds_only=False)
+        if board:
+            return board
 
         board_col = normalized.get("BOARDID") or normalized.get("BOARD")
-        if board_col is None or filtered.empty:
+        if board_col is None:
+            logger.warning("resolve_board: no bonds boards found for %s, using fallback behavior", isin)
             return BOARD_FALLBACKS[0]
-
-        boards = filtered[board_col].astype("string").fillna("")
-        for preferred_board in PREFERRED_BONDS_BOARDS:
-            matched = filtered[boards.eq(preferred_board)]
-            if not matched.empty:
-                return str(matched.iloc[0][board_col])
-
-        return str(filtered.iloc[0][board_col])
+        if boards_df.empty:
+            return BOARD_FALLBACKS[0]
+        return str(boards_df.iloc[0][board_col])
 
     def fetch_endpoint(
         self,
