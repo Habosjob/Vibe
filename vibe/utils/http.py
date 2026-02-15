@@ -16,6 +16,7 @@ class HTTPResponse:
     elapsed_seconds: float
     status_code: int
     headers: dict[str, str]
+    final_url: str | None = None
 
 
 def get_with_retries(
@@ -24,13 +25,20 @@ def get_with_retries(
     timeout: int = 30,
     retries: int = 3,
     backoff_seconds: float = 1.0,
+    request_headers: dict[str, str] | None = None,
 ) -> HTTPResponse:
     last_error: Exception | None = None
+    headers = {
+        "User-Agent": "VibeBot/1.0 (+https://github.com/Habosjob/Vibe)",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    if request_headers:
+        headers.update(request_headers)
 
     for attempt in range(1, retries + 1):
         start = time.perf_counter()
         try:
-            response = requests.get(url, timeout=timeout)
+            response = requests.get(url, timeout=timeout, headers=headers)
             elapsed = time.perf_counter() - start
             if response.status_code >= 500:
                 raise HTTPRequestError(
@@ -42,6 +50,7 @@ def get_with_retries(
                 elapsed_seconds=elapsed,
                 status_code=response.status_code,
                 headers=dict(response.headers),
+                final_url=str(getattr(response, "url", "") or url),
             )
         except (requests.RequestException, HTTPRequestError) as exc:
             last_error = exc

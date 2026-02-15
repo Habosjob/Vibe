@@ -13,7 +13,7 @@ class _Resp:
     content = b"<html>gateway</html>"
 
 
-def test_fetch_endpoint_non_json_returns_error_meta(monkeypatch, tmp_path: Path) -> None:
+def test_fetch_endpoint_non_json_returns_error_meta(monkeypatch, tmp_path: Path, caplog) -> None:
     monkeypatch.setattr("vibe.data_sources.moex_bonds_endpoints.get_with_retries", lambda *a, **k: _Resp())
 
     client = MoexBondEndpointsClient(cache_dir=tmp_path, use_cache=True)
@@ -25,6 +25,8 @@ def test_fetch_endpoint_non_json_returns_error_meta(monkeypatch, tmp_path: Path)
     assert meta.status_code == 200
     assert meta.content_type == "text/html"
     assert "<html>gateway</html>" in (meta.response_head or "")
+    assert "url=https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQCB/securities/RU000A/orderbook.json" in caplog.text
+    assert "response_head='<html>gateway</html>'" in caplog.text
 
 
 def test_build_probe_summary_captures_response_diagnostics() -> None:

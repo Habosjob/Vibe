@@ -164,11 +164,13 @@ class MoexBondEndpointsClient:
                         encoding="utf-8",
                     )
                 logger.warning(
-                    "Fetch non-JSON response: endpoint=%s isin=%s status=%s content_type=%s",
+                    "Fetch non-JSON response: endpoint=%s isin=%s status=%s content_type=%s url=%s response_head=%r",
                     endpoint_name,
                     isin,
                     response.status_code,
                     content_type,
+                    url,
+                    response_text[:200],
                 )
                 return None, meta
 
