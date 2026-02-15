@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 MOEX_ISS_BASE_URL = "https://iss.moex.com"
 BOARD_FALLBACKS = ("TQCB", "TQOB", "TQOD")
+PREFERRED_BONDS_BOARDS = ["TQOB", "TQCB", "TQOD", "TQIR", "TQOY"]
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,10 @@ class MoexBondEndpointsClient:
                         {
                             "payload": payload,
                             "meta": {
+                                "endpoint_name": endpoint_name,
+                                "isin": isin,
+                                "url": url,
+                                "params": params or {},
                                 "status_code": meta.status_code,
                                 "elapsed_ms": meta.elapsed_ms,
                                 "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -181,14 +186,18 @@ class MoexBondEndpointsClient:
             return frame[col]
 
         filtered = boards_df.copy()
-        is_traded = pd.to_numeric(_value(filtered, "IS_TRADED"), errors="coerce").fillna(0).astype(int)
-        filtered = filtered[
-            _value(filtered, "ENGINE").astype(str).str.lower().eq("stock")
-            & _value(filtered, "MARKET").astype(str).str.lower().eq("bonds")
-            & is_traded.eq(1)
-        ]
+        engine_series = _value(filtered, "ENGINE").astype("string").fillna("").str.lower()
+        market_series = _value(filtered, "MARKET").astype("string").fillna("").str.lower()
+        traded_series = pd.to_numeric(_value(filtered, "IS_TRADED"), errors="coerce")
+        has_is_traded = normalized.get("IS_TRADED") is not None
 
+        base_mask = engine_series.eq("stock") & market_series.eq("bonds")
+        if has_is_traded:
+            base_mask = base_mask & traded_series.eq(1)
+
+        filtered = filtered[base_mask]
         if filtered.empty:
+            logger.warning("resolve_board: no bonds boards found for %s, using fallback behavior", isin)
             filtered = boards_df
 
         primary_flags = ["IS_PRIMARY", "PRIMARY", "IS_DEFAULT"]
@@ -203,6 +212,12 @@ class MoexBondEndpointsClient:
         board_col = normalized.get("BOARDID") or normalized.get("BOARD")
         if board_col is None or filtered.empty:
             return BOARD_FALLBACKS[0]
+
+        boards = filtered[board_col].astype("string").fillna("")
+        for preferred_board in PREFERRED_BONDS_BOARDS:
+            matched = filtered[boards.eq(preferred_board)]
+            if not matched.empty:
+                return str(matched.iloc[0][board_col])
 
         return str(filtered.iloc[0][board_col])
 

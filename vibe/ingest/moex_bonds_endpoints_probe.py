@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from vibe.data_sources.moex_bonds_endpoints import (
 )
 from vibe.ingest.moex_bond_rates import DEFAULT_OUT_XLSX
 from vibe.utils.fs import atomic_replace_with_retry, ensure_parent_dir
+from vibe.utils.retention import cleanup_old_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -138,11 +140,11 @@ def build_probe_summary_df(
                 "http_status": meta.status_code,
                 "from_cache": meta.from_cache,
                 "elapsed_ms": meta.elapsed_ms,
-                "tables": ",".join(tables),
+                "tables_returned": ",".join(tables),
                 "rows_by_table": json.dumps(rows_by_table, ensure_ascii=False, sort_keys=True),
                 "board": board,
-                "from": from_date.isoformat(),
-                "till": till_date.isoformat(),
+                "params_from": from_date.isoformat(),
+                "params_till": till_date.isoformat(),
                 "interval": interval,
                 "params": json.dumps(meta.params, ensure_ascii=False, sort_keys=True),
                 "error": meta.error or "",
@@ -194,22 +196,23 @@ def run_probe(
     max_rows_per_sheet: int = 200_000,
     cache_dir: Path | None = None,
     use_cache: bool = True,
+    max_workers: int = 4,
 ) -> ProbeResult:
     ensure_parent_dir(out_dir / "placeholder")
+    cleanup_old_dirs(Path("data/curated/moex/endpoints_probe"), keep_days=7)
 
     endpoint_specs = default_endpoint_specs()
     params_map = default_endpoint_params(from_date=from_date, till_date=till_date, interval=interval)
-    client = MoexBondEndpointsClient(timeout=timeout, retries=retries, cache_dir=cache_dir, use_cache=use_cache)
-
     files_written = 0
     run_date = datetime.now(timezone.utc).strftime("%Y%m%d")
     source_snapshot = str(_load_latest_bond_rates_snapshot()[1])
 
-    for isin in isins:
+    def _process_isin(isin: str) -> int:
         endpoint_sheets: dict[str, pd.DataFrame] = {}
         endpoint_summaries: dict[str, pd.DataFrame] = {}
         ok: list[str] = []
         failed: list[str] = []
+        client = MoexBondEndpointsClient(timeout=timeout, retries=retries, cache_dir=cache_dir, use_cache=use_cache)
 
         try:
             board = client.resolve_board(isin)
@@ -281,7 +284,13 @@ def run_probe(
             out_path=out_path,
             max_rows_per_sheet=max_rows_per_sheet,
         )
-        files_written += 1
+        return 1
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for written in executor.map(_process_isin, isins):
+            files_written += written
+
+    cleanup_old_dirs(Path("data/curated/moex/endpoints_probe"), keep_days=7)
 
     return ProbeResult(output_dir=out_dir, files_written=files_written, total_isins=len(isins))
 
