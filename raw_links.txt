@@ -35,6 +35,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_orderbook_h
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_probe_non_json.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_rates_parse.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_resolve_board.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_orderbook_html_fallback.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_probe_writes_summary_for_empty.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_retention_cleanup.py
 
