@@ -20,3 +20,5 @@ details_parquet/*.parquet
 Moex_Bonds.xlsx
 Moex_Bonds_Details.xlsx
 Moex_Bonds_Finish.xlsx
+
+MOEX_Bonds_Finish_Price.xlsx
