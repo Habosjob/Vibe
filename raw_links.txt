@@ -3,6 +3,61 @@
 КОРНЕВАЯ ДИРЕКТОРИЯ:
 ============================================================
 
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.gitignore
+https://raw.githubusercontent.com/Habosjob/Vibe/main/README.md
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/pytest.ini
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
+
+------------------------------------------------------------
+Директория: tests/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/conftest.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_excel_atomic_write.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_rates_parse.py
+
+------------------------------------------------------------
+Директория: vibe/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/__init__.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/config.py
+
+  ----------------------------------------------------------
+  Директория: vibe/app/
+  ----------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/app/__init__.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/app/__main__.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/app/cli.py
+
+  ----------------------------------------------------------
+  Директория: vibe/data_sources/
+  ----------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/data_sources/__init__.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/data_sources/moex_iss.py
+
+  ----------------------------------------------------------
+  Директория: vibe/ingest/
+  ----------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/ingest/__init__.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/ingest/moex_bond_rates.py
+
+  ----------------------------------------------------------
+  Директория: vibe/storage/
+  ----------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/storage/__init__.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/storage/excel.py
+
+  ----------------------------------------------------------
+  Директория: vibe/utils/
+  ----------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/utils/__init__.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/utils/fs.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/vibe/utils/http.py
