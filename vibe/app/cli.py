@@ -17,6 +17,7 @@ from vibe.ingest.moex_bond_rates import (
     run_moex_bond_rates_ingest,
 )
 from vibe.ingest.moex_bonds_endpoints_probe import run_probe_for_latest_bond_rates
+from vibe.utils.logging import setup_logging
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,12 +53,23 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--max-rows-per-sheet", type=int, default=200_000)
     probe.add_argument("--timeout", type=int, default=DEFAULT_HTTP_TIMEOUT_SECONDS)
     probe.add_argument("--retries", type=int, default=DEFAULT_HTTP_RETRIES)
+    probe.add_argument(
+        "--log-file",
+        type=Path,
+        default=Path("logs") / f"moex_endpoints_probe_{today.strftime('%Y%m%d')}.log",
+    )
+    probe.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("data/cache/moex_iss/endpoint_probe") / today.strftime("%Y%m%d"),
+    )
+    probe.add_argument("--no-cache", action="store_true", help="Disable daily endpoint probe cache")
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    setup_logging(log_path=None, level="INFO")
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -87,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "moex-bond-endpoints-probe":
         try:
+            setup_logging(log_path=args.log_file, level="INFO")
             result = run_probe_for_latest_bond_rates(
                 n_static=args.n_static,
                 n_random=args.n_random,
@@ -98,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 retries=args.retries,
                 max_rows_per_sheet=args.max_rows_per_sheet,
+                cache_dir=args.cache_dir,
+                use_cache=not args.no_cache,
             )
             logging.info(
                 "Probe complete: out_dir=%s files_written=%s total_isins=%s",
