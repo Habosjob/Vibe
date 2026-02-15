@@ -10,7 +10,7 @@ import random
 import sqlite3
 import time
 import re
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -1555,20 +1555,25 @@ def fetch_and_save_bond_details(
 
     with ThreadPoolExecutor(max_workers=details_worker_processes) as executor:
         futures = []
+        future_to_secid: dict[Future[list[tuple[str, str, dict | None, float, int | None, str | None]]], str] = {}
         for secid in pending_secids:
             allowed_endpoints = [(n, u) for n, u in pending_by_secid[secid] if not _is_circuit_open(n)]
             if not allowed_endpoints:
                 logger.warning("All endpoints are blocked by circuit breaker for %s", secid)
                 continue
-            futures.append(executor.submit(_fetch_details_worker, secid, allowed_endpoints))
+            future = executor.submit(_fetch_details_worker, secid, allowed_endpoints)
+            futures.append(future)
+            future_to_secid[future] = secid
 
         completed = 0
         total = len(futures)
         progress_started_at = time.perf_counter()
         last_heartbeat_at = progress_started_at
         pending_futures = set(futures)
+        first_response_note_printed = False
         if total:
             _print_details_stage_note(f"запуск сетевого пула: задач {total}, workers {details_worker_processes}", stage_started_at=stage_started_at or progress_started_at)
+            _print_details_stage_note("ожидаем первые ответы от MOEX details endpoint'ов", stage_started_at=stage_started_at or progress_started_at)
             _print_details_progress(0, total, None, stage_started_at=stage_started_at or progress_started_at)
             _print_details_heartbeat(0, total, len(pending_futures), stage_started_at=stage_started_at or progress_started_at)
         else:
@@ -1578,13 +1583,26 @@ def fetch_and_save_bond_details(
             if not done_futures:
                 _print_details_progress(completed, total, None, stage_started_at=stage_started_at or progress_started_at)
                 now = time.perf_counter()
+                if completed == 0 and not first_response_note_printed and (now - progress_started_at) >= 15:
+                    sample_secids = ", ".join(future_to_secid[f] for f in list(pending_futures)[:3])
+                    _print_details_stage_note(
+                        f"первые ответы ещё не пришли, всё ещё ждём сеть; пример SECID в работе: {sample_secids or 'n/a'}",
+                        stage_started_at=stage_started_at or progress_started_at,
+                    )
+                    first_response_note_printed = True
                 if now - last_heartbeat_at >= 5:
+                    sample_secids = ", ".join(future_to_secid[f] for f in list(pending_futures)[:3])
                     _print_details_heartbeat(
                         completed,
                         total,
                         len(pending_futures),
                         stage_started_at=stage_started_at or progress_started_at,
                     )
+                    if sample_secids:
+                        _print_details_stage_note(
+                            f"в работе SECID (пример): {sample_secids}",
+                            stage_started_at=stage_started_at or progress_started_at,
+                        )
                     last_heartbeat_at = now
                 continue
 
@@ -1640,6 +1658,7 @@ def fetch_and_save_bond_details(
                         if not block_df.empty:
                             endpoint_frames[endpoint_name].setdefault(block_name, []).append(_normalize_block_frame(secid, block_name, block_df))
 
+    _print_details_stage_note("сетевой этап завершён, объединяем блоки", stage_started_at=progress_anchor)
     merged_frames: dict[str, dict[str, pd.DataFrame]] = {}
     for endpoint_name, blocks in endpoint_frames.items():
         merged_frames[endpoint_name] = {}
@@ -1648,19 +1667,41 @@ def fetch_and_save_bond_details(
             if valid_frames:
                 merged_frames[endpoint_name][block_name] = pd.concat(valid_frames, ignore_index=True, sort=False)
 
+    total_materialized_blocks = sum(len(blocks) for blocks in merged_frames.values())
+    _print_details_stage_note(
+        f"объединение завершено: endpoint'ов {len(merged_frames)}, блоков {total_materialized_blocks}",
+        stage_started_at=progress_anchor,
+    )
+
+    _print_details_stage_note("строим enrichment-таблицу", stage_started_at=progress_anchor)
     enrichment_df = _build_enrichment_frame(merged_frames)
+    _print_details_stage_note(
+        f"enrichment готов: строк {len(enrichment_df)}",
+        stage_started_at=progress_anchor,
+    )
     excel_sheets = 0
     if debug:
+        _print_details_stage_note("debug режим: формируем Excel с деталями", stage_started_at=progress_anchor)
         excel_sheets = _write_details_excel(merged_frames, enrichment_df)
     else:
         logger.info("Debug mode disabled: skip %s generation", DETAILS_EXCEL_PATH.name)
 
+    _print_details_stage_note("материализуем details parquet", stage_started_at=progress_anchor)
     parquet_files = _update_details_parquet(merged_frames)
+    _print_details_stage_note(
+        f"parquet обновлён: файлов {parquet_files}",
+        stage_started_at=progress_anchor,
+    )
 
+    _print_details_stage_note("собираем финальный датасет", stage_started_at=progress_anchor)
     finish_df = _normalize_identity_columns(_merge_base_with_enrichment(dataframe, enrichment_df))
     batch_id = datetime.now().strftime("%Y%m%dT%H%M%S")
     batch_path = _export_finish_incremental(finish_df, export_date, batch_id)
     _persist_finish_to_sqlite(finish_df, batch_id=batch_id, export_date=export_date, source=source)
+    _print_details_stage_note(
+        f"финальный датасет сохранён: строк {len(finish_df)}",
+        stage_started_at=progress_anchor,
+    )
     refresh_endpoint_health_mv()
     return len(secids), excel_sheets, parquet_files, len(finish_df), batch_path
 
