@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from cache_policy import CACHE_POLICY
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -46,18 +47,18 @@ FINISH_EXCEL_PATH = BASE_DIR / "Moex_Bonds_Finish.xlsx"
 FINISH_PRICE_EXCEL_PATH = BASE_DIR / "MOEX_Bonds_Finish_Price.xlsx"
 FINISH_BATCH_DIR = BASE_DIR / "finish_batches"
 DETAILS_PARQUET_DIR = BASE_DIR / "details_parquet"
-DETAILS_TTL_HOURS = 24 * 7
+DETAILS_TTL_HOURS = CACHE_POLICY.details_ttl_hours
 DEFAULT_DETAILS_WORKER_PROCESSES = min(16, max(4, (os.cpu_count() or 2) * 2))
 RANDOM_SECID_SAMPLE_SIZE = 10
 DETAILS_SAMPLE_ONLY = os.getenv("DETAILS_SAMPLE_ONLY", "0") == "1"
-CB_FAILURE_THRESHOLD = 3
-CB_COOLDOWN_SECONDS = 180
-HEALTH_RETENTION_DAYS = 14
+CB_FAILURE_THRESHOLD = CACHE_POLICY.cb_failure_threshold
+CB_COOLDOWN_SECONDS = CACHE_POLICY.cb_cooldown_seconds
+HEALTH_RETENTION_DAYS = CACHE_POLICY.health_retention_days
 ROW_COUNT_SPIKE_THRESHOLD = 0.30
-DISCOVERY_MAX_ATTEMPTS = 4
-DISCOVERY_BACKOFF_BASE_SECONDS = 0.7
-DISCOVERY_BACKOFF_MAX_SECONDS = 8.0
-INTRADAY_SNAPSHOT_INTERVAL_MINUTES = 10
+DISCOVERY_MAX_ATTEMPTS = CACHE_POLICY.discovery_max_attempts
+DISCOVERY_BACKOFF_BASE_SECONDS = CACHE_POLICY.discovery_backoff_base_seconds
+DISCOVERY_BACKOFF_MAX_SECONDS = CACHE_POLICY.discovery_backoff_max_seconds
+INTRADAY_SNAPSHOT_INTERVAL_MINUTES = CACHE_POLICY.intraday_snapshot_interval_minutes
 
 FINISH_EXCEL_EXCLUDED_COLUMNS = {
     "NAME",
@@ -1160,6 +1161,47 @@ def _persist_finish_to_sqlite(finish_df: pd.DataFrame, batch_id: str, export_dat
         )
         connection.commit()
 
+    _refresh_bonds_read_model()
+
+
+def _refresh_bonds_read_model() -> None:
+    with sqlite3.connect(CACHE_DB_PATH) as connection:
+        table_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bonds_enriched'"
+        ).fetchone()
+        if table_exists is None:
+            return
+
+        connection.execute("DROP TABLE IF EXISTS bonds_read_model")
+        connection.execute(
+            """
+            CREATE TABLE bonds_read_model AS
+            SELECT
+                b.*,
+                q.snapshot_at AS quote_snapshot_at,
+                q.tradingstatus AS quote_trading_status,
+                q.open AS quote_open,
+                q.close AS quote_close,
+                q.last AS quote_last,
+                q.volvalue AS quote_volvalue,
+                q.updatetime AS quote_updatetime
+            FROM bonds_enriched b
+            LEFT JOIN (
+                SELECT q1.*
+                FROM intraday_quotes_snapshot q1
+                JOIN (
+                    SELECT secid, MAX(snapshot_at) AS max_snapshot_at
+                    FROM intraday_quotes_snapshot
+                    GROUP BY secid
+                ) latest
+                ON q1.secid = latest.secid AND q1.snapshot_at = latest.max_snapshot_at
+            ) q
+            ON UPPER(TRIM(COALESCE(b.SECID, ''))) = UPPER(TRIM(COALESCE(q.secid, '')))
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_bonds_read_model_secid ON bonds_read_model(SECID)")
+        connection.commit()
+
 
 def _export_finish_incremental(finish_df: pd.DataFrame, export_date: str, batch_id: str) -> Path:
     FINISH_BATCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -1427,6 +1469,7 @@ def fetch_and_save_bond_details(
     details_worker_processes: int,
     debug: bool,
     stage_started_at: float | None = None,
+    incremental_secids: list[str] | None = None,
 ) -> tuple[int, int, int, int, Path]:
     progress_anchor = stage_started_at or time.perf_counter()
     cleanup_details_cache()
@@ -1441,6 +1484,13 @@ def fetch_and_save_bond_details(
         return 0, 0, 0, len(finish_df), batch_path
 
     _print_details_stage_note(f"подготовлен список бумаг: {len(secids)} SECID", stage_started_at=progress_anchor)
+    secid_set = set(secids)
+    incremental_target = sorted({secid for secid in (incremental_secids or []) if secid in secid_set})
+    if incremental_target:
+        _print_details_stage_note(
+            f"incremental режим: обновляем детали только для {len(incremental_target)} новых/изменённых бумаг",
+            stage_started_at=progress_anchor,
+        )
     _print_details_stage_note("precheck health details-endpoints", stage_started_at=progress_anchor)
     prechecked_endpoints = _precheck_details_endpoints_health(session, secids[0], logger)
     _print_details_stage_note(
@@ -1472,12 +1522,19 @@ def fetch_and_save_bond_details(
     endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {name: {} for name, _ in working_endpoints}
 
     pending_by_secid: dict[str, list[tuple[str, str]]] = {}
+    network_targets = set(incremental_target) if incremental_target else set(secids)
+    stale_cache_loaded = 0
     for secid in secids:
         missing_endpoints: list[tuple[str, str]] = []
         for endpoint_name, endpoint_url in working_endpoints:
             cached_record = _get_cached_endpoint_record(endpoint_name, secid)
+            if cached_record is None and secid not in network_targets:
+                cached_record = _get_latest_endpoint_record(endpoint_name, secid)
+                if cached_record is not None:
+                    stale_cache_loaded += 1
             if cached_record is None:
-                missing_endpoints.append((endpoint_name, endpoint_url))
+                if secid in network_targets:
+                    missing_endpoints.append((endpoint_name, endpoint_url))
                 continue
             cached_payload, fetched_at = cached_record
             blocks = _extract_blocks(cached_payload)
@@ -1490,7 +1547,7 @@ def fetch_and_save_bond_details(
         if missing_endpoints:
             pending_by_secid[secid] = missing_endpoints
     _print_details_stage_note(
-        f"подготовка задач завершена: сетевых SECID {len(pending_by_secid)}, кэшированных {len(secids) - len(pending_by_secid)}",
+        f"подготовка задач завершена: сетевых SECID {len(pending_by_secid)}, кэшированных {len(secids) - len(pending_by_secid)}, stale-cache {stale_cache_loaded}",
         stage_started_at=progress_anchor,
     )
 
@@ -1511,7 +1568,9 @@ def fetch_and_save_bond_details(
         last_heartbeat_at = progress_started_at
         pending_futures = set(futures)
         if total:
+            _print_details_stage_note(f"запуск сетевого пула: задач {total}, workers {details_worker_processes}", stage_started_at=stage_started_at or progress_started_at)
             _print_details_progress(0, total, None, stage_started_at=stage_started_at or progress_started_at)
+            _print_details_heartbeat(0, total, len(pending_futures), stage_started_at=stage_started_at or progress_started_at)
         else:
             print("   ↳ details: все данные взяты из кэша, сетевых запросов нет", flush=True)
         while pending_futures:
@@ -1833,14 +1892,18 @@ def _load_daily_csv_with_cache_fallback(session: requests.Session, logger: loggi
     return csv_data, data_source, today, fetch_duration_ms
 
 
-def _diff_bonds_against_previous_day(current_df: pd.DataFrame, export_date: str) -> tuple[list[str], list[str]]:
+def _diff_bonds_against_previous_day(current_df: pd.DataFrame, export_date: str) -> tuple[list[str], list[str], list[str], list[str]]:
     key_col = "ISIN" if "ISIN" in current_df.columns else ("SECID" if "SECID" in current_df.columns else None)
+    secid_col = "SECID" if "SECID" in current_df.columns else None
     if key_col is None:
-        return [], []
+        return [], [], [], []
 
     short_col = "SHORTNAME" if "SHORTNAME" in current_df.columns else None
     today_rows = {
-        str(row[key_col]).strip(): str(row.get(short_col, "")).strip()
+        str(row[key_col]).strip(): {
+            "name": str(row.get(short_col, "")).strip(),
+            "secid": str(row.get(secid_col, "")).strip() if secid_col else "",
+        }
         for _, row in current_df.iterrows()
         if str(row.get(key_col, "")).strip()
     }
@@ -1858,12 +1921,15 @@ def _diff_bonds_against_previous_day(current_df: pd.DataFrame, export_date: str)
         ).fetchone()
 
     if prev_row is None:
-        return sorted([f"{isin}, {name}" for isin, name in today_rows.items() if isin]), []
+        added_keys = sorted(today_rows)
+        added_lines = [f"{key}, {today_rows.get(key, {}).get('name', '')}" for key in added_keys]
+        added_secids = sorted({today_rows.get(key, {}).get("secid", "") for key in added_keys if today_rows.get(key, {}).get("secid", "")})
+        return added_secids, [], added_lines, []
 
     prev_df = parse_rates_csv(prev_row[0])
     prev_key_col = "ISIN" if "ISIN" in prev_df.columns else ("SECID" if "SECID" in prev_df.columns else None)
     if prev_key_col is None:
-        return [], []
+        return [], [], [], []
     prev_short_col = "SHORTNAME" if "SHORTNAME" in prev_df.columns else None
     prev_rows = {
         str(row[prev_key_col]).strip(): str(row.get(prev_short_col, "")).strip()
@@ -1873,12 +1939,13 @@ def _diff_bonds_against_previous_day(current_df: pd.DataFrame, export_date: str)
 
     added = sorted(set(today_rows) - set(prev_rows))
     removed = sorted(set(prev_rows) - set(today_rows))
-    added_lines = [f"{isin}, {today_rows.get(isin, '')}" for isin in added]
-    removed_lines = [f"{isin}, {prev_rows.get(isin, '')}" for isin in removed]
-    return added_lines, removed_lines
+    added_lines = [f"{key}, {today_rows.get(key, {}).get('name', '')}" for key in added]
+    removed_lines = [f"{key}, {prev_rows.get(key, '')}" for key in removed]
+    added_secids = sorted({today_rows.get(key, {}).get("secid", "") for key in added if today_rows.get(key, {}).get("secid", "")})
+    return added_secids, removed, added_lines, removed_lines
 
 
-def run_rates_ingest(session: requests.Session, logger: logging.Logger, run_id: str, debug: bool, stage_view: StageProgressView | None = None) -> tuple[pd.DataFrame, str, str]:
+def run_rates_ingest(session: requests.Session, logger: logging.Logger, run_id: str, debug: bool, stage_view: StageProgressView | None = None) -> tuple[pd.DataFrame, str, str, list[str]]:
     if stage_view is not None:
         stage_view.print_stage_start("fetch", 1)
     pipeline_started = stage_view.started_at if stage_view else time.perf_counter()
@@ -1901,21 +1968,32 @@ def run_rates_ingest(session: requests.Session, logger: logging.Logger, run_id: 
     if stage_view is not None:
         stage_view.print_stage_finish("parse", 2, parse_duration_ms)
 
-    added_lines, removed_lines = _diff_bonds_against_previous_day(dataframe, export_date)
+    added_secids, removed_keys, added_lines, removed_lines = _diff_bonds_against_previous_day(dataframe, export_date)
     logger.info("Добавлено %s облигаций", len(added_lines))
     for line in added_lines[:50]:
         logger.info("  + %s", line)
     logger.info("Погашено %s бумаг", len(removed_lines))
     for line in removed_lines[:50]:
         logger.info("  - %s", line)
+
+    print(f"CSV parse: строк {len(dataframe)}, добавлено {len(added_lines)}, удалено {len(removed_lines)}", flush=True)
+    if added_lines:
+        print("  + Добавленные бумаги (до 10):", flush=True)
+        for line in added_lines[:10]:
+            print(f"    + {line}", flush=True)
+    if removed_lines:
+        print("  - Удалённые бумаги (до 10):", flush=True)
+        for line in removed_lines[:10]:
+            print(f"    - {line}", flush=True)
     if not added_lines and not removed_lines:
         logger.info("Изменений по бумагам нет")
         print("Изменений по бумагам нет", flush=True)
 
-    return dataframe, data_source, export_date
+    incremental_secids = added_secids if (added_secids or removed_keys) else []
+    return dataframe, data_source, export_date, incremental_secids
 
 
-def run_details_enricher(dataframe: pd.DataFrame, session: requests.Session, logger: logging.Logger, run_id: str, source: str, export_date: str, details_worker_processes: int, debug: bool, stage_view: StageProgressView | None = None) -> tuple[int, int, int, int, Path]:
+def run_details_enricher(dataframe: pd.DataFrame, session: requests.Session, logger: logging.Logger, run_id: str, source: str, export_date: str, details_worker_processes: int, debug: bool, incremental_secids: list[str] | None = None, stage_view: StageProgressView | None = None) -> tuple[int, int, int, int, Path]:
     if stage_view is not None:
         stage_view.print_stage_start("details", 3)
     details_started_dt = datetime.now()
@@ -1928,6 +2006,7 @@ def run_details_enricher(dataframe: pd.DataFrame, session: requests.Session, log
         details_worker_processes=details_worker_processes,
         debug=debug,
         stage_started_at=time.perf_counter(),
+        incremental_secids=incremental_secids,
     )
     details_duration_ms = _save_sla_stage_timer(run_id, "details", details_started_dt, datetime.now(), "ok", source=source, details=f"secids={result[0]}")
     _check_sla_degradation("details", details_duration_ms, logger)
@@ -1945,6 +2024,7 @@ def run_quotes_snapshotter(session: requests.Session, logger: logging.Logger, ru
     dq_daily_report_path = _build_daily_dq_report(logger, report_day=date.today())
     _print_export_progress("снимок intraday-котировок", export_started_perf)
     intraday_rows, snapshot_at = _persist_intraday_quotes_snapshot(session, logger)
+    _refresh_bonds_read_model()
     try:
         _print_export_progress("чтение обогащённой витрины из SQLite", export_started_perf)
         with sqlite3.connect(CACHE_DB_PATH) as connection:
@@ -1995,7 +2075,7 @@ def main() -> int:
     logger.info("MOEX API script started")
 
     try:
-        dataframe, data_source, export_date = run_rates_ingest(session, logger, run_id=run_id, debug=args.debug, stage_view=stage_view)
+        dataframe, data_source, export_date, incremental_secids = run_rates_ingest(session, logger, run_id=run_id, debug=args.debug, stage_view=stage_view)
         secids_count, details_sheets, parquet_files, finish_rows, finish_batch_path = run_details_enricher(
             dataframe,
             session,
@@ -2005,6 +2085,7 @@ def main() -> int:
             export_date=export_date,
             details_worker_processes=details_worker_processes,
             debug=args.debug,
+            incremental_secids=incremental_secids,
             stage_view=stage_view,
         )
         dq_daily_report_path, intraday_rows = run_quotes_snapshotter(session, logger, run_id=run_id, source=data_source, stage_view=stage_view)
