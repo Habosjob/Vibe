@@ -98,3 +98,23 @@
 2026-02-16 14:38:19,130 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=bondization status=200 cache_hit=False rows=0
 2026-02-16 14:38:19,397 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe counters: orderbook_blocked_html=1
 2026-02-16 14:38:19,398 root INFO: Probe complete: out_dir=data\curated\moex\endpoints_probe\20260216 files_written=1 total_isins=1 orderbook_blocked_html=1
+2026-02-16 14:57:44,480 root INFO: Logging initialized: file=logs\moex_endpoints_probe_20260216.log level=INFO
+2026-02-16 14:57:44,554 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe started: isins=1 out_dir=data\curated\moex\endpoints_probe\20260216 from=2026-01-17 till=2026-02-16 interval=24
+2026-02-16 14:57:45,037 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=generic isin= status=200 elapsed_ms=463
+2026-02-16 14:57:45,042 vibe.ingest.moex_bonds_endpoints_probe INFO: Resolved board for RU0002868001: TQCB
+2026-02-16 14:57:45,414 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=securities isin=RU0002868001 status=200 elapsed_ms=371
+2026-02-16 14:57:45,421 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=securities status=200 cache_hit=False rows=0
+2026-02-16 14:57:45,794 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=marketdata isin=RU0002868001 status=200 elapsed_ms=371
+2026-02-16 14:57:45,809 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=marketdata status=200 cache_hit=False rows=1
+2026-02-16 14:57:46,194 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=history isin=RU0002868001 status=200 elapsed_ms=383
+2026-02-16 14:57:46,200 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=history status=200 cache_hit=False rows=1
+2026-02-16 14:57:46,568 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=candles isin=RU0002868001 status=200 elapsed_ms=365
+2026-02-16 14:57:46,572 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=candles status=200 cache_hit=False rows=0
+2026-02-16 14:57:47,292 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=trades isin=RU0002868001 status=200 elapsed_ms=719
+2026-02-16 14:57:47,302 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=trades status=200 cache_hit=False rows=1
+2026-02-16 14:57:47,660 vibe.data_sources.moex_bonds_endpoints WARNING: Fetch non-JSON response: endpoint=orderbook isin=RU0002868001 status=200 content_type=text/html url=https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQCB/securities/RU0002868001/orderbook.json final_url=https://iss.moex.com/iss/engines/stock/markets/bonds/boards/TQCB/securities/RU0002868001/orderbook.json response_head='<!DOCTYPE html>\n\n<html lang="en" xmlns="http://www.w3.org/1999/xhtml">\n<head>\n    <meta charset="utf-8" />\n    <title></title>\n    <style type="text/css">\n        body {\n        color: #636565;\n      '
+2026-02-16 14:57:47,662 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=orderbook status=200 cache_hit=False rows=0
+2026-02-16 14:57:48,020 vibe.data_sources.moex_bonds_endpoints INFO: Fetched endpoint=bondization isin=RU0002868001 status=200 elapsed_ms=357
+2026-02-16 14:57:48,028 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe worker=ThreadPoolExecutor-0_0 isin=RU0002868001 endpoint=bondization status=200 cache_hit=False rows=0
+2026-02-16 14:57:48,365 vibe.ingest.moex_bonds_endpoints_probe INFO: Probe counters: orderbook_blocked_html=1
+2026-02-16 14:57:48,366 root INFO: Probe complete: out_dir=data\curated\moex\endpoints_probe\20260216 run_dir=data\runs\moex_endpoints_probe\20260216_115744 files_written=1 total_isins=1 endpoints_checked=7 successful_endpoints=1 rows_effective_total=1 orderbook_blocked_html=1 results_xlsx=data\runs\moex_endpoints_probe\20260216_115744\results.xlsx results_json=data\runs\moex_endpoints_probe\20260216_115744\results.json results_csv=data\runs\moex_endpoints_probe\20260216_115744\results.csv

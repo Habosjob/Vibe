@@ -1,0 +1,8 @@
+isin,board,endpoint,status,reason,http_status,content_type,from_cache,elapsed_ms,rows_total,rows_effective,error
+RU000A,TQCB,orderbook,BLOCKED_HTML,html_instead_of_json,200,text/html,False,5,0,0,HTML_INSTEAD_OF_JSON
+RU000A,TQCB,marketdata,OK,,200,application/json,False,4,1,1,
+RU000A,TQCB,securities,OK,,200,application/json,False,4,1,1,
+RU000A,TQCB,history,OK,,200,application/json,False,4,1,1,
+RU000A,TQCB,candles,OK,,200,application/json,False,4,1,1,
+RU000A,TQCB,trades,OK,,200,application/json,False,4,1,1,
+RU000A,TQCB,bondization,OK,,200,application/json,False,4,1,1,
