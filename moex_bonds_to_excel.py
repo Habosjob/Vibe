@@ -23,7 +23,7 @@ MOEX_EMITTER_URL = "https://iss.moex.com/iss/emitters/{emitter_id}.json"
 
 OUTPUT_XLSX = "moex_bonds.xlsx"
 ENRICH_ENABLE = True
-ENRICH_LIMIT = 20
+ENRICH_LIMIT = 0
 ENRICH_SECIDS: list[str] = []
 CACHE_ENABLE = True
 CACHE_TTL_HOURS = 24
