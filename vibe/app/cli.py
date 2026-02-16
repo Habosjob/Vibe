@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     moex.add_argument("--retries", type=int, default=DEFAULT_HTTP_RETRIES)
     moex.add_argument("--max-print", type=int, default=DEFAULT_MAX_PRINT)
     moex.add_argument("--keep-id", choices=["ISIN", "SECID"], default=DEFAULT_KEEP_ID)
+    moex.add_argument("--keep-days", type=int, default=7)
     moex.add_argument("--no-cache", action="store_true", help="Bypass daily parquet cache and force download")
 
     probe = subparsers.add_parser(
@@ -51,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument("--seed", type=int, default=int(today.strftime("%Y%m%d")))
     probe.add_argument("--max-rows-per-sheet", type=int, default=200_000)
+    probe.add_argument("--keep-days", type=int, default=7)
     probe.add_argument("--timeout", type=int, default=DEFAULT_HTTP_TIMEOUT_SECONDS)
     probe.add_argument("--retries", type=int, default=DEFAULT_HTTP_RETRIES)
     probe.add_argument(
@@ -84,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
                 no_cache=args.no_cache,
                 max_print=args.max_print,
                 keep_id=args.keep_id,
+                keep_days=args.keep_days,
             )
             logging.info(
                 "Ingest complete: out=%s raw=%s rows=%s cols=%s",
@@ -113,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_rows_per_sheet=args.max_rows_per_sheet,
                 cache_dir=args.cache_dir,
                 use_cache=not args.no_cache,
+                keep_days=args.keep_days,
             )
             logging.info(
                 "Probe complete: out_dir=%s files_written=%s total_isins=%s orderbook_blocked_html=%s",

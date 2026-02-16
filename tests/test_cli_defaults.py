@@ -21,6 +21,7 @@ def test_cli_parser_accepts_command_without_out_and_raw() -> None:
 
     assert args.out is None
     assert args.raw is None
+    assert args.keep_days == 7
 
 
 def test_run_ingest_uses_default_paths_when_out_and_raw_are_none(tmp_path: Path, monkeypatch) -> None:
@@ -59,3 +60,4 @@ def test_cli_parser_probe_defaults() -> None:
     assert args.n_random == 10
     assert args.interval == 24
     assert args.max_rows_per_sheet == 200_000
+    assert args.keep_days == 7

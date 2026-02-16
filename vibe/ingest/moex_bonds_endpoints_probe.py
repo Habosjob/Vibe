@@ -105,22 +105,31 @@ def _pick_first_value(frame: pd.DataFrame, candidates: list[str]) -> Any | None:
     normalized = {str(col).upper(): col for col in frame.columns}
     if frame.empty:
         return None
-    row = frame.iloc[0]
+
     for candidate in candidates:
         column = normalized.get(candidate.upper())
         if column is None:
             continue
-        value = row.get(column)
-        if pd.notna(value):
-            return value
+        series = frame[column]
+        non_na = series[series.notna()]
+        if not non_na.empty:
+            return non_na.iloc[0]
     return None
 
 
 def _extract_top_of_book_from_marketdata(frame: pd.DataFrame) -> dict[str, Any] | None:
     if frame.empty:
         return None
-    bestbid = _pick_first_value(frame, ["BESTBID", "BID", "BIDPRICE"])
-    bestoffer = _pick_first_value(frame, ["BESTOFFER", "OFFER", "OFFERPRICE"])
+
+    marketdata_scope = frame
+    if "__table" in frame.columns:
+        table_names = frame["__table"].astype(str).str.lower()
+        scoped = frame[table_names.isin(["marketdata", "marketdata_yields"])]
+        if not scoped.empty:
+            marketdata_scope = scoped
+
+    bestbid = _pick_first_value(marketdata_scope, ["BESTBID", "BID", "BIDPRICE"])
+    bestoffer = _pick_first_value(marketdata_scope, ["BESTOFFER", "OFFER", "OFFERPRICE"])
     if bestbid is None and bestoffer is None:
         return None
 
@@ -130,8 +139,8 @@ def _extract_top_of_book_from_marketdata(frame: pd.DataFrame) -> dict[str, Any] 
     if pd.notna(bid_value) and pd.notna(offer_value):
         spread = float(offer_value - bid_value)
 
-    bid_depth = _pick_first_value(frame, ["BIDDEPTH", "NUMBIDS", "BIDQTY"])
-    offer_depth = _pick_first_value(frame, ["OFFERDEPTH", "NUMOFFERS", "OFFERQTY"])
+    bid_depth = _pick_first_value(marketdata_scope, ["BIDDEPTH", "NUMBIDS", "BIDQTY"])
+    offer_depth = _pick_first_value(marketdata_scope, ["OFFERDEPTH", "NUMOFFERS", "OFFERQTY"])
 
     return {
         "top_of_book_best_bid": bestbid,
@@ -232,13 +241,13 @@ def write_isin_workbook(
     try:
         with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
             for sheet_name, frame in endpoint_frames_map.items():
-                safe_name = sheet_name[:31]
+                safe_summary_name = f"{sheet_name}_summary"[:31]
+                safe_data_name = sheet_name[:31]
                 summary_df = endpoint_summaries_map[sheet_name]
-                summary_df.to_excel(writer, sheet_name=safe_name, index=False)
+                summary_df.to_excel(writer, sheet_name=safe_summary_name, index=False)
 
                 data_df = frame.head(max_rows_per_sheet)
-                if not data_df.empty:
-                    data_df.to_excel(writer, sheet_name=safe_name, index=False, startrow=len(summary_df) + 2)
+                data_df.to_excel(writer, sheet_name=safe_data_name, index=False)
 
             pd.DataFrame([meta]).to_excel(writer, sheet_name="meta", index=False)
         atomic_replace_with_retry(temp_path, out_path)
@@ -260,9 +269,10 @@ def run_probe(
     cache_dir: Path | None = None,
     use_cache: bool = True,
     max_workers: int = 4,
+    keep_days: int = 7,
 ) -> ProbeResult:
     ensure_parent_dir(out_dir / "placeholder")
-    cleanup_old_dirs(Path("data/curated/moex/endpoints_probe"), keep_days=7)
+    cleanup_old_dirs(Path("data/curated/moex/endpoints_probe"), keep_days=keep_days)
     logger.info(
         "Probe started: isins=%s out_dir=%s from=%s till=%s interval=%s",
         len(isins),
@@ -396,7 +406,7 @@ def run_probe(
         for written in executor.map(_process_isin, isins):
             files_written += written
 
-    cleanup_old_dirs(Path("data/curated/moex/endpoints_probe"), keep_days=7)
+    cleanup_old_dirs(Path("data/curated/moex/endpoints_probe"), keep_days=keep_days)
     logger.info("Probe counters: orderbook_blocked_html=%s", orderbook_blocked_html)
 
     return ProbeResult(
@@ -421,6 +431,7 @@ def run_probe_for_latest_bond_rates(
     max_rows_per_sheet: int = 200_000,
     cache_dir: Path | None = None,
     use_cache: bool = True,
+    keep_days: int = 7,
 ) -> ProbeResult:
     today = datetime.now(timezone.utc).date()
     from_date = from_date or (today - timedelta(days=30))
@@ -448,4 +459,5 @@ def run_probe_for_latest_bond_rates(
         max_rows_per_sheet=max_rows_per_sheet,
         cache_dir=cache_dir,
         use_cache=use_cache,
+        keep_days=keep_days,
     )
