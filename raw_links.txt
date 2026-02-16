@@ -41,6 +41,8 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_orderbook_html_c
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_orderbook_html_fallback.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_probe_writes_summary_for_empty.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_retention_cleanup.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_top_of_book_extraction.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_workbook_layout.py
 
 ------------------------------------------------------------
 Директория: vibe/
