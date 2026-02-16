@@ -61,3 +61,4 @@ def test_cli_parser_probe_defaults() -> None:
     assert args.interval == 24
     assert args.max_rows_per_sheet == 200_000
     assert args.keep_days == 7
+    assert args.capture is True
