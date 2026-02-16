@@ -16,6 +16,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/.gitkeep
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_endpoints_probe_20260215.log
+https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_endpoints_probe_20260216.log
 
 ------------------------------------------------------------
 Директория: tests/
@@ -35,6 +36,8 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_orderbook_h
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_probe_non_json.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_rates_parse.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_moex_resolve_board.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_orderbook_fallback_from_marketdata.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_orderbook_html_classification.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_orderbook_html_fallback.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_probe_writes_summary_for_empty.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_retention_cleanup.py
