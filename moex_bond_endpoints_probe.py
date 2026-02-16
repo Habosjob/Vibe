@@ -17,9 +17,8 @@ from typing import Any
 
 import pandas as pd
 import requests
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.table import Table, TableStyleInfo
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 REFERENCE_URL = "https://iss.moex.com/iss/reference"
 BASE_URL = "https://iss.moex.com"
@@ -77,6 +76,46 @@ def parse_security_endpoint_templates(reference_html: str) -> list[str]:
     deduped = sorted(set(templates))
     LOGGER.info("Найдено шаблонов endpoint с [security]: %s", len(deduped))
     return deduped
+
+
+def configure_session_retries(session: requests.Session) -> None:
+    retry = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        status=5,
+        backoff_factor=0.6,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+
+def fetch_reference_html(session: requests.Session) -> str:
+    last_exc: requests.RequestException | None = None
+    for attempt in range(1, 6):
+        try:
+            response = session.get(REFERENCE_URL, timeout=30)
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as exc:
+            last_exc = exc
+            wait_seconds = min(8, 2 ** (attempt - 1))
+            LOGGER.warning(
+                "Попытка %s/5 получить ISS reference не удалась: %s. Повтор через %s сек.",
+                attempt,
+                exc,
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        "Не удалось получить список endpoint'ов из ISS reference после 5 попыток. "
+        "Проверьте сеть/VPN/прокси и повторите запуск."
+    ) from last_exc
 
 
 def normalize_sheet_name(value: str, used_names: set[str]) -> str:
@@ -296,9 +335,10 @@ def main() -> None:
 
     with requests.Session() as session:
         session.headers.update({"User-Agent": "moex-bonds-endpoints-probe/1.0"})
+        configure_session_retries(session)
 
         LOGGER.info("Получаю список endpoint'ов из %s", REFERENCE_URL)
-        reference_html = session.get(REFERENCE_URL, timeout=30).text
+        reference_html = fetch_reference_html(session)
         templates = parse_security_endpoint_templates(reference_html)
 
         endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {}
