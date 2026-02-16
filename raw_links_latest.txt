@@ -14,46 +14,13 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
 ПОСЛЕДНИЕ LOG-ФАЙЛЫ PROBE:
 ============================================================
 
-https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_endpoints_probe_20260215.log
-https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_endpoints_probe_20260216.log
 
 ============================================================
 ПОСЛЕДНИЕ CACHE JSON (endpoint_probe):
 ============================================================
 
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e4215fa180d6fc36be9d47d4cf5dbc6fa931b37567548bd58c193bbd3f8a268a.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e46011c90642565fcca78af6167e8cfda8717fa5835e6147f6fc42babf2c759f.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e54fb0c202f15642eb516a67c405e58130daf43d154bda3c4c6de6e0275ee76b.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e563509ee59263ff9def25f23f5e55f5327c0b64f3c71a847f20d6273852ca77.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e6d3280dff856c562b373844212b505c981d0429f2506ec3921a81eef87bac42.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e77661b73819a2813ac1895380528de66f2b7e7ab30142c6a45d0a6fd4beaf35.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e7f4a6a8259f9fc79dcb4da8910a384c17e7ecb9a6ca2870b1cb0604654cc238.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e85bde1df1f096d1aebf414c02a84d873e974b7e52ba9565ac6b501d98064508.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e964920fa766ca53479d1cabb756dcecf5429672d72c96484113ede52b643016.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/ea022580106ce7ca459cc3b1fcf85221e2828e60e5e7660ed7f1e75e031126da.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/eccabf89d34d76d20a6e6966b18cba4da75a95246616e6e8bde3f1434034f52d.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/ed94e25cd9a0ce078698bef1af3ae09f024b0855d33a77a47c298f2f77af5417.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/efeaed23f013f3e5eb42c24fbb588fa2481199e3d141744f00ad61254a8e33f6.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/f24dd18f039aa2436aed24ee1b5de0f90a1c135cbed4e502fcb1648e894ca38b.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/f34ccd5b64f2c80279373725300f8e941a854ef61ccdc5a7c3c5dec9ba3883be.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/f4e4b7d1fb71aa9eca9ea3c8cd0f416e0b6a234b55873edc1f89ce20700e20c4.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/f57e604c3a93a42bad1b17ef58423e020bcede551b5cf9fea49d6bbbcbdf2a3b.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/f89438e00ac690717f1ab0d4e40717687bb61a6b86d02575bd1dc2adf3931664.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/f8a70c072e3123b4db900dc29b2038849a173ea727208935826a34a21321a427.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/fbb6eea4ab9f84d1d0ede560217f51d0041591db5d73bb122bd0d8069884d44b.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/fcd4c1983bffc29d8221e7b742c8edddee2e30d5bfa142f9a37645c4dfb0a53a.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/ff8bf0e68ff6c6ecc993e4b9a38513eb450a231b86dd1ea1b5a4ef60bdbc2fdb.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/126ff68f59d725182e2415b0ac112067603f821a83a58bcf6ff51c57970aa88c.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/31c78f239dc04e979547f1711dd688303572a8531c5f44c8fe03d31ed0011bf1.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/36ff5a83c2864caa5bd851835c005a08c24106a1a5b27e33a381f39bd8e7511f.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/6a6b8461bfa673e9241e6674157e9a5d1dc688bcc7515aca8071b6be4fe9c153.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/9f63a82c1ef57efb4def26a0831eef1f0e3258d9a8b4bd5c86e6949784e93f92.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/ac72a8f9f788155589ac123ee2aad0db2565ec639117a99616e408bdff342847.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/e563509ee59263ff9def25f23f5e55f5327c0b64f3c71a847f20d6273852ca77.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/f2a8c2fa9298774f8bb94de34ed12310c3ea0102497ca4f8119e5ef3b5f2978f.json
 
 ============================================================
 ПОСЛЕДНИЕ CURATED XLSX (endpoints_probe):
 ============================================================
 
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/curated/moex/endpoints_probe/20260216/RU0002868001.xlsx
