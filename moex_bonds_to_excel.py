@@ -138,7 +138,6 @@ def save_to_excel(df: pd.DataFrame, output_path: Path) -> None:
         worksheet = writer.sheets["MOEX_BONDS"]
 
         worksheet.freeze_panes = "A2"
-        worksheet.auto_filter.ref = worksheet.dimensions
         worksheet.sheet_view.zoomScale = 110
         worksheet.row_dimensions[1].height = 22
 
