@@ -130,12 +130,21 @@ def _extract_top_of_book_from_marketdata(frame: pd.DataFrame) -> dict[str, Any] 
     if pd.notna(bid_value) and pd.notna(offer_value):
         spread = float(offer_value - bid_value)
 
+    bid_depth = _pick_first_value(frame, ["BIDDEPTH", "NUMBIDS", "BIDQTY"])
+    offer_depth = _pick_first_value(frame, ["OFFERDEPTH", "NUMOFFERS", "OFFERQTY"])
+
     return {
+        "top_of_book_best_bid": bestbid,
+        "top_of_book_best_offer": bestoffer,
+        "top_of_book_spread": spread,
+        "top_of_book_bid_depth": bid_depth,
+        "top_of_book_offer_depth": offer_depth,
+        # Backward-compatible aliases for existing consumers.
         "bestbid": bestbid,
         "bestoffer": bestoffer,
         "spread": spread,
-        "biddepth": _pick_first_value(frame, ["BIDDEPTH", "NUMBIDS", "BIDQTY"]),
-        "offerdepth": _pick_first_value(frame, ["OFFERDEPTH", "NUMOFFERS", "OFFERQTY"]),
+        "biddepth": bid_depth,
+        "offerdepth": offer_depth,
     }
 
 
