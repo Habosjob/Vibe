@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -62,9 +64,56 @@ COLUMN_WIDTHS = {
 
 CENTER_COLUMNS = {"BOARDID", "LISTLEVEL", "FACEUNIT", "STATUS", "TRADINGSTATUS", "MATDATE"}
 
+COLUMN_DESCRIPTIONS = {
+    "SECID": "Уникальный тикер (код) облигации на MOEX.",
+    "ISIN": "Международный идентификационный номер ценной бумаги.",
+    "SHORTNAME": "Краткое наименование облигации.",
+    "SECNAME": "Полное наименование облигации.",
+    "BOARDID": "Идентификатор торгового режима (доски торгов).",
+    "REGNUMBER": "Регистрационный номер выпуска облигации.",
+    "LISTLEVEL": "Уровень листинга на бирже.",
+    "FACEVALUE": "Номинальная стоимость облигации.",
+    "FACEUNIT": "Валюта номинальной стоимости.",
+    "COUPONVALUE": "Размер купонной выплаты за период.",
+    "COUPONPERIOD": "Периодичность купона в днях.",
+    "MATDATE": "Дата погашения облигации.",
+    "STATUS": "Статус инструмента (например, A — активен).",
+    "TRADINGSTATUS": "Текущий торговый статус по рыночным данным.",
+    "LAST": "Последняя цена сделки.",
+    "WAPRICE": "Средневзвешенная цена.",
+    "YIELD": "Доходность, рассчитанная по рыночным данным.",
+    "VALUE": "Общий объем торгов в штуках/лотах по данным ISS.",
+    "VOLRUR": "Объем торгов в рублях.",
+    "NUMTRADES": "Количество сделок за сессию.",
+}
 
-def fetch_moex_bonds(session: requests.Session) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Получает данные по облигациям и рыночным котировкам из ISS MOEX."""
+
+def load_payload_from_cache(cache_file: Path, cache_ttl_seconds: int) -> dict[str, Any] | None:
+    """Возвращает кэшированный payload, если кэш существует и не устарел."""
+    if not cache_file.exists():
+        return None
+
+    cache_age_seconds = time.time() - cache_file.stat().st_mtime
+    if cache_age_seconds > cache_ttl_seconds:
+        return None
+
+    with cache_file.open("r", encoding="utf-8") as cache_handle:
+        return json.load(cache_handle)
+
+
+def save_payload_to_cache(cache_file: Path, payload: dict[str, Any]) -> None:
+    """Сохраняет payload ответа ISS MOEX в локальный кэш-файл."""
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    with cache_file.open("w", encoding="utf-8") as cache_handle:
+        json.dump(payload, cache_handle, ensure_ascii=False)
+
+
+def fetch_moex_bonds(
+    session: requests.Session,
+    cache_file: Path,
+    cache_ttl_seconds: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Получает данные по облигациям и рыночным котировкам из ISS MOEX (с кэшированием)."""
     params = {
         "iss.meta": "off",
         "iss.only": "securities,marketdata",
@@ -74,9 +123,15 @@ def fetch_moex_bonds(session: requests.Session) -> tuple[pd.DataFrame, pd.DataFr
         ),
         "marketdata.columns": "SECID,LAST,WAPRICE,YIELD,VALUE,VOLRUR,NUMTRADES,TRADINGSTATUS",
     }
-    response = session.get(MOEX_BONDS_URL, params=params, timeout=30)
-    response.raise_for_status()
-    payload: dict[str, Any] = response.json()
+    payload = load_payload_from_cache(cache_file=cache_file, cache_ttl_seconds=cache_ttl_seconds)
+    source = "cache"
+
+    if payload is None:
+        response = session.get(MOEX_BONDS_URL, params=params, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+        save_payload_to_cache(cache_file=cache_file, payload=payload)
+        source = "api"
 
     securities = pd.DataFrame(
         payload["securities"]["data"],
@@ -86,7 +141,7 @@ def fetch_moex_bonds(session: requests.Session) -> tuple[pd.DataFrame, pd.DataFr
         payload["marketdata"]["data"],
         columns=payload["marketdata"]["columns"],
     )
-    return securities, marketdata
+    return securities, marketdata, source
 
 
 def build_report_dataframe(
@@ -179,6 +234,37 @@ def save_to_excel(df: pd.DataFrame, output_path: Path) -> None:
             )
             worksheet.add_table(table)
 
+        docs_sheet = writer.book.create_sheet(title="COLUMN_DOCS")
+        docs_sheet.append(["COLUMN_NAME", "DESCRIPTION_RU"])
+        for column_name in df.columns:
+            docs_sheet.append([column_name, COLUMN_DESCRIPTIONS.get(column_name, "Описание не задано")])
+
+        docs_sheet.freeze_panes = "A2"
+        docs_sheet.column_dimensions["A"].width = 20
+        docs_sheet.column_dimensions["B"].width = 90
+
+        for cell in docs_sheet[1]:
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = BORDER
+
+        for row in docs_sheet.iter_rows(min_row=2, max_row=docs_sheet.max_row, min_col=1, max_col=2):
+            for cell in row:
+                cell.border = BORDER
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+        if docs_sheet.max_row >= 2:
+            docs_table = Table(displayName="MOEX_BONDS_COLUMN_DOCS", ref=docs_sheet.dimensions)
+            docs_table.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium2",
+                showFirstColumn=False,
+                showLastColumn=False,
+                showRowStripes=True,
+                showColumnStripes=False,
+            )
+            docs_sheet.add_table(docs_table)
+
 
 def log_step(message: str) -> None:
     """Печатает этап выполнения скрипта с текущим временем."""
@@ -202,19 +288,36 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Добавить неактивные инструменты (по умолчанию выгружаются только STATUS=A)",
     )
+    parser.add_argument(
+        "--cache-file",
+        type=Path,
+        default=Path(".cache/moex_bonds_payload.json"),
+        help="Путь до файла кэша JSON (по умолчанию: .cache/moex_bonds_payload.json)",
+    )
+    parser.add_argument(
+        "--cache-ttl",
+        type=int,
+        default=900,
+        help="Срок жизни кэша в секундах (по умолчанию: 900)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
+    started_at = time.perf_counter()
     args = parse_args()
     log_step("Запускаю выгрузку облигаций MOEX...")
 
     with requests.Session() as session:
         session.headers.update({"User-Agent": "moex-bonds-export-script/1.0"})
         log_step("Отправляю запрос к ISS MOEX...")
-        securities, marketdata = fetch_moex_bonds(session)
+        securities, marketdata, source = fetch_moex_bonds(
+            session=session,
+            cache_file=args.cache_file,
+            cache_ttl_seconds=args.cache_ttl,
+        )
         log_step(
-            f"Данные получены: securities={len(securities)}, marketdata={len(marketdata)}."
+            f"Данные получены ({source}): securities={len(securities)}, marketdata={len(marketdata)}."
         )
 
     log_step("Формирую итоговую таблицу...")
@@ -229,6 +332,8 @@ def main() -> None:
 
     log_step(f"Готово. Сохранено строк: {len(report)}")
     log_step(f"Файл: {args.output.resolve()}")
+    total_seconds = time.perf_counter() - started_at
+    log_step(f"Общее время выполнения: {total_seconds:.2f} сек.")
 
 
 if __name__ == "__main__":
