@@ -11,6 +11,7 @@ import pandas as pd
 from vibe.data_sources.moex_iss import MOEXBondRatesClient
 from vibe.storage.excel import write_dataframe_to_excel_atomic
 from vibe.utils.fs import ensure_parent_dir, write_bytes_atomic
+from vibe.utils.retention import cleanup_old_files
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +263,7 @@ def run_moex_bond_rates_ingest(
     no_cache: bool = False,
     max_print: int = DEFAULT_MAX_PRINT,
     keep_id: str = DEFAULT_KEEP_ID,
+    keep_days: int = 7,
 ) -> IngestResult:
     out_xlsx, raw_csv = _resolve_ingest_paths(out_xlsx, raw_csv)
     date_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -306,6 +308,9 @@ def run_moex_bond_rates_ingest(
         "sha256_raw_csv": sha256_raw_csv,
     }
     write_dataframe_to_excel_atomic(df=df, out_path=out_xlsx, sheet_name="rates", meta=meta)
+
+    cleanup_old_files(DEFAULT_RAW_DIR, keep_days, r"bond_rates_(\d{8})\.csv")
+    cleanup_old_files(DEFAULT_OUT_XLSX.parent, keep_days, r"bond_rates_(\d{8})\.parquet")
 
     return IngestResult(
         out_xlsx=out_xlsx,
