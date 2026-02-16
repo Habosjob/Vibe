@@ -17,11 +17,63 @@ from typing import Any
 
 import pandas as pd
 import requests
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 REFERENCE_URL = "https://iss.moex.com/iss/reference"
 BASE_URL = "https://iss.moex.com"
 
 LOGGER = logging.getLogger("moex_bond_endpoints_probe")
+
+HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+HEADER_FONT = Font(color="FFFFFF", bold=True)
+BORDER = Border(
+    left=Side(style="thin", color="D9D9D9"),
+    right=Side(style="thin", color="D9D9D9"),
+    top=Side(style="thin", color="D9D9D9"),
+    bottom=Side(style="thin", color="D9D9D9"),
+)
+
+TARGET_ENDPOINT_SLUG = "iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security"
+TARGET_ENDPOINT_DROP_COLUMNS = {
+    "BOARDID",
+    "BOARDNAME",
+    "SECNAME",
+    "ISIN",
+    "LATNAME",
+    "REGNUMBER",
+    "LISTLEVEL",
+}
+
+COLUMN_DESCRIPTIONS: dict[str, str] = {
+    "SECID": "Код финансового инструмента (ценной бумаги) в ISS MOEX.",
+    "BOARDID": "Идентификатор торгового режима/доски.",
+    "BOARDNAME": "Название торгового режима/доски.",
+    "SECNAME": "Краткое наименование бумаги.",
+    "ISIN": "Международный идентификационный код ценной бумаги.",
+    "LATNAME": "Название бумаги латиницей.",
+    "REGNUMBER": "Регистрационный номер выпуска.",
+    "LISTLEVEL": "Уровень листинга MOEX.",
+    "SHORTNAME": "Сокращённое имя инструмента.",
+    "PREVPRICE": "Предыдущая цена закрытия.",
+    "LOTSIZE": "Размер стандартного лота.",
+    "FACEVALUE": "Номинальная стоимость бумаги.",
+    "STATUS": "Статус инструмента (например, A — активен).",
+    "BOARD_GROUP_ID": "Идентификатор группы торговых режимов.",
+    "MARKETCODE": "Код рынка.",
+    "INSTRID": "Тип/класс инструмента.",
+    "SECTORID": "Идентификатор сектора торгов.",
+    "PREVWAPRICE": "Предыдущая средневзвешенная цена.",
+    "YIELDATPREVWAPRICE": "Доходность на базе предыдущей средневзвешенной цены.",
+    "COUPONVALUE": "Размер купона за период.",
+    "NEXTCOUPON": "Дата следующей купонной выплаты.",
+    "ACCRUEDINT": "Накопленный купонный доход (НКД).",
+    "PREVLEGALCLOSEPRICE": "Предыдущая официальная цена закрытия.",
+    "PREVADMITTEDQUOTE": "Предыдущая признанная котировка.",
+    "CURRENCYID": "Код валюты расчётов.",
+    "REQUEST_URL": "URL endpoint ISS, откуда получены данные.",
+}
 
 
 def setup_logging(log_file: Path, level: str) -> None:
@@ -172,21 +224,20 @@ def fetch_json_with_cache(
         if response.status_code != 200:
             LOGGER.debug("Пропуск endpoint %s: HTTP %s", response.url, response.status_code)
             return None, f"http_{response.status_code}"
-
-        payload = response.json()
-        with cache_file.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False)
-        return payload, "api"
-    except JSONDecodeError:
-        LOGGER.debug(
-            "Endpoint вернул не-JSON %s (content-type=%s)",
-            response.url if "response" in locals() else url,
-            response.headers.get("Content-Type", "") if "response" in locals() else "",
-        )
-        return None, "non_json"
     except requests.RequestException as exc:
         LOGGER.warning("Ошибка запроса %s: %s", url, exc)
         return None, "error"
+
+    try:
+        payload = response.json()
+    except (JSONDecodeError, ValueError):
+        content_type = response.headers.get("Content-Type", "")
+        LOGGER.debug("Endpoint вернул не-JSON %s (content-type=%s)", response.url, content_type)
+        return None, "non_json"
+
+    with cache_file.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+    return payload, "api"
 
 
 def payload_to_frames(payload: dict[str, Any], secid: str, request_url: str) -> dict[str, pd.DataFrame]:
@@ -207,14 +258,113 @@ def payload_to_frames(payload: dict[str, Any], secid: str, request_url: str) -> 
     return frames
 
 
+def drop_unwanted_columns_for_endpoint(endpoint_slug: str, frame: pd.DataFrame) -> pd.DataFrame:
+    if endpoint_slug != TARGET_ENDPOINT_SLUG:
+        return frame
+    filtered = frame.drop(columns=[col for col in TARGET_ENDPOINT_DROP_COLUMNS if col in frame.columns], errors="ignore")
+    return filtered
+
+
+def estimate_column_width(series: pd.Series, column_name: str) -> int:
+    samples = [column_name]
+    samples.extend(str(value) for value in series.dropna().head(250).tolist())
+    max_len = max((len(value) for value in samples), default=10)
+    return max(10, min(max_len + 2, 60))
+
+
+def style_endpoint_worksheet(worksheet, frame: pd.DataFrame, table_name: str) -> None:
+    worksheet.freeze_panes = "A2"
+    worksheet.sheet_view.zoomScale = 110
+    worksheet.row_dimensions[1].height = 22
+
+    for idx, column_name in enumerate(frame.columns, start=1):
+        column_letter = get_column_letter(idx)
+        header_cell = worksheet.cell(row=1, column=idx)
+        header_cell.fill = HEADER_FILL
+        header_cell.font = HEADER_FONT
+        header_cell.border = BORDER
+        header_cell.alignment = Alignment(horizontal="center", vertical="center")
+        worksheet.column_dimensions[column_letter].width = estimate_column_width(frame[column_name], column_name)
+
+    for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
+        for cell in row:
+            cell.border = BORDER
+            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+
+    if worksheet.max_row >= 2 and worksheet.max_column >= 1:
+        table = Table(displayName=table_name, ref=worksheet.dimensions)
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        worksheet.add_table(table)
+
+
+def add_column_docs_sheet(writer: pd.ExcelWriter, frames: dict[str, pd.DataFrame]) -> None:
+    docs_sheet = writer.book.create_sheet(title="COLUMN_DOCS")
+    docs_sheet.append(["SHEET_NAME", "COLUMN_NAME", "DESCRIPTION_RU"])
+
+    for sheet_name, frame in frames.items():
+        for column_name in frame.columns:
+            docs_sheet.append([
+                sheet_name,
+                column_name,
+                COLUMN_DESCRIPTIONS.get(column_name, "Описание не задано"),
+            ])
+
+    docs_sheet.freeze_panes = "A2"
+    docs_sheet.sheet_view.zoomScale = 110
+    docs_sheet.column_dimensions["A"].width = 32
+    docs_sheet.column_dimensions["B"].width = 26
+    docs_sheet.column_dimensions["C"].width = 90
+
+    for cell in docs_sheet[1]:
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.border = BORDER
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for row in docs_sheet.iter_rows(min_row=2, max_row=docs_sheet.max_row, min_col=1, max_col=3):
+        for cell in row:
+            cell.border = BORDER
+            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    if docs_sheet.max_row >= 2:
+        docs_table = Table(displayName="ENDPOINT_COLUMN_DOCS", ref=docs_sheet.dimensions)
+        docs_table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        docs_sheet.add_table(docs_table)
+
+
 def save_endpoint_workbook(endpoint_slug: str, frames: dict[str, pd.DataFrame], output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{endpoint_slug}.xlsx"
     used_sheet_names: set[str] = set()
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        rendered_frames: dict[str, pd.DataFrame] = {}
         for sheet_raw_name, frame in frames.items():
+            prepared_frame = drop_unwanted_columns_for_endpoint(endpoint_slug, frame)
             sheet_name = normalize_sheet_name(sheet_raw_name, used_sheet_names)
-            frame.to_excel(writer, index=False, sheet_name=sheet_name)
+            prepared_frame.to_excel(writer, index=False, sheet_name=sheet_name)
+            rendered_frames[sheet_name] = prepared_frame
+
+        for idx, (sheet_name, frame) in enumerate(rendered_frames.items(), start=1):
+            worksheet = writer.sheets[sheet_name]
+            table_name = f"TBL_{idx:02d}_{endpoint_slug[:18]}"
+            table_name = re.sub(r"[^A-Za-z0-9_]", "_", table_name)[:31]
+            style_endpoint_worksheet(worksheet=worksheet, frame=frame, table_name=table_name)
+
+        add_column_docs_sheet(writer, rendered_frames)
+
     return output_path
 
 
