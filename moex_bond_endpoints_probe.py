@@ -10,6 +10,8 @@ import logging
 import random
 import re
 import time
+import warnings
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +177,13 @@ def fetch_json_with_cache(
         with cache_file.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False)
         return payload, "api"
+    except JSONDecodeError:
+        LOGGER.debug(
+            "Endpoint вернул не-JSON %s (content-type=%s)",
+            response.url if "response" in locals() else url,
+            response.headers.get("Content-Type", "") if "response" in locals() else "",
+        )
+        return None, "non_json"
     except requests.RequestException as exc:
         LOGGER.warning("Ошибка запроса %s: %s", url, exc)
         return None, "error"
@@ -209,9 +218,17 @@ def save_endpoint_workbook(endpoint_slug: str, frames: dict[str, pd.DataFrame], 
     return output_path
 
 
-def endpoint_slug_from_url(url: str) -> str:
-    slug = url.replace(BASE_URL, "").strip("/")
-    slug = slug.replace(".json", "")
+
+def endpoint_slug_from_template(template: str) -> str:
+    slug = template.strip("/")
+    slug = (
+        slug.replace("[engine]", "engine")
+        .replace("[market]", "market")
+        .replace("[security]", "security")
+        .replace("[board]", "board")
+        .replace("[boardgroup]", "boardgroup")
+        .replace("[session]", "session")
+    )
     slug = re.sub(r"[^a-zA-Z0-9_\-/]+", "_", slug)
     slug = slug.replace("/", "__")
     return slug[:180]
@@ -231,6 +248,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    started_at = time.perf_counter()
     args = parse_args()
     setup_logging(args.log_file, args.log_level)
 
@@ -252,59 +270,79 @@ def main() -> None:
         reference_html = session.get(REFERENCE_URL, timeout=30).text
         templates = parse_security_endpoint_templates(reference_html)
 
-        endpoint_frames: dict[str, dict[str, pd.DataFrame]] = {}
-        stats = {"api": 0, "cache": 0, "errors": 0}
+        endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {}
+        stats = {"api": 0, "cache": 0, "non_json": 0, "http_skipped": 0, "errors": 0}
 
         for secid in selected_secids:
             LOGGER.info("Обрабатываю SECID=%s", secid)
             context = build_context_for_secid(session=session, secid=secid)
             LOGGER.debug("Контекст SECID=%s: %s", secid, context)
 
-            secid_urls: set[str] = set()
+            secid_urls_total = 0
             for template in templates:
-                for url in instantiate_endpoints(template=template, secid=secid, context=context):
-                    secid_urls.add(url)
+                endpoint_slug = endpoint_slug_from_template(template)
+                urls = instantiate_endpoints(template=template, secid=secid, context=context)
+                secid_urls_total += len(urls)
 
-            LOGGER.info("SECID=%s: сформировано endpoint URL: %s", secid, len(secid_urls))
+                for url in urls:
+                    params = {"iss.meta": "off", "limit": 100}
+                    payload, source = fetch_json_with_cache(
+                        session=session,
+                        url=url,
+                        params=params,
+                        cache_dir=args.cache_dir,
+                        cache_ttl=args.cache_ttl,
+                    )
 
-            for url in sorted(secid_urls):
-                params = {"iss.meta": "off", "limit": 100}
-                payload, source = fetch_json_with_cache(
-                    session=session,
-                    url=url,
-                    params=params,
-                    cache_dir=args.cache_dir,
-                    cache_ttl=args.cache_ttl,
-                )
+                    if payload is None:
+                        if source == "non_json":
+                            stats["non_json"] += 1
+                        elif source.startswith("http_"):
+                            stats["http_skipped"] += 1
+                        else:
+                            stats["errors"] += 1
+                        continue
 
-                if payload is None:
-                    stats["errors"] += 1
-                    continue
+                    stats[source] += 1
+                    frames = payload_to_frames(payload=payload, secid=secid, request_url=url)
+                    if not frames:
+                        continue
 
-                stats[source] += 1
-                endpoint_slug = endpoint_slug_from_url(url)
-                frames = payload_to_frames(payload=payload, secid=secid, request_url=url)
-                if not frames:
-                    continue
+                    endpoint_frames.setdefault(endpoint_slug, {})
+                    for block_name, frame in frames.items():
+                        endpoint_frames[endpoint_slug].setdefault(block_name, []).append(frame)
 
-                endpoint_frames.setdefault(endpoint_slug, {})
-                for block_name, frame in frames.items():
-                    sheet_key = f"{secid}_{block_name}"
-                    endpoint_frames[endpoint_slug][sheet_key] = frame
+            LOGGER.info("SECID=%s: сформировано endpoint URL: %s", secid, secid_urls_total)
 
         LOGGER.info(
-            "Статистика запросов: api=%s cache=%s errors=%s",
+            "Статистика запросов: api=%s cache=%s non_json=%s http_skipped=%s errors=%s",
             stats["api"],
             stats["cache"],
+            stats["non_json"],
+            stats["http_skipped"],
             stats["errors"],
         )
 
-        LOGGER.info("Сохраняю Excel по каждому endpoint в %s", args.output_dir)
-        for endpoint_slug, sheets in endpoint_frames.items():
+        LOGGER.info("Сохраняю Excel по endpoint-шаблонам в %s", args.output_dir)
+        for endpoint_slug, blocks in endpoint_frames.items():
+            sheets: dict[str, pd.DataFrame] = {}
+            for block_name, frames in blocks.items():
+                non_empty_frames = [
+                    frame for frame in frames if not frame.empty and not frame.dropna(how="all").empty
+                ]
+                frames_for_concat = non_empty_frames or frames
+                if len(frames_for_concat) == 1:
+                    sheets[block_name] = frames_for_concat[0].copy()
+                else:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", FutureWarning)
+                        sheets[block_name] = pd.concat(frames_for_concat, ignore_index=True)
             output_path = save_endpoint_workbook(endpoint_slug=endpoint_slug, frames=sheets, output_dir=args.output_dir)
             LOGGER.info("Сохранён endpoint Excel: %s (листов=%s)", output_path, len(sheets))
 
+    total_seconds = time.perf_counter() - started_at
     LOGGER.info("Готово. Всего endpoint Excel: %s", len(endpoint_frames))
+    LOGGER.info("Общее время выполнения: %.2f сек.", total_seconds)
 
 
 if __name__ == "__main__":
