@@ -214,3 +214,7 @@
 2026-02-16 17:45:10,816 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__statistics__engines__stock__splits__security.xlsx (листов=1)
 2026-02-16 17:45:10,819 | INFO | Готово. Всего endpoint Excel: 33
 2026-02-16 17:45:10,819 | INFO | Общее время выполнения: 61.45 сек.
+2026-02-16 18:09:51,987 | INFO | Читаю SECID из moex_bonds.xlsx
+2026-02-16 18:09:52,799 | INFO | Найдено уникальных SECID: 2242
+2026-02-16 18:09:52,801 | INFO | Выбранные SECID на период отладки: ['SU26238RMFS4', 'RU000A1041Q0']
+2026-02-16 18:09:52,801 | INFO | Получаю список endpoint'ов из https://iss.moex.com/iss/reference
