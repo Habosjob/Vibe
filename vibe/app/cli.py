@@ -126,12 +126,29 @@ def main(argv: list[str] | None = None) -> int:
                 keep_days=args.keep_days,
             )
             logging.info(
-                "Probe complete: out_dir=%s files_written=%s total_isins=%s orderbook_blocked_html=%s",
+                "Probe complete: out_dir=%s run_dir=%s files_written=%s total_isins=%s endpoints_checked=%s successful_endpoints=%s rows_effective_total=%s orderbook_blocked_html=%s results_xlsx=%s results_json=%s results_csv=%s",
                 result.output_dir,
+                result.run_dir,
                 result.files_written,
                 result.total_isins,
+                result.endpoints_checked,
+                result.successful_endpoints,
+                result.rows_effective_total,
                 result.orderbook_blocked_html,
+                result.results_xlsx,
+                result.results_json,
+                result.results_csv,
             )
+            if result.rows_effective_total == 0:
+                logging.warning(
+                    "Probe produced 0 effective rows: endpoints_checked=%s successful=%s http_errors=%s parse_errors=%s filtered_out=%s artifacts=%s",
+                    result.endpoints_checked,
+                    result.successful_endpoints,
+                    result.http_errors,
+                    result.parse_errors,
+                    result.filtered_out,
+                    result.run_dir,
+                )
             return 0
         except Exception:
             logging.exception("MOEX endpoints probe failed")
