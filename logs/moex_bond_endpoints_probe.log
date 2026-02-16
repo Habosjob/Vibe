@@ -311,3 +311,17 @@
 2026-02-16 18:30:15,570 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__statistics__engines__stock__splits__security.xlsx (листов=1)
 2026-02-16 18:30:15,571 | INFO | Готово. Всего endpoint Excel: 33
 2026-02-16 18:30:15,572 | INFO | Общее время выполнения: 36.98 сек.
+2026-02-16 19:21:59,075 | INFO | Читаю SECID из moex_bonds.xlsx
+2026-02-16 19:22:00,282 | INFO | Найдено уникальных SECID: 2242
+2026-02-16 19:22:00,282 | INFO | DEBUG_MODE=True, выбраны SECID: ['SU26238RMFS4', 'RU000A1041Q0']
+2026-02-16 19:22:00,282 | INFO | Curated endpoint'ов: 13
+2026-02-16 19:22:01,206 | WARNING | Retrying (Retry(total=4, connect=5, read=4, redirect=None, status=5)) after connection broken by 'ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None)': /iss/engines/stock/markets/bonds/boards.json?iss.meta=off&limit=100
+2026-02-16 19:22:01,206 | WARNING | Retrying (Retry(total=4, connect=5, read=4, redirect=None, status=5)) after connection broken by 'ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None)': /iss/engines/stock/markets/bonds/securities/SU26238RMFS4/candles.json?iss.meta=off&limit=100
+2026-02-16 19:22:01,216 | WARNING | Retrying (Retry(total=4, connect=5, read=4, redirect=None, status=5)) after connection broken by 'ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None)': /iss/engines/stock/markets/bonds/securities/SU26238RMFS4.json?iss.meta=off&limit=100
+2026-02-16 19:22:01,217 | WARNING | Retrying (Retry(total=4, connect=5, read=4, redirect=None, status=5)) after connection broken by 'ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None)': /iss/history/engines/stock/markets/bonds/yields/SU26238RMFS4.json?iss.meta=off&limit=100
+2026-02-16 19:22:01,245 | WARNING | Retrying (Retry(total=4, connect=5, read=4, redirect=None, status=5)) after connection broken by 'ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None)': /iss/securities/SU26238RMFS4/bondization.json?iss.meta=off&limit=100
+2026-02-16 19:22:01,255 | WARNING | Retrying (Retry(total=4, connect=5, read=4, redirect=None, status=5)) after connection broken by 'ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None)': /iss/history/engines/stock/markets/bonds/securities/SU26238RMFS4.json?iss.meta=off&limit=100
+2026-02-16 19:22:01,259 | WARNING | Retrying (Retry(total=4, connect=5, read=4, redirect=None, status=5)) after connection broken by 'ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None)': /iss/securities/SU26238RMFS4.json?iss.meta=on&limit=100&iss.only=securities%2Cdescription%2Cboards
+2026-02-16 19:22:16,276 | INFO | Сохранён файл инвентаризации: data\raw\moex\bonds_probe\2026-02-16\bonds_probe.xlsx
+2026-02-16 19:22:16,278 | INFO | Статусы: {'OK': 23, 'BLOCKED_HTML': 2, 'NO_DATA': 1}
+2026-02-16 19:22:16,278 | INFO | Готово за 17.20 сек. Файл: data\raw\moex\bonds_probe\2026-02-16\bonds_probe.xlsx
