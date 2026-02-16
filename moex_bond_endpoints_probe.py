@@ -277,6 +277,7 @@ def save_endpoint_workbook(endpoint_slug: str, frames: dict[str, pd.DataFrame], 
     used_sheet_names: set[str] = set()
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        rendered_frames: dict[str, pd.DataFrame] = {}
         for sheet_raw_name, frame in frames.items():
             if drop_unwanted_sheets_for_endpoint(endpoint_slug, sheet_raw_name):
                 continue
