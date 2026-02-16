@@ -34,8 +34,18 @@ META_TABLE_NAMES = {"dataversion", "metadata"}
 @dataclass
 class ProbeResult:
     output_dir: Path
+    run_dir: Path
+    results_xlsx: Path
+    results_json: Path
+    results_csv: Path
     files_written: int
     total_isins: int
+    endpoints_checked: int = 0
+    successful_endpoints: int = 0
+    http_errors: int = 0
+    parse_errors: int = 0
+    filtered_out: int = 0
+    rows_effective_total: int = 0
     orderbook_blocked_html: int = 0
 
 
@@ -316,6 +326,92 @@ def write_isin_workbook(
             temp_path.unlink(missing_ok=True)
 
 
+def export_probe_run_artifacts(
+    *,
+    records: list[dict[str, Any]],
+    run_dir: Path,
+    endpoints_checked: int,
+    successful_endpoints: int,
+    http_errors: int,
+    parse_errors: int,
+    filtered_out: int,
+    rows_effective_total: int,
+) -> tuple[Path, Path, Path]:
+    ensure_parent_dir(run_dir / "placeholder")
+    results_xlsx = run_dir / "results.xlsx"
+    results_json = run_dir / "results.json"
+    results_csv = run_dir / "results.csv"
+
+    with tempfile.NamedTemporaryFile(dir=run_dir, suffix=".xlsx", delete=False) as tmp:
+        temp_path = Path(tmp.name)
+
+    try:
+        endpoints_df = pd.DataFrame.from_records(records)
+        with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+            summary_rows = [
+                {
+                    "label": "endpoints_checked",
+                    "value": endpoints_checked,
+                },
+                {
+                    "label": "successful_endpoints",
+                    "value": successful_endpoints,
+                },
+                {
+                    "label": "http_errors",
+                    "value": http_errors,
+                },
+                {
+                    "label": "parse_errors",
+                    "value": parse_errors,
+                },
+                {
+                    "label": "filtered_out",
+                    "value": filtered_out,
+                },
+                {
+                    "label": "rows_effective_total",
+                    "value": rows_effective_total,
+                },
+                {
+                    "label": "run_dir",
+                    "value": str(run_dir),
+                },
+                {
+                    "label": "results_json",
+                    "value": str(results_json),
+                },
+                {
+                    "label": "results_csv",
+                    "value": str(results_csv),
+                },
+            ]
+            pd.DataFrame(summary_rows).to_excel(writer, sheet_name="summary", index=False)
+            if endpoints_df.empty:
+                pd.DataFrame(
+                    [
+                        {
+                            "message": "0 rows",
+                            "reason": "No endpoint rows survived filtering or all endpoints failed",
+                        }
+                    ]
+                ).to_excel(writer, sheet_name="endpoints", index=False)
+            else:
+                endpoints_df.to_excel(writer, sheet_name="endpoints", index=False)
+                ws = writer.sheets["endpoints"]
+                ws.freeze_panes = "A2"
+                if endpoints_df.columns.size > 0:
+                    ws.auto_filter.ref = ws.dimensions
+        atomic_replace_with_retry(temp_path, results_xlsx)
+    finally:
+        if temp_path.exists() and temp_path != results_xlsx:
+            temp_path.unlink(missing_ok=True)
+
+    results_json.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    pd.DataFrame.from_records(records).to_csv(results_csv, index=False)
+    return results_xlsx, results_json, results_csv
+
+
 def run_probe(
     isins: list[str],
     out_dir: Path,
@@ -349,7 +445,11 @@ def run_probe(
     orderbook_blocked_html = 0
     counter_lock = threading.Lock()
     run_date = datetime.now(timezone.utc).strftime("%Y%m%d")
+    run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("data/runs/moex_endpoints_probe") / run_stamp
     source_snapshot = str(_load_latest_bond_rates_snapshot()[1])
+    records: list[dict[str, Any]] = []
+    stats_lock = threading.Lock()
 
     def _process_isin(isin: str) -> int:
         nonlocal orderbook_blocked_html
@@ -421,6 +521,24 @@ def run_probe(
                 status_override=status_override,
                 reason_override=reason_override,
             )
+            summary_row = summary_df.iloc[0].to_dict() if not summary_df.empty else {}
+            with stats_lock:
+                records.append(
+                    {
+                        "isin": isin,
+                        "board": board,
+                        "endpoint": spec.name,
+                        "status": summary_row.get("__status", ""),
+                        "reason": summary_row.get("reason", ""),
+                        "http_status": summary_row.get("http_status"),
+                        "content_type": summary_row.get("content_type", ""),
+                        "from_cache": summary_row.get("from_cache", False),
+                        "elapsed_ms": summary_row.get("elapsed_ms", 0),
+                        "rows_total": summary_row.get("rows_total", 0),
+                        "rows_effective": summary_row.get("rows_effective", 0),
+                        "error": summary_row.get("error", ""),
+                    }
+                )
 
             if spec.name == "bondization":
                 for sheet_name, split_frame in _pick_bondization_frames(frame).items():
@@ -473,13 +591,48 @@ def run_probe(
         for written in executor.map(_process_isin, isins):
             files_written += written
 
+    endpoints_checked = len(records)
+    successful_endpoints = sum(1 for row in records if row.get("status") == "OK")
+    http_errors = sum(
+        1
+        for row in records
+        if row.get("http_status") not in (None, "", 200) and row.get("status") != "OK"
+    )
+    parse_errors = sum(
+        1
+        for row in records
+        if str(row.get("error", "")).startswith("invalid_json") or row.get("error") == "HTML_INSTEAD_OF_JSON"
+    )
+    filtered_out = sum(1 for row in records if row.get("rows_effective", 0) == 0 and row.get("status") == "NO_DATA")
+    rows_effective_total = sum(int(row.get("rows_effective", 0) or 0) for row in records)
+    results_xlsx, results_json, results_csv = export_probe_run_artifacts(
+        records=records,
+        run_dir=run_dir,
+        endpoints_checked=endpoints_checked,
+        successful_endpoints=successful_endpoints,
+        http_errors=http_errors,
+        parse_errors=parse_errors,
+        filtered_out=filtered_out,
+        rows_effective_total=rows_effective_total,
+    )
+
     cleanup_old_dirs(Path("data/curated/moex/endpoints_probe"), keep_days=keep_days)
     logger.info("Probe counters: orderbook_blocked_html=%s", orderbook_blocked_html)
 
     return ProbeResult(
         output_dir=out_dir,
+        run_dir=run_dir,
+        results_xlsx=results_xlsx,
+        results_json=results_json,
+        results_csv=results_csv,
         files_written=files_written,
         total_isins=len(isins),
+        endpoints_checked=endpoints_checked,
+        successful_endpoints=successful_endpoints,
+        http_errors=http_errors,
+        parse_errors=parse_errors,
+        filtered_out=filtered_out,
+        rows_effective_total=rows_effective_total,
         orderbook_blocked_html=orderbook_blocked_html,
     )
 
