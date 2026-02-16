@@ -11,13 +11,18 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bonds_to_excel.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links_latest.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
-https://raw.githubusercontent.com/Habosjob/Vibe/main/~$moex_bonds.xlsx
 
 ------------------------------------------------------------
 Директория: .cache/
 ------------------------------------------------------------
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_bonds_payload.json
+
+------------------------------------------------------------
+Директория: docs/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/docs/ColumnDocs.md
 
 ------------------------------------------------------------
 Директория: endpoint_excels/

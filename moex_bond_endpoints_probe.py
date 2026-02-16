@@ -52,6 +52,18 @@ TARGET_ENDPOINT_DROP_COLUMNS = {
 }
 TARGET_ENDPOINT_DROP_SHEETS = {"dataversion"}
 
+TARGET_ENDPOINT_SLUG = "iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security"
+TARGET_ENDPOINT_DROP_COLUMNS = {
+    "BOARDID",
+    "BOARDNAME",
+    "SECNAME",
+    "ISIN",
+    "LATNAME",
+    "REGNUMBER",
+    "LISTLEVEL",
+}
+TARGET_ENDPOINT_DROP_SHEETS = {"dataversion"}
+
 
 def setup_logging(log_file: Path, level: str) -> None:
     log_file.parent.mkdir(parents=True, exist_ok=True)
