@@ -218,3 +218,49 @@
 2026-02-16 18:09:52,799 | INFO | Найдено уникальных SECID: 2242
 2026-02-16 18:09:52,801 | INFO | Выбранные SECID на период отладки: ['SU26238RMFS4', 'RU000A1041Q0']
 2026-02-16 18:09:52,801 | INFO | Получаю список endpoint'ов из https://iss.moex.com/iss/reference
+2026-02-16 18:15:31,266 | INFO | Читаю SECID из moex_bonds.xlsx
+2026-02-16 18:15:32,373 | INFO | Найдено уникальных SECID: 2242
+2026-02-16 18:15:32,373 | INFO | Выбранные SECID на период отладки: ['SU26238RMFS4', 'RU000A1041Q0']
+2026-02-16 18:15:32,389 | INFO | Получаю список endpoint'ов из https://iss.moex.com/iss/reference
+2026-02-16 18:16:02,780 | INFO | Найдено шаблонов endpoint с [security]: 38
+2026-02-16 18:16:02,781 | INFO | Обрабатываю SECID=SU26238RMFS4
+2026-02-16 18:16:21,810 | INFO | SECID=SU26238RMFS4: сформировано endpoint URL: 76
+2026-02-16 18:16:21,812 | INFO | Обрабатываю SECID=RU000A1041Q0
+2026-02-16 18:16:25,480 | INFO | SECID=RU000A1041Q0: сформировано endpoint URL: 38
+2026-02-16 18:16:25,480 | INFO | Статистика запросов: api=100 cache=0 non_json=12 http_skipped=2 errors=0
+2026-02-16 18:16:25,481 | INFO | Сохраняю Excel по endpoint-шаблонам в endpoint_excels
+2026-02-16 18:16:25,565 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__analyticalproducts__futoi__securities__security.xlsx (листов=2)
+2026-02-16 18:16:25,605 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__analyticalproducts__netflow2__securities__security.xlsx (листов=1)
+2026-02-16 18:16:25,775 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security.xlsx (листов=4)
+2026-02-16 18:16:25,822 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security__candleborders.xlsx (листов=1)
+2026-02-16 18:16:26,649 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security__candles.xlsx (листов=1)
+2026-02-16 18:16:26,893 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security__trades.xlsx (листов=3)
+2026-02-16 18:16:27,070 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__boards__board__securities__security.xlsx (листов=4)
+2026-02-16 18:16:27,163 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__boards__board__securities__security__candleborders.xlsx (листов=2)
+2026-02-16 18:16:28,014 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__boards__board__securities__security__candles.xlsx (листов=1)
+2026-02-16 18:16:28,279 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__boards__board__securities__security__trades.xlsx (листов=3)
+2026-02-16 18:16:28,446 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__securities__security.xlsx (листов=4)
+2026-02-16 18:16:28,480 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__securities__security__candleborders.xlsx (листов=1)
+2026-02-16 18:16:29,381 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__securities__security__candles.xlsx (листов=1)
+2026-02-16 18:16:29,689 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__engines__engine__markets__market__securities__security__trades.xlsx (листов=3)
+2026-02-16 18:16:30,718 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__boardgroups__boardgroup__securities__security.xlsx (листов=2)
+2026-02-16 18:16:30,762 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__boardgroups__boardgroup__securities__security__dates.xlsx (листов=1)
+2026-02-16 18:16:31,129 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__boardgroups__boardgroup__yields__security.xlsx (листов=1)
+2026-02-16 18:16:32,148 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__boards__board__securities__security.xlsx (листов=2)
+2026-02-16 18:16:32,185 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__boards__board__securities__security__dates.xlsx (листов=1)
+2026-02-16 18:16:32,651 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__boards__board__yields__security.xlsx (листов=1)
+2026-02-16 18:16:33,438 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__securities__security.xlsx (листов=2)
+2026-02-16 18:16:33,483 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__securities__security__dates.xlsx (листов=1)
+2026-02-16 18:16:34,562 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__sessions__session__boardgroups__boardgroup__securities__security.xlsx (листов=2)
+2026-02-16 18:16:35,439 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__sessions__session__boards__board__securities__security.xlsx (листов=1)
+2026-02-16 18:16:35,847 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__sessions__session__securities__security.xlsx (листов=2)
+2026-02-16 18:16:36,028 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__engine__markets__market__yields__security.xlsx (листов=1)
+2026-02-16 18:16:36,096 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__history__engines__stock__totals__boards__board__securities__security.xlsx (листов=3)
+2026-02-16 18:16:36,248 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__securities__security.xlsx (листов=2)
+2026-02-16 18:16:36,283 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__securities__security__aggregates.xlsx (листов=2)
+2026-02-16 18:16:36,306 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__securities__security__indices.xlsx (листов=1)
+2026-02-16 18:16:36,340 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__statistics__engines__currency__markets__fixing__security.xlsx (листов=3)
+2026-02-16 18:16:36,381 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__statistics__engines__futures__markets__indicativerates__securities__security.xlsx (листов=4)
+2026-02-16 18:16:36,399 | INFO | Сохранён endpoint Excel: endpoint_excels\iss__statistics__engines__stock__splits__security.xlsx (листов=1)
+2026-02-16 18:16:36,401 | INFO | Готово. Всего endpoint Excel: 33
+2026-02-16 18:16:36,401 | INFO | Общее время выполнения: 65.13 сек.
