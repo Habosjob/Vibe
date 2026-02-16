@@ -7,6 +7,8 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/Git_auto.bat
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bond_endpoints_probe.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bonds.xlsx
+https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bonds_endpoints.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bonds_endpoints_probe.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bonds_to_excel.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links_latest.txt
@@ -19,48 +21,16 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_bonds_payload.json
 
 ------------------------------------------------------------
+Директория: __pycache__/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/moex_bonds_endpoints.cpython-311.pyc
+
+------------------------------------------------------------
 Директория: docs/
 ------------------------------------------------------------
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/docs/ColumnDocs.md
-
-------------------------------------------------------------
-Директория: endpoint_excels/
-------------------------------------------------------------
-
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__analyticalproducts__futoi__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__analyticalproducts__netflow2__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security__candleborders.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security__candles.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security__trades.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boards__board__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boards__board__securities__security__candleborders.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boards__board__securities__security__candles.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boards__board__securities__security__trades.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__securities__security__candleborders.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__securities__security__candles.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__securities__security__trades.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boardgroups__boardgroup__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boardgroups__boardgroup__securities__security__dates.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boardgroups__boardgroup__yields__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boards__board__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boards__board__securities__security__dates.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boards__board__yields__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__securities__security__dates.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__sessions__session__boardgroups__boardgroup__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__sessions__session__boards__board__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__sessions__session__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__yields__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__stock__totals__boards__board__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__securities__security__aggregates.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__securities__security__indices.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__statistics__engines__currency__markets__fixing__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__statistics__engines__futures__markets__indicativerates__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__statistics__engines__stock__splits__security.xlsx
 
 ------------------------------------------------------------
 Директория: logs/
@@ -95,11 +65,13 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/2e7e9da8ff5fde501482f76cc7591e771c0a21b7492fc9ef2624699898b19e3e.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/2e9220b906d17c2abe0d8d42baa11a6433f710c1b3514c5826c059c5ce3e0479.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/333ced2901214d1e4da405152b501d67d2fe014a811a1d41b4d8f930c9dbaac1.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/361f208b7c854744ffb786ea0e104747c26f25e6d8fb90cd76db6966a615c82e.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/381390dc9db29f0df137de205e9fdfc158e693b58c4550ec284d604f4d9f5ce9.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/3bcaff0c037d5a8509dfd1b6fd7315697f0b93ae8e44547b9ad307e0ad6a4427.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/3ea87a8bdc7956ecfce1688438fb77fe01bde9e21d0310276919258d9e599a1d.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/3fd7152041be4cf0933c79f8e04dd59e5f7896c0a5fab548c6c9cee75ef95636.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/4660bfb3b0847f2defbe8815d472815c502a93f90b90f340332df327ea4d78f8.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/46e5e6defb2e32b3d03073c24ea502f93a7dd3fb34fac73d6cd30cc70b1387f0.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/49241fca571fbb158fe2695142f0939f6a1258b16bdb137e112873287fd4bb87.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/4a90efd1581249827e8b34ffefabb4ab1665c76af20337a20ee38cc31622343f.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/4b0474cac505a8ebb4b870df4feb03fca8cd5473c1796e346585a50aad551c8c.json
@@ -114,11 +86,14 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/575f2262a0a9d363fd7e1b83c89da1bc1bc0f4fb4695aad4114dfbbb04ce1778.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/5d19cf1de773be45772918e263624d4021a9add71be7ac06bde56296c7b1395f.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/6866a8f4b23ae609c550aeb8eb463d08cc02d7dd19b13c27579bb2da08a04183.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/6d2d0a368f90cf18cb6775389bf9711e088e510bf524b6cf00ac4879749ec891.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/6f903ee4fdd83c7ba71904f2db3483cd9aa6350aecd3e366b4bcc967680580c2.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/72b9b3df158a6d0f4e2e30c7ab97ba14748a210195aca46a06d170a98b8b152d.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/73db00bd88b6557fc865db07cdbf19229cd722cc416eee869fee0efa9e0a78ee.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/73f4bfbb528c729a7dae4b049da720f75c862fbdf7b3523c53aa4107e2de49ec.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/75c7f07725ee051dacfb40f8af0d91b116ee0f8be57d73dc689a166dc78fefaa.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/78bc8b63f4ed5719c8c8630719fd6363d68beb528ad005e2be273b356f601470.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/79863835eede486fe7abcb2b25ed30fe34247f9fb982d87a27d82b400a57ca92.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/7a7377128302bc67085221e8b2d050fd8eee0292b5d81a8797577bb20c854b49.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/813a95e94f1f1586935d937972b0b85c9cddb987793d13f0199dee519acc6ac8.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/85e35e4e1acd306e1f8a95b8711f7d9cc60a24355104cf96226cf44054adbb19.json
@@ -158,6 +133,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/dd0931fce49a3fcdd658f7937ba48f85e0d2b69582a7ddb18e8cd965e6b6762b.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/dd15eccf3de6586df93f4c490d2ad85368808ef068d7d850d69bd4bd610318d1.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/de5e70611e9dea0a75bcb6b6379a85f520abd0037b46cdc926e5b43fde073119.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/ded75bba2abfe0298391ae39bf9f75430c05b04fd25b28d38b5b1ef6e97637cc.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/df3567d69639faf46a118334edc5e80b788abbca030bb85a3b844e6ca6b91167.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/e018ee9b458d4c59f048df2f3344518904ba33e37f0b1926b98bc6f9c49e91f6.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/e23a4a528871b6b33ed0057647581aef5e129f1859107990124b3e353d697df7.json
@@ -172,3 +148,9 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/f573c2c1a5b075ee6e0f7ad4b21e743fea68e59975985aed9c11480f39329f2d.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/f5fd802b1afb59a1dab2e76244200c83c59dbb80ba1a1a56ddc5650bd3f9a762.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/facc60c7a589081c340c4f0cd097fd55abd4c44a597b24f24d8ebc893a9f9672.json
+
+        ----------------------------------------------------
+        Директория: data/raw/moex/bonds_probe/2026-02-16/
+        ----------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/raw/moex/bonds_probe/2026-02-16/bonds_probe.xlsx
