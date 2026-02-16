@@ -19,6 +19,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 MOEX_BONDS_URL = "https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json"
 MOEX_SECURITY_URL = "https://iss.moex.com/iss/securities/{secid}.json"
 MOEX_BONDIZATION_URL = "https://iss.moex.com/iss/securities/{secid}/bondization.json"
+MOEX_EMITTER_URL = "https://iss.moex.com/iss/emitters/{emitter_id}.json"
 
 OUTPUT_XLSX = "moex_bonds.xlsx"
 ENRICH_ENABLE = True
@@ -50,14 +51,20 @@ NUMERIC_COLUMNS = {
     "VOLRUR": "#,##0.00",
     "NUMTRADES": "#,##0",
     "COUPONPERIOD": "0",
+    "ACCRUEDINT_NATIVE": "#,##0.00",
     "ACCRUEDINT_RUB": "#,##0.00",
+    "PRICE_NATIVE": "#,##0.00",
     "PRICE_RUB": "#,##0.00",
     "PRICE_RUB_WA": "#,##0.00",
+    "DIRTY_PRICE_NATIVE": "#,##0.00",
     "DIRTY_PRICE_RUB": "#,##0.00",
     "OFFER_PRICE_PCT": "0.00",
+    "OFFER_PRICE_NATIVE": "#,##0.00",
     "OFFER_PRICE_RUB": "#,##0.00",
     "NEXT_AMORT_VALUE": "#,##0.00",
+    "NEXT_AMORT_VALUE_RUB": "#,##0.00",
     "NEXT_COUPON_VALUE": "#,##0.00",
+    "NEXT_COUPON_VALUE_RUB": "#,##0.00",
     "YTM_SIMPLE": "0.00%",
 }
 
@@ -78,7 +85,8 @@ COLUMN_WIDTHS = {
     "ISSUER_NAME": 24,
     "ISSUER_INN": 14,
     "CREDIT_RATING": 16,
-    "BOND_TYPE": 12,
+    "BOND_TYPE_RAW": 20,
+    "RATE_TYPE": 12,
     "COUPON_FORMULA": 24,
 }
 
@@ -110,26 +118,37 @@ EXPECTED_COLUMNS = [
     "ISSUER_NAME",
     "ISSUER_INN",
     "CREDIT_RATING",
-    "BOND_TYPE",
+    "BOND_TYPE_RAW",
+    "RATE_TYPE",
     "COUPON_FORMULA",
+    "COUPON_FORMULA_SOURCE",
+    "ACCRUEDINT_NATIVE",
     "ACCRUEDINT_RUB",
+    "PRICE_NATIVE",
     "PRICE_RUB",
     "PRICE_RUB_WA",
+    "DIRTY_PRICE_NATIVE",
     "DIRTY_PRICE_RUB",
     "HAS_OFFER",
     "NEXT_OFFER_DATE",
     "OFFER_TYPE",
+    "OFFER_KIND",
     "OFFER_PRICE_PCT",
+    "OFFER_PRICE_NATIVE",
     "OFFER_PRICE_RUB",
     "HAS_AMORTIZATION",
     "AMORT_START_DATE",
     "NEXT_AMORT_DATE",
     "NEXT_AMORT_VALUE",
+    "NEXT_AMORT_VALUE_RUB",
     "NEXT_COUPON_DATE",
     "NEXT_COUPON_VALUE",
+    "NEXT_COUPON_VALUE_RUB",
     "YTM_SIMPLE",
     "YTM_SIMPLE_OK",
 ]
+
+BOOL_COLUMNS = {"HAS_OFFER", "HAS_AMORTIZATION", "YTM_SIMPLE_OK"}
 
 
 def log_step(message: str) -> None:
@@ -221,6 +240,29 @@ def _detail_value_per_bond_rub(row: pd.Series, columns: list[str], facevalue: fl
     return value
 
 
+def _value_from_col(columns: list[str], row: Any, name: str) -> float | None:
+    return _as_float(_get(row, _col_idx(columns, name)))
+
+
+def _normalize_offer_kind(raw: str) -> str:
+    raw_u = _safe_upper(raw)
+    if "PUT" in raw_u or "ПУТ" in raw_u:
+        return "PUT"
+    if "CALL" in raw_u or "КОЛЛ" in raw_u:
+        return "CALL"
+    return "UNKNOWN" if raw_u else ""
+
+
+def _normalize_rate_type(description_items: list[tuple[str, str, str]]) -> str:
+    combined = " ".join(f"{title} {key} {value}" for title, key, value in description_items)
+    combined_u = _safe_upper(combined)
+    if any(token in combined_u for token in ["FLOAT", "ПЛАВА", "FRN", "ИНДЕКС", "СПРЕД", "КЛЮЧЕВАЯ СТАВКА"]):
+        return "FLOAT"
+    if any(key.casefold() == "couponpercent" and str(value).strip() for _, key, value in description_items):
+        return "FIXED"
+    return "UNKNOWN"
+
+
 def _load_json_cache(cache_file: Path, ttl_seconds: int) -> dict[str, Any] | None:
     if not CACHE_ENABLE or not cache_file.exists():
         return None
@@ -259,7 +301,7 @@ def fetch_moex_bonds(session: requests.Session, cache_ttl_seconds: int) -> tuple
         "securities.columns": (
             "SECID,SHORTNAME,FACEUNIT,FACEVALUE,COUPONVALUE,COUPONPERIOD,MATDATE,STATUS"
         ),
-        "marketdata.columns": "SECID,LAST,WAPRICE,YIELD,VALUE,VOLRUR,NUMTRADES,ACCRUEDINT",
+        "marketdata.columns": "SECID,LAST,WAPRICE,YIELD,VALUE,VOLRUR,NUMTRADES,ACCRUEDINT,ACCRUEDINTRUB",
     }
     source = "cache"
     payload = _load_json_cache(BASE_CACHE_FILE, cache_ttl_seconds)
@@ -275,7 +317,7 @@ def fetch_moex_bonds(session: requests.Session, cache_ttl_seconds: int) -> tuple
     return securities, marketdata, source
 
 
-def fetch_security_description(session: requests.Session, secid: str, cache_ttl_seconds: int) -> dict[str, str]:
+def fetch_security_description(session: requests.Session, secid: str, cache_ttl_seconds: int) -> dict[str, Any]:
     cache_file = Path(f".cache/moex/description/{secid}.json")
     payload = _cached_get_json(
         session,
@@ -298,7 +340,7 @@ def fetch_security_description(session: requests.Session, secid: str, cache_ttl_
         key = str(row.get(key_col) or "").strip()
         title = str(row.get(title_col) or "").strip() if title_col else ""
         value = str(row.get(value_col) or "").strip()
-        if value:
+        if key and value:
             items.append((title, key, value))
 
     def pick_by_tokens(tokens: list[str]) -> str:
@@ -310,35 +352,54 @@ def fetch_security_description(session: requests.Session, secid: str, cache_ttl_
                 return value
         return ""
 
-    coupon_type_raw = pick_by_tokens(
-        [
-            "coupon type",
-            "rate type",
-            "floating",
-            "float",
-            "фикс",
-            "плава",
-            "тип купона",
-            "тип ставки",
-        ]
-    )
-    bond_type = ""
-    coupon_type_u = _safe_upper(coupon_type_raw)
-    if coupon_type_u:
-        if any(token in coupon_type_u for token in ["FLOAT", "ПЛАВА", "VARIABLE", "FRN"]):
-            bond_type = "флоатер"
-        elif any(token in coupon_type_u for token in ["FIX", "ФИКС", "ПОСТОЯН"]):
-            bond_type = "фикс"
-        else:
-            bond_type = "проч"
+    bond_type_raw = pick_by_tokens([
+        "вид облигац",
+        "тип облигац",
+        "тип бумаги",
+        "groupname",
+        "тип инструмента",
+    ])
+
+    formula_value = ""
+    formula_source = ""
+    for title, key, value in items:
+        probe = f"{title} {key}".casefold()
+        if any(token in probe for token in ["formula", "формул", "привяз", "индекс", "спред"]):
+            formula_value = value
+            formula_source = key
+            break
+
+    emitter_id_raw = pick_by_tokens(["emitter_id", "emitent_id", "код эмитента"])
+    emitter_id = _as_float(emitter_id_raw)
 
     return {
+        "EMITTER_ID": int(emitter_id) if emitter_id is not None else None,
         "ISSUER_NAME": pick_by_tokens(["emitent", "emitter", "issuer", "эмитент", "наименование эмитента"]),
         "ISSUER_INN": pick_by_tokens(["inn", "инн", "tax id", "идентификационный номер"]),
-        "BOND_TYPE": bond_type,
-        "COUPON_FORMULA": pick_by_tokens(["formula", "формул", "купон", "coupon", "ставк"]),
+        "BOND_TYPE_RAW": bond_type_raw,
+        "RATE_TYPE": _normalize_rate_type(items),
+        "COUPON_FORMULA": formula_value,
+        "COUPON_FORMULA_SOURCE": formula_source,
         "CREDIT_RATING": pick_by_tokens(["rating", "рейтинг", "кредитный рейтинг"]),
     }
+
+
+def fetch_emitter_info(session: requests.Session, emitter_id: int, cache_ttl_seconds: int) -> dict[str, str]:
+    cache_file = Path(f".cache/moex/emitter/{emitter_id}.json")
+    payload = _cached_get_json(
+        session,
+        MOEX_EMITTER_URL.format(emitter_id=emitter_id),
+        cache_file,
+        cache_ttl_seconds,
+    )
+    emitter = _to_dataframe(payload, "emitter")
+    if emitter.empty:
+        return {}
+
+    row = emitter.iloc[0]
+    title = str(row.get("TITLE") or row.get("SHORT_TITLE") or "").strip()
+    inn = str(row.get("INN") or "").strip()
+    return {"ISSUER_NAME": title, "ISSUER_INN": inn}
 
 
 def fetch_bondization(session: requests.Session, secid: str, cache_ttl_seconds: int) -> dict[str, pd.DataFrame]:
@@ -382,9 +443,11 @@ def _aggregate_bondization(
     coupons = bondization.get("coupons", pd.DataFrame())
     amortizations = bondization.get("amortizations", pd.DataFrame())
     today = pd.Timestamp.today().normalize()
+    is_rub = faceunit.upper() in {"RUB", "SUR", "RUR"}
 
     next_offer_date: pd.Timestamp | None = None
     offer_price_rub: float | None = None
+    offer_price_native: float | None = None
     offer_price_pct: float | None = None
     offer_type = ""
 
@@ -392,7 +455,7 @@ def _aggregate_bondization(
         offers_local = offers.copy()
         offer_cols = offers_local.columns.tolist()
         offer_date_col = _find_column(offers_local, ["DATE", "OFFER", "PUT"])
-        offer_type_col = _find_column(offers_local, ["TYPE", "KIND"])
+        offer_type_col = _find_column(offers_local, ["OFFERTYPE", "TYPE", "KIND"])
         if offer_date_col:
             offers_local[offer_date_col] = pd.to_datetime(offers_local[offer_date_col], errors="coerce")
             offers_local = offers_local[offers_local[offer_date_col] >= today].sort_values(offer_date_col)
@@ -402,14 +465,17 @@ def _aggregate_bondization(
                 if offer_type_col:
                     offer_type = str(row.get(offer_type_col) or "")
 
-                price = _as_float(_get(row, _col_idx(offer_cols, "price")))
+                price = _value_from_col(offer_cols, row, "price")
                 if price is not None:
                     offer_price_pct = price
-                    if faceunit.upper() in {"RUB", "SUR", "RUR"} and facevalue is not None:
-                        offer_price_rub = facevalue * price / 100.0
+                    if facevalue is not None:
+                        offer_price_native = facevalue * price / 100.0
+                        if is_rub:
+                            offer_price_rub = offer_price_native
 
     next_coupon_date: pd.Timestamp | None = None
     next_coupon_value: float | None = None
+    next_coupon_value_rub: float | None = None
     if not coupons.empty:
         coupons_local = coupons.copy()
         coupon_cols = coupons_local.columns.tolist()
@@ -420,12 +486,14 @@ def _aggregate_bondization(
             if not coupons_local.empty:
                 row = coupons_local.iloc[0]
                 next_coupon_date = row[coupon_date_col]
-                picked_coupon, coupon_scale = _pick_money_per_bond(coupon_cols, row, facevalue, prefer_rub=True)
+                picked_coupon, coupon_scale = _pick_money_per_bond(coupon_cols, row, facevalue, prefer_rub=False)
                 next_coupon_value, _ = _sanitize_per_bond_value(picked_coupon, facevalue, coupon_scale)
+                next_coupon_value_rub = _value_from_col(coupon_cols, row, "value_rub")
 
     amort_start_date: pd.Timestamp | None = None
     next_amort_date: pd.Timestamp | None = None
     next_amort_value: float | None = None
+    next_amort_value_rub: float | None = None
     if not amortizations.empty:
         amort_local = amortizations.copy()
         amort_cols = amort_local.columns.tolist()
@@ -437,21 +505,26 @@ def _aggregate_bondization(
                 amort_start_date = amort_local[amort_date_col].min()
                 row = amort_local.iloc[0]
                 next_amort_date = row[amort_date_col]
-                picked_amort, amort_scale = _pick_money_per_bond(amort_cols, row, facevalue, prefer_rub=True)
+                picked_amort, amort_scale = _pick_money_per_bond(amort_cols, row, facevalue, prefer_rub=False)
                 next_amort_value, _ = _sanitize_per_bond_value(picked_amort, facevalue, amort_scale)
+                next_amort_value_rub = _value_from_col(amort_cols, row, "value_rub")
 
     return {
         "HAS_OFFER": bool(next_offer_date is not None),
         "NEXT_OFFER_DATE": next_offer_date,
         "OFFER_TYPE": offer_type,
+        "OFFER_KIND": _normalize_offer_kind(offer_type),
         "OFFER_PRICE_PCT": offer_price_pct,
+        "OFFER_PRICE_NATIVE": offer_price_native,
         "OFFER_PRICE_RUB": offer_price_rub,
         "HAS_AMORTIZATION": bool(next_amort_date is not None),
         "AMORT_START_DATE": amort_start_date,
         "NEXT_AMORT_DATE": next_amort_date,
         "NEXT_AMORT_VALUE": next_amort_value,
+        "NEXT_AMORT_VALUE_RUB": next_amort_value_rub,
         "NEXT_COUPON_DATE": next_coupon_date,
         "NEXT_COUPON_VALUE": next_coupon_value,
+        "NEXT_COUPON_VALUE_RUB": next_coupon_value_rub,
     }
 
 
@@ -493,7 +566,7 @@ def _xirr(dates: list[pd.Timestamp], cashflows: list[float]) -> float | None:
 
 
 def _build_cashflows_for_ytm(row: pd.Series, bondization: dict[str, pd.DataFrame]) -> tuple[list[pd.Timestamp], list[float]]:
-    dirty_price = pd.to_numeric(row.get("DIRTY_PRICE_RUB"), errors="coerce")
+    dirty_price = pd.to_numeric(row.get("DIRTY_PRICE_NATIVE"), errors="coerce")
     if pd.isna(dirty_price) or float(dirty_price) <= 0:
         return [], []
 
@@ -512,7 +585,7 @@ def _build_cashflows_for_ytm(row: pd.Series, bondization: dict[str, pd.DataFrame
             coupons[date_col] = pd.to_datetime(coupons[date_col], errors="coerce")
             coupons = coupons[coupons[date_col] > today].sort_values(date_col)
             for _, c in coupons.iterrows():
-                coupon_value_raw, coupon_scale = _pick_money_per_bond(coupon_cols, c, facevalue_float, prefer_rub=True)
+                coupon_value_raw, coupon_scale = _pick_money_per_bond(coupon_cols, c, facevalue_float, prefer_rub=False)
                 coupon_value, _ = _sanitize_per_bond_value(coupon_value_raw, facevalue_float, coupon_scale)
                 if coupon_value is not None and coupon_value > 0:
                     dates.append(c[date_col])
@@ -520,31 +593,26 @@ def _build_cashflows_for_ytm(row: pd.Series, bondization: dict[str, pd.DataFrame
 
     amortizations = bondization.get("amortizations", pd.DataFrame()).copy()
     amort_sum = 0.0
-    has_future_amortizations = False
     if not amortizations.empty:
         date_col = _find_column(amortizations, ["AMORT", "DATE"])
         if date_col:
             amort_cols = amortizations.columns.tolist()
             amortizations[date_col] = pd.to_datetime(amortizations[date_col], errors="coerce")
             amortizations = amortizations[amortizations[date_col] > today].sort_values(date_col)
-            has_future_amortizations = not amortizations.empty
             for _, a in amortizations.iterrows():
-                amort_value_raw, amort_scale = _pick_money_per_bond(amort_cols, a, facevalue_float, prefer_rub=True)
+                amort_value_raw, amort_scale = _pick_money_per_bond(amort_cols, a, facevalue_float, prefer_rub=False)
                 amort_value, _ = _sanitize_per_bond_value(amort_value_raw, facevalue_float, amort_scale)
                 if amort_value is not None and amort_value > 0:
                     amort_sum += float(amort_value)
                     dates.append(a[date_col])
                     cashflows.append(float(amort_value))
 
-    facevalue = pd.to_numeric(row.get("FACEVALUE"), errors="coerce")
     matdate = pd.to_datetime(row.get("MATDATE"), errors="coerce")
     if pd.notna(facevalue) and pd.notna(matdate) and matdate > today:
         remainder = float(facevalue) - amort_sum
         if remainder > 0.01:
             dates.append(matdate)
             cashflows.append(remainder)
-        elif has_future_amortizations and abs(remainder) <= 0.01:
-            pass
 
     pairs = sorted([(d, cf) for d, cf in zip(dates, cashflows) if pd.notna(d) and pd.notna(cf)], key=lambda x: x[0])
     if len(pairs) < 2:
@@ -563,26 +631,39 @@ def build_report_dataframe(securities: pd.DataFrame, marketdata: pd.DataFrame, o
         min_maturity_date = pd.Timestamp.today().normalize() + pd.DateOffset(years=1)
         report = report[(report["MATDATE"].isna()) | (report["MATDATE"] >= min_maturity_date)].copy()
 
-    report["ACCRUEDINT_RUB"] = pd.to_numeric(report.get("ACCRUEDINT"), errors="coerce")
     is_rub = report.get("FACEUNIT", pd.Series(index=report.index)).astype(str).str.upper().isin(["RUB", "SUR", "RUR"])
-    report["PRICE_RUB"] = pd.NA
-    report["PRICE_RUB_WA"] = pd.NA
-
     last = pd.to_numeric(report.get("LAST"), errors="coerce")
     waprice = pd.to_numeric(report.get("WAPRICE"), errors="coerce")
     facevalue = pd.to_numeric(report.get("FACEVALUE"), errors="coerce")
 
+    report["ACCRUEDINT_NATIVE"] = pd.to_numeric(report.get("ACCRUEDINT"), errors="coerce")
+
+    accruedint_rub = pd.Series(pd.NA, index=report.index, dtype="object")
+    if "ACCRUEDINTRUB" in report.columns:
+        accruedint_rub = pd.to_numeric(report["ACCRUEDINTRUB"], errors="coerce")
+    elif "ACCRUEDINT_RUB" in report.columns:
+        accruedint_rub = pd.to_numeric(report["ACCRUEDINT_RUB"], errors="coerce")
+    report["ACCRUEDINT_RUB"] = pd.NA
+    report.loc[is_rub, "ACCRUEDINT_RUB"] = report.loc[is_rub, "ACCRUEDINT_NATIVE"]
+    report.loc[~is_rub & accruedint_rub.notna(), "ACCRUEDINT_RUB"] = accruedint_rub[~is_rub & accruedint_rub.notna()]
+
+    report["PRICE_NATIVE"] = (facevalue * last / 100).astype(float)
+    report["PRICE_RUB"] = pd.NA
+    report["PRICE_RUB_WA"] = pd.NA
     report.loc[is_rub, "PRICE_RUB"] = (facevalue[is_rub] * last[is_rub] / 100).astype(float)
     report.loc[is_rub, "PRICE_RUB_WA"] = (facevalue[is_rub] * waprice[is_rub] / 100).astype(float)
 
-    report["DIRTY_PRICE_RUB"] = pd.to_numeric(report["PRICE_RUB"], errors="coerce") + pd.to_numeric(
-        report["ACCRUEDINT_RUB"], errors="coerce"
+    report["DIRTY_PRICE_NATIVE"] = pd.to_numeric(report["PRICE_NATIVE"], errors="coerce") + pd.to_numeric(
+        report["ACCRUEDINT_NATIVE"], errors="coerce"
     )
-    report.loc[report["ACCRUEDINT_RUB"].isna(), "DIRTY_PRICE_RUB"] = pd.to_numeric(
-        report.loc[report["ACCRUEDINT_RUB"].isna(), "PRICE_RUB"], errors="coerce"
+    report.loc[report["ACCRUEDINT_NATIVE"].isna(), "DIRTY_PRICE_NATIVE"] = pd.to_numeric(
+        report.loc[report["ACCRUEDINT_NATIVE"].isna(), "PRICE_NATIVE"], errors="coerce"
     )
-    report.loc[~is_rub, "PRICE_RUB"] = pd.NA
-    report.loc[~is_rub, "DIRTY_PRICE_RUB"] = pd.NA
+
+    report["DIRTY_PRICE_RUB"] = pd.NA
+    report.loc[is_rub, "DIRTY_PRICE_RUB"] = pd.to_numeric(report.loc[is_rub, "PRICE_RUB"], errors="coerce") + pd.to_numeric(
+        report.loc[is_rub, "ACCRUEDINT_RUB"], errors="coerce"
+    )
 
     for col in EXPECTED_COLUMNS:
         if col not in report.columns:
@@ -621,9 +702,19 @@ def enrich_report(
 
         try:
             desc = fetch_security_description(session, secid, cache_ttl_seconds)
+            emitter_id = desc.get("EMITTER_ID")
             for key, value in desc.items():
-                if value:
+                if key == "EMITTER_ID":
+                    continue
+                if value is not None and value != "":
                     target.at[i, key] = value
+
+            if emitter_id is not None:
+                emitter = fetch_emitter_info(session, int(emitter_id), cache_ttl_seconds)
+                if emitter.get("ISSUER_NAME"):
+                    target.at[i, "ISSUER_NAME"] = emitter["ISSUER_NAME"]
+                if emitter.get("ISSUER_INN"):
+                    target.at[i, "ISSUER_INN"] = emitter["ISSUER_INN"]
         except Exception as exc:  # noqa: BLE001
             print(f"description error [{secid}]: {exc}")
 
@@ -685,7 +776,7 @@ def enrich_report(
     has_offer_count = int(pd.to_numeric(target["HAS_OFFER"], errors="coerce").fillna(0).astype(bool).sum())
     has_rating_count = int(target["CREDIT_RATING"].fillna("").astype(str).str.len().gt(0).sum())
     has_inn_count = int(target["ISSUER_INN"].fillna("").astype(str).str.len().gt(0).sum())
-    has_type_count = int(target["BOND_TYPE"].fillna("").astype(str).str.len().gt(0).sum())
+    has_type_count = int(target["RATE_TYPE"].fillna("").astype(str).str.len().gt(0).sum())
 
     log_step(
         f"С офертами: {has_offer_count}; с ИНН: {has_inn_count}; с рейтингом: {has_rating_count}; с типом: {has_type_count}"
@@ -702,17 +793,71 @@ def _ensure_expected_columns(df: pd.DataFrame) -> pd.DataFrame:
     return target[EXPECTED_COLUMNS].sort_values(by=["MATDATE", "SECID"], na_position="last")
 
 
+def _to_bool_mark(value: Any) -> str:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return ""
+    if pd.isna(value):
+        return ""
+    return "✅" if bool(value) else "❌"
+
+
+def build_column_descriptions() -> pd.DataFrame:
+    rows = [
+        {"column": "SECID", "meaning_ru": "Код бумаги", "units": "-", "source": "securities", "notes": "Идентификатор ISS"},
+        {"column": "SHORTNAME", "meaning_ru": "Короткое имя бумаги", "units": "-", "source": "securities", "notes": ""},
+        {"column": "FACEVALUE", "meaning_ru": "Номинал", "units": "faceunit", "source": "securities", "notes": ""},
+        {"column": "FACEUNIT", "meaning_ru": "Валюта номинала", "units": "ISO", "source": "securities", "notes": ""},
+        {"column": "VOLRUR", "meaning_ru": "Оборот в рублях", "units": "RUB", "source": "marketdata", "notes": "Заполняется только если MOEX отдаёт поле"},
+        {"column": "ISSUER_NAME", "meaning_ru": "Название эмитента", "units": "-", "source": "emitter_lookup", "notes": "По EMITTER_ID из description"},
+        {"column": "ISSUER_INN", "meaning_ru": "ИНН эмитента", "units": "-", "source": "emitter_lookup", "notes": "По EMITTER_ID из description"},
+        {"column": "BOND_TYPE_RAW", "meaning_ru": "Тип бумаги как в description", "units": "-", "source": "description", "notes": "Сырой текст MOEX"},
+        {"column": "RATE_TYPE", "meaning_ru": "Тип ставки", "units": "FIXED/FLOAT/UNKNOWN", "source": "description", "notes": "Эвристика по description и купонным полям"},
+        {"column": "COUPON_FORMULA", "meaning_ru": "Формула купона", "units": "-", "source": "description", "notes": "Только если ключ явно формульный"},
+        {"column": "COUPON_FORMULA_SOURCE", "meaning_ru": "Источник формулы", "units": "ключ поля", "source": "description", "notes": "Имя description-поля"},
+        {"column": "ACCRUEDINT_NATIVE", "meaning_ru": "НКД в валюте номинала", "units": "faceunit", "source": "marketdata", "notes": "Поле ACCRUEDINT"},
+        {"column": "ACCRUEDINT_RUB", "meaning_ru": "НКД в рублях", "units": "RUB", "source": "marketdata", "notes": "Для RUB или если MOEX отдал рублёвый эквивалент"},
+        {"column": "PRICE_NATIVE", "meaning_ru": "Чистая цена в валюте номинала", "units": "faceunit", "source": "calculated", "notes": "FACEVALUE*LAST/100"},
+        {"column": "PRICE_RUB", "meaning_ru": "Чистая цена в рублях", "units": "RUB", "source": "calculated", "notes": "Только для RUB-номинала"},
+        {"column": "DIRTY_PRICE_NATIVE", "meaning_ru": "Грязная цена в валюте номинала", "units": "faceunit", "source": "calculated", "notes": "PRICE_NATIVE + ACCRUEDINT_NATIVE"},
+        {"column": "DIRTY_PRICE_RUB", "meaning_ru": "Грязная цена в рублях", "units": "RUB", "source": "calculated", "notes": "Только для RUB-номинала"},
+        {"column": "OFFER_TYPE", "meaning_ru": "Тип оферты из MOEX", "units": "-", "source": "bondization", "notes": "Сырое поле offertype"},
+        {"column": "OFFER_KIND", "meaning_ru": "Нормализованный тип оферты", "units": "PUT/CALL/UNKNOWN", "source": "bondization", "notes": "Парсинг по offertype"},
+        {"column": "OFFER_PRICE_NATIVE", "meaning_ru": "Цена оферты в валюте номинала", "units": "faceunit", "source": "calculated", "notes": "FACEVALUE * OFFER_PRICE_PCT / 100"},
+        {"column": "OFFER_PRICE_RUB", "meaning_ru": "Цена оферты в рублях", "units": "RUB", "source": "calculated", "notes": "Только для RUB-номинала"},
+        {"column": "NEXT_AMORT_VALUE", "meaning_ru": "Ближайшая амортизация", "units": "faceunit", "source": "bondization", "notes": "Поле value"},
+        {"column": "NEXT_AMORT_VALUE_RUB", "meaning_ru": "Ближайшая амортизация (руб экв.)", "units": "RUB", "source": "bondization", "notes": "Поле value_rub"},
+        {"column": "NEXT_COUPON_VALUE", "meaning_ru": "Ближайший купон", "units": "faceunit", "source": "bondization", "notes": "Поле value"},
+        {"column": "NEXT_COUPON_VALUE_RUB", "meaning_ru": "Ближайший купон (руб экв.)", "units": "RUB", "source": "bondization", "notes": "Поле value_rub"},
+        {"column": "YTM_SIMPLE", "meaning_ru": "Упрощённая доходность к погашению", "units": "% годовых", "source": "calculated", "notes": "XIRR в валюте номинала"},
+        {"column": "YTM_SIMPLE_OK", "meaning_ru": "Флаг успешного расчёта YTM", "units": "✅/❌", "source": "calculated", "notes": ""},
+        {"column": "HAS_OFFER", "meaning_ru": "Есть будущая оферта", "units": "✅/❌", "source": "bondization", "notes": ""},
+        {"column": "HAS_AMORTIZATION", "meaning_ru": "Есть будущая амортизация", "units": "✅/❌", "source": "bondization", "notes": ""},
+    ]
+    all_columns = [{"column": col, "meaning_ru": "", "units": "", "source": "", "notes": ""} for col in EXPECTED_COLUMNS]
+    base = pd.DataFrame(all_columns).drop_duplicates(subset=["column"])
+    spec = pd.DataFrame(rows)
+    merged = base.merge(spec, on="column", how="left", suffixes=("", "_spec"))
+    for key in ["meaning_ru", "units", "source", "notes"]:
+        merged[key] = merged[f"{key}_spec"].fillna(merged[key]).fillna("")
+    return merged[["column", "meaning_ru", "units", "source", "notes"]]
+
+
 def save_to_excel(df: pd.DataFrame, output_path: Path, detail_sheets: dict[str, pd.DataFrame]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    display_df = df.copy()
+    for col in BOOL_COLUMNS:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(_to_bool_mark)
+
     with pd.ExcelWriter(output_path, engine="openpyxl", datetime_format="yyyy-mm-dd") as writer:
-        df.to_excel(writer, index=False, sheet_name="MOEX_BONDS")
+        display_df.to_excel(writer, index=False, sheet_name="MOEX_BONDS")
         worksheet = writer.sheets["MOEX_BONDS"]
 
         worksheet.freeze_panes = "A2"
         worksheet.sheet_view.zoomScale = 110
         worksheet.row_dimensions[1].height = 22
 
-        for idx, column_name in enumerate(df.columns, start=1):
+        for idx, column_name in enumerate(display_df.columns, start=1):
             column_letter = get_column_letter(idx)
             header_cell = worksheet.cell(row=1, column=idx)
             header_cell.fill = HEADER_FILL
@@ -724,7 +869,7 @@ def save_to_excel(df: pd.DataFrame, output_path: Path, detail_sheets: dict[str, 
 
         for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row):
             for cell in row:
-                column_name = df.columns[cell.column - 1]
+                column_name = display_df.columns[cell.column - 1]
                 cell.border = BORDER
 
                 if column_name in NUMERIC_COLUMNS and isinstance(cell.value, (int, float)):
@@ -755,6 +900,8 @@ def save_to_excel(df: pd.DataFrame, output_path: Path, detail_sheets: dict[str, 
                 if sheet_df.empty:
                     continue
                 sheet_df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+
+        build_column_descriptions().to_excel(writer, index=False, sheet_name="COLUMN_DESCRIPTIONS")
 
 
 def main() -> None:
