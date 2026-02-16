@@ -17,11 +17,25 @@ from typing import Any
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 REFERENCE_URL = "https://iss.moex.com/iss/reference"
 BASE_URL = "https://iss.moex.com"
 
 LOGGER = logging.getLogger("moex_bond_endpoints_probe")
+
+TARGET_ENDPOINT_SLUG = "iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security"
+TARGET_ENDPOINT_DROP_COLUMNS = {
+    "BOARDID",
+    "BOARDNAME",
+    "SECNAME",
+    "ISIN",
+    "LATNAME",
+    "REGNUMBER",
+    "LISTLEVEL",
+}
+TARGET_ENDPOINT_DROP_SHEETS = {"dataversion"}
 
 
 def setup_logging(log_file: Path, level: str) -> None:
@@ -62,6 +76,46 @@ def parse_security_endpoint_templates(reference_html: str) -> list[str]:
     deduped = sorted(set(templates))
     LOGGER.info("Найдено шаблонов endpoint с [security]: %s", len(deduped))
     return deduped
+
+
+def configure_session_retries(session: requests.Session) -> None:
+    retry = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        status=5,
+        backoff_factor=0.6,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+
+def fetch_reference_html(session: requests.Session) -> str:
+    last_exc: requests.RequestException | None = None
+    for attempt in range(1, 6):
+        try:
+            response = session.get(REFERENCE_URL, timeout=30)
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as exc:
+            last_exc = exc
+            wait_seconds = min(8, 2 ** (attempt - 1))
+            LOGGER.warning(
+                "Попытка %s/5 получить ISS reference не удалась: %s. Повтор через %s сек.",
+                attempt,
+                exc,
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        "Не удалось получить список endpoint'ов из ISS reference после 5 попыток. "
+        "Проверьте сеть/VPN/прокси и повторите запуск."
+    ) from last_exc
 
 
 def normalize_sheet_name(value: str, used_names: set[str]) -> str:
@@ -172,21 +226,20 @@ def fetch_json_with_cache(
         if response.status_code != 200:
             LOGGER.debug("Пропуск endpoint %s: HTTP %s", response.url, response.status_code)
             return None, f"http_{response.status_code}"
-
-        payload = response.json()
-        with cache_file.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False)
-        return payload, "api"
-    except JSONDecodeError:
-        LOGGER.debug(
-            "Endpoint вернул не-JSON %s (content-type=%s)",
-            response.url if "response" in locals() else url,
-            response.headers.get("Content-Type", "") if "response" in locals() else "",
-        )
-        return None, "non_json"
     except requests.RequestException as exc:
         LOGGER.warning("Ошибка запроса %s: %s", url, exc)
         return None, "error"
+
+    try:
+        payload = response.json()
+    except (JSONDecodeError, ValueError):
+        content_type = response.headers.get("Content-Type", "")
+        LOGGER.debug("Endpoint вернул не-JSON %s (content-type=%s)", response.url, content_type)
+        return None, "non_json"
+
+    with cache_file.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+    return payload, "api"
 
 
 def payload_to_frames(payload: dict[str, Any], secid: str, request_url: str) -> dict[str, pd.DataFrame]:
@@ -207,14 +260,30 @@ def payload_to_frames(payload: dict[str, Any], secid: str, request_url: str) -> 
     return frames
 
 
+def drop_unwanted_columns_for_endpoint(endpoint_slug: str, frame: pd.DataFrame) -> pd.DataFrame:
+    if endpoint_slug != TARGET_ENDPOINT_SLUG:
+        return frame
+    filtered = frame.drop(columns=[col for col in TARGET_ENDPOINT_DROP_COLUMNS if col in frame.columns], errors="ignore")
+    return filtered
+
+
+def drop_unwanted_sheets_for_endpoint(endpoint_slug: str, sheet_name: str) -> bool:
+    return endpoint_slug == TARGET_ENDPOINT_SLUG and sheet_name in TARGET_ENDPOINT_DROP_SHEETS
+
+
 def save_endpoint_workbook(endpoint_slug: str, frames: dict[str, pd.DataFrame], output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{endpoint_slug}.xlsx"
     used_sheet_names: set[str] = set()
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         for sheet_raw_name, frame in frames.items():
+            if drop_unwanted_sheets_for_endpoint(endpoint_slug, sheet_raw_name):
+                continue
+            prepared_frame = drop_unwanted_columns_for_endpoint(endpoint_slug, frame)
             sheet_name = normalize_sheet_name(sheet_raw_name, used_sheet_names)
-            frame.to_excel(writer, index=False, sheet_name=sheet_name)
+            prepared_frame.to_excel(writer, index=False, sheet_name=sheet_name)
+
     return output_path
 
 
@@ -265,9 +334,10 @@ def main() -> None:
 
     with requests.Session() as session:
         session.headers.update({"User-Agent": "moex-bonds-endpoints-probe/1.0"})
+        configure_session_retries(session)
 
         LOGGER.info("Получаю список endpoint'ов из %s", REFERENCE_URL)
-        reference_html = session.get(REFERENCE_URL, timeout=30).text
+        reference_html = fetch_reference_html(session)
         templates = parse_security_endpoint_templates(reference_html)
 
         endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {}
