@@ -77,11 +77,13 @@ class MoexBondEndpointsClient:
         retries: int = 3,
         cache_dir: Path | None = None,
         use_cache: bool = True,
+        capture: bool = True,
     ):
         self.timeout = timeout
         self.retries = retries
         self.cache_dir = cache_dir
         self.use_cache = use_cache
+        self.capture = capture
 
     def fetch_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         payload, meta = self._fetch_json_with_meta(path=path, params=params)
@@ -160,7 +162,7 @@ class MoexBondEndpointsClient:
                     final_url=final_url,
                     headers_subset=headers_subset,
                 )
-                if self.use_cache and cache_path is not None:
+                if self.capture and cache_path is not None:
                     ensure_parent_dir(cache_path)
                     cache_path.write_text(
                         json.dumps(
@@ -208,7 +210,7 @@ class MoexBondEndpointsClient:
                 final_url=final_url,
                 headers_subset=headers_subset,
             )
-            if self.use_cache and cache_path is not None:
+            if self.capture and cache_path is not None:
                 ensure_parent_dir(cache_path)
                 cache_path.write_text(
                     json.dumps(

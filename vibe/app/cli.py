@@ -65,7 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/cache/moex_iss/endpoint_probe") / today.strftime("%Y%m%d"),
     )
-    probe.add_argument("--no-cache", action="store_true", help="Disable daily endpoint probe cache")
+    probe.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Do not read endpoint probe responses from cache (responses are still captured when --capture is enabled)",
+    )
+    probe.add_argument("--capture", dest="capture", action="store_true", default=True, help="Save raw endpoint responses for diagnostics")
+    probe.add_argument("--no-capture", dest="capture", action="store_false", help="Do not save raw endpoint responses")
 
     return parser
 
@@ -116,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_rows_per_sheet=args.max_rows_per_sheet,
                 cache_dir=args.cache_dir,
                 use_cache=not args.no_cache,
+                capture=args.capture,
                 keep_days=args.keep_days,
             )
             logging.info(

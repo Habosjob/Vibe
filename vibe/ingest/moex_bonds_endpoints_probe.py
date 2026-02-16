@@ -28,6 +28,8 @@ from vibe.utils.retention import cleanup_old_dirs
 
 logger = logging.getLogger(__name__)
 
+META_TABLE_NAMES = {"dataversion", "metadata"}
+
 
 @dataclass
 class ProbeResult:
@@ -183,10 +185,16 @@ def build_probe_summary_df(
 ) -> pd.DataFrame:
     tables = []
     rows_by_table: dict[str, int] = {}
+    rows_total = 0
+    rows_meta = 0
+    rows_effective = 0
     if payload:
         tables_payload = iss_json_to_frames(payload)
         tables = sorted(tables_payload.keys())
         rows_by_table = {name: len(df) for name, df in tables_payload.items()}
+        rows_total = sum(rows_by_table.values())
+        rows_meta = sum(rows for name, rows in rows_by_table.items() if name.lower() in META_TABLE_NAMES)
+        rows_effective = rows_total - rows_meta
 
     if status_override:
         status = status_override
@@ -203,6 +211,9 @@ def build_probe_summary_df(
     elif all(rows == 0 for rows in rows_by_table.values()):
         status = "NO_DATA"
         reason = "empty_table"
+    elif rows_effective == 0 and (meta.status_code == 200 or meta.status_code is None):
+        status = "NO_DATA"
+        reason = "only_meta_tables"
     else:
         status = "OK"
         reason = ""
@@ -218,6 +229,9 @@ def build_probe_summary_df(
                 "elapsed_ms": meta.elapsed_ms,
                 "tables_returned": ",".join(tables),
                 "rows_by_table": json.dumps(rows_by_table, ensure_ascii=False, sort_keys=True),
+                "rows_total": rows_total,
+                "rows_meta": rows_meta,
+                "rows_effective": rows_effective,
                 "board": board,
                 "params_from": from_date.isoformat(),
                 "params_till": till_date.isoformat(),
@@ -248,26 +262,43 @@ def write_isin_workbook(
     try:
         with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
             summary_all_rows: list[dict[str, Any]] = []
-            for sheet_name, frame in endpoint_frames_map.items():
-                safe_summary_name = f"{sheet_name}_summary"[:31]
-                safe_data_name = sheet_name[:31]
-                summary_df = endpoint_summaries_map[sheet_name]
+            for endpoint_name, frame in endpoint_frames_map.items():
+                safe_summary_name = f"{endpoint_name}_summary"[:31]
+                summary_df = endpoint_summaries_map[endpoint_name]
                 summary_df.to_excel(writer, sheet_name=safe_summary_name, index=False)
 
-                data_df = frame.head(max_rows_per_sheet)
-                data_df.to_excel(writer, sheet_name=safe_data_name, index=False)
-                data_ws = writer.sheets[safe_data_name]
-                data_ws.freeze_panes = "A2"
-                if data_df.columns.size > 0:
-                    data_ws.auto_filter.ref = data_ws.dimensions
+                split_frames: dict[str, pd.DataFrame] = {}
+                if "__table" in frame.columns:
+                    for table_name, table_df in frame.groupby(frame["__table"].astype(str), dropna=False):
+                        split_frames[str(table_name)] = table_df.copy()
+
+                if split_frames:
+                    for table_name, table_df in split_frames.items():
+                        safe_data_name = f"{endpoint_name}__{table_name}"[:31]
+                        data_df = table_df.head(max_rows_per_sheet)
+                        data_df.to_excel(writer, sheet_name=safe_data_name, index=False)
+                        data_ws = writer.sheets[safe_data_name]
+                        data_ws.freeze_panes = "A2"
+                        if data_df.columns.size > 0:
+                            data_ws.auto_filter.ref = data_ws.dimensions
+                else:
+                    safe_data_name = endpoint_name[:31]
+                    data_df = frame.head(max_rows_per_sheet)
+                    data_df.to_excel(writer, sheet_name=safe_data_name, index=False)
+                    data_ws = writer.sheets[safe_data_name]
+                    data_ws.freeze_panes = "A2"
+                    if data_df.columns.size > 0:
+                        data_ws.auto_filter.ref = data_ws.dimensions
 
                 summary_row = summary_df.iloc[0].to_dict() if not summary_df.empty else {}
                 summary_all_rows.append(
                     {
-                        "endpoint": sheet_name,
+                        "endpoint": endpoint_name,
                         "__status": summary_row.get("__status", ""),
                         "http_status": summary_row.get("http_status", ""),
-                        "rows": len(data_df),
+                        "rows_total": summary_row.get("rows_total", len(frame)),
+                        "rows_effective": summary_row.get("rows_effective", len(frame)),
+                        "rows": summary_row.get("rows_effective", len(frame)),
                         "reason": summary_row.get("reason", ""),
                         "error": summary_row.get("error", ""),
                         "content_type": summary_row.get("content_type", ""),
@@ -297,6 +328,7 @@ def run_probe(
     max_rows_per_sheet: int = 200_000,
     cache_dir: Path | None = None,
     use_cache: bool = True,
+    capture: bool = True,
     max_workers: int = 4,
     keep_days: int = 7,
 ) -> ProbeResult:
@@ -328,7 +360,13 @@ def run_probe(
         orderbook_status = "ok"
         marketdata_top_of_book: dict[str, Any] | None = None
         orderbook_fallback_pending = False
-        client = MoexBondEndpointsClient(timeout=timeout, retries=retries, cache_dir=cache_dir, use_cache=use_cache)
+        client = MoexBondEndpointsClient(
+            timeout=timeout,
+            retries=retries,
+            cache_dir=cache_dir,
+            use_cache=use_cache,
+            capture=capture,
+        )
 
         try:
             board = client.resolve_board(isin)
@@ -460,6 +498,7 @@ def run_probe_for_latest_bond_rates(
     max_rows_per_sheet: int = 200_000,
     cache_dir: Path | None = None,
     use_cache: bool = True,
+    capture: bool = True,
     keep_days: int = 7,
 ) -> ProbeResult:
     today = datetime.now(timezone.utc).date()
@@ -488,5 +527,6 @@ def run_probe_for_latest_bond_rates(
         max_rows_per_sheet=max_rows_per_sheet,
         cache_dir=cache_dir,
         use_cache=use_cache,
+        capture=capture,
         keep_days=keep_days,
     )
