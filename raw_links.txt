@@ -19,42 +19,10 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_bonds_payload.json
 
 ------------------------------------------------------------
-Директория: endpoint_excels/
+Директория: docs/
 ------------------------------------------------------------
 
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__analyticalproducts__futoi__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__analyticalproducts__netflow2__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security__candleborders.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security__candles.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security__trades.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boards__board__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boards__board__securities__security__candleborders.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boards__board__securities__security__candles.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__boards__board__securities__security__trades.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__securities__security__candleborders.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__securities__security__candles.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__engines__engine__markets__market__securities__security__trades.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boardgroups__boardgroup__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boardgroups__boardgroup__securities__security__dates.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boardgroups__boardgroup__yields__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boards__board__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boards__board__securities__security__dates.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__boards__board__yields__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__securities__security__dates.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__sessions__session__boardgroups__boardgroup__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__sessions__session__boards__board__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__sessions__session__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__engine__markets__market__yields__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__history__engines__stock__totals__boards__board__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__securities__security__aggregates.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__securities__security__indices.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__statistics__engines__currency__markets__fixing__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__statistics__engines__futures__markets__indicativerates__securities__security.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/endpoint_excels/iss__statistics__engines__stock__splits__security.xlsx
+https://raw.githubusercontent.com/Habosjob/Vibe/main/docs/ColumnDocs.md
 
 ------------------------------------------------------------
 Директория: logs/
