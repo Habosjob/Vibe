@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Пробует все доступные endpoint'ы ISS MOEX для облигаций по выбранным SECID и сохраняет ответы в Excel."""
+"""Probe curated endpoint'ов ISS MOEX для облигаций и сохранение инвентаризации в один Excel."""
 
 from __future__ import annotations
 
@@ -12,57 +12,41 @@ import random
 import re
 import threading
 import time
-import warnings
+from dataclasses import dataclass
+from datetime import datetime
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import requests
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.table import Table, TableStyleInfo
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-REFERENCE_URL = "https://iss.moex.com/iss/reference"
-BASE_URL = "https://iss.moex.com"
+from moex_bonds_endpoints import BASE_ISS_PARAMS, EndpointSpec, curated_bond_endpoint_specs
 
+BASE_URL = "https://iss.moex.com"
 LOGGER = logging.getLogger("moex_bond_endpoints_probe")
 THREAD_LOCAL = threading.local()
+DEBUG_MODE = True
 
-HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-HEADER_FONT = Font(color="FFFFFF", bold=True)
-BORDER = Border(
-    left=Side(style="thin", color="D9D9D9"),
-    right=Side(style="thin", color="D9D9D9"),
-    top=Side(style="thin", color="D9D9D9"),
-    bottom=Side(style="thin", color="D9D9D9"),
-)
 
-TARGET_ENDPOINT_SLUG = "iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security"
-TARGET_ENDPOINT_DROP_COLUMNS = {
-    "BOARDID",
-    "BOARDNAME",
-    "SECNAME",
-    "ISIN",
-    "LATNAME",
-    "REGNUMBER",
-    "LISTLEVEL",
-}
-TARGET_ENDPOINT_DROP_SHEETS = {"dataversion"}
+@dataclass
+class TableInfo:
+    name: str
+    rows: int
+    columns: list[str]
+    sample_rows: list[dict[str, Any]]
 
-TARGET_ENDPOINT_SLUG = "iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security"
-TARGET_ENDPOINT_DROP_COLUMNS = {
-    "BOARDID",
-    "BOARDNAME",
-    "SECNAME",
-    "ISIN",
-    "LATNAME",
-    "REGNUMBER",
-    "LISTLEVEL",
-}
-TARGET_ENDPOINT_DROP_SHEETS = {"dataversion"}
+
+@dataclass
+class ProbeResult:
+    secid: str
+    endpoint: str
+    status: str
+    tables: list[TableInfo]
+    elapsed_ms: int
+    from_cache: bool
 
 
 def setup_logging(log_file: Path, level: str) -> None:
@@ -71,38 +55,21 @@ def setup_logging(log_file: Path, level: str) -> None:
     logging.basicConfig(
         level=numeric_level,
         format="%(asctime)s | %(levelname)s | %(message)s",
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
+        handlers=[logging.FileHandler(log_file, encoding="utf-8"), logging.StreamHandler()],
     )
 
 
-def load_secids_from_excel(path: Path) -> list[str]:
-    LOGGER.info("Читаю SECID из %s", path)
-    df = pd.read_excel(path)
-    if "SECID" not in df.columns:
-        raise ValueError(f"В файле {path} отсутствует колонка SECID")
-
-    secids = [str(value).strip() for value in df["SECID"].dropna().tolist() if str(value).strip()]
-    unique_secids = sorted(set(secids))
-    LOGGER.info("Найдено уникальных SECID: %s", len(unique_secids))
-    return unique_secids
-
-
-def parse_security_endpoint_templates(reference_html: str) -> list[str]:
-    endpoints = re.findall(r'<dt><a href="\.\/\d+">([^<]+)</a></dt>', reference_html)
-    templates: list[str] = []
-    for endpoint in endpoints:
-        if "[security]" not in endpoint:
-            continue
-        if endpoint.startswith("/iss/cci/"):
-            continue
-        templates.append(endpoint)
-
-    deduped = sorted(set(templates))
-    LOGGER.info("Найдено шаблонов endpoint с [security]: %s", len(deduped))
-    return deduped
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Собирает inventory по curated endpoint'ам ISS MOEX для облигаций.")
+    parser.add_argument("--input", type=Path, default=Path("moex_bonds.xlsx"), help="Excel-файл со списком облигаций (SECID).")
+    parser.add_argument("--cache-dir", type=Path, default=Path(".cache/moex_endpoint_probe"), help="Каталог кэша HTTP JSON.")
+    parser.add_argument("--cache-ttl", type=int, default=1800, help="TTL кэша в секундах.")
+    parser.add_argument("--static-secid", type=str, default="SU26238RMFS4", help="Статичный SECID для режима DEBUG.")
+    parser.add_argument("--seed", type=int, default=42, help="Seed для выбора random SECID в DEBUG.")
+    parser.add_argument("--log-file", type=Path, default=Path("logs/moex_bond_endpoints_probe.log"), help="Путь к log-файлу.")
+    parser.add_argument("--log-level", type=str, default="INFO", help="Уровень логирования: DEBUG/INFO/WARNING/ERROR.")
+    parser.add_argument("--workers", type=int, default=8, help="Количество потоков для загрузки endpoint'ов.")
+    return parser.parse_args()
 
 
 def configure_session_retries(session: requests.Session) -> None:
@@ -123,7 +90,7 @@ def configure_session_retries(session: requests.Session) -> None:
 
 def build_configured_session() -> requests.Session:
     session = requests.Session()
-    session.headers.update({"User-Agent": "moex-bonds-endpoints-probe/1.0"})
+    session.headers.update({"User-Agent": "moex-bonds-endpoints-probe/2.0"})
     configure_session_retries(session)
     return session
 
@@ -136,109 +103,27 @@ def get_thread_session() -> requests.Session:
     return session
 
 
-def fetch_reference_html(session: requests.Session) -> str:
-    last_exc: requests.RequestException | None = None
-    for attempt in range(1, 6):
-        try:
-            response = session.get(REFERENCE_URL, timeout=30)
-            response.raise_for_status()
-            return response.text
-        except requests.RequestException as exc:
-            last_exc = exc
-            wait_seconds = min(8, 2 ** (attempt - 1))
-            LOGGER.warning(
-                "Попытка %s/5 получить ISS reference не удалась: %s. Повтор через %s сек.",
-                attempt,
-                exc,
-                wait_seconds,
-            )
-            time.sleep(wait_seconds)
-
-    raise RuntimeError(
-        "Не удалось получить список endpoint'ов из ISS reference после 5 попыток. "
-        "Проверьте сеть/VPN/прокси и повторите запуск."
-    ) from last_exc
+def load_secids_from_excel(path: Path) -> list[str]:
+    LOGGER.info("Читаю SECID из %s", path)
+    df = pd.read_excel(path)
+    if "SECID" not in df.columns:
+        raise ValueError(f"В файле {path} отсутствует колонка SECID")
+    secids = [str(value).strip() for value in df["SECID"].dropna().tolist() if str(value).strip()]
+    unique_secids = sorted(set(secids))
+    LOGGER.info("Найдено уникальных SECID: %s", len(unique_secids))
+    return unique_secids
 
 
-def normalize_sheet_name(value: str, used_names: set[str]) -> str:
-    cleaned = re.sub(r"[\\/*?:\[\]]", "_", value).strip()
-    if not cleaned:
-        cleaned = "sheet"
+def pick_secids(all_secids: list[str], static_secid: str, seed: int) -> list[str]:
+    if not DEBUG_MODE:
+        return all_secids
 
-    base = cleaned[:31]
-    candidate = base
-    idx = 1
-    while candidate in used_names:
-        suffix = f"_{idx}"
-        candidate = f"{base[:31-len(suffix)]}{suffix}"
-        idx += 1
-    used_names.add(candidate)
-    return candidate
-
-
-def build_context_for_secid(session: requests.Session, secid: str) -> dict[str, list[str]]:
-    url = f"{BASE_URL}/iss/securities/{secid}.json"
-    response = session.get(url, params={"iss.meta": "off"}, timeout=30)
-    response.raise_for_status()
-    payload = response.json()
-
-    boards_df = pd.DataFrame(
-        payload.get("boards", {}).get("data", []),
-        columns=payload.get("boards", {}).get("columns", []),
-    )
-    if boards_df.empty:
-        return {"board": [], "boardgroup": [], "session": ["total"]}
-
-    if {"engine", "market"}.issubset(boards_df.columns):
-        boards_df = boards_df[(boards_df["engine"] == "stock") & (boards_df["market"] == "bonds")].copy()
-
-    boards = sorted({str(board).strip() for board in boards_df.get("boardid", pd.Series(dtype=str)).dropna().tolist() if str(board).strip()})
-    boardgroups = sorted({str(boardgroup).strip() for boardgroup in boards_df.get("board_group_id", pd.Series(dtype=str)).dropna().tolist() if str(boardgroup).strip()})
-    return {
-        "board": boards,
-        "boardgroup": boardgroups,
-        "session": ["total"],
-    }
-
-
-def instantiate_endpoints(template: str, secid: str, context: dict[str, list[str]]) -> list[str]:
-    values: list[dict[str, str]] = [
-        {
-            "[engine]": "stock",
-            "[market]": "bonds",
-            "[security]": secid,
-        }
-    ]
-
-    if "[board]" in template:
-        values = [
-            {**base, "[board]": board}
-            for base in values
-            for board in context.get("board", [])
-        ]
-    if "[boardgroup]" in template:
-        values = [
-            {**base, "[boardgroup]": boardgroup}
-            for base in values
-            for boardgroup in context.get("boardgroup", [])
-        ]
-    if "[session]" in template:
-        values = [
-            {**base, "[session]": session}
-            for base in values
-            for session in context.get("session", ["total"])
-        ]
-
-    if not values:
-        return []
-
-    urls: list[str] = []
-    for mapping in values:
-        endpoint = template
-        for key, replacement in mapping.items():
-            endpoint = endpoint.replace(key, replacement)
-        urls.append(f"{BASE_URL}{endpoint}.json")
-    return sorted(set(urls))
+    random.seed(seed)
+    random_candidates = [secid for secid in all_secids if secid != static_secid]
+    random_secid = random.choice(random_candidates) if random_candidates else static_secid
+    selected = [static_secid, random_secid] if random_secid != static_secid else [static_secid]
+    LOGGER.info("DEBUG_MODE=True, выбраны SECID: %s", selected)
+    return selected
 
 
 def build_cache_key(url: str, params: dict[str, Any]) -> str:
@@ -246,288 +131,187 @@ def build_cache_key(url: str, params: dict[str, Any]) -> str:
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
-def fetch_json_with_cache(
+def request_json_or_status(
     session: requests.Session,
     url: str,
     params: dict[str, Any],
     cache_dir: Path,
     cache_ttl: int,
-) -> tuple[dict[str, Any] | None, str]:
+) -> tuple[dict[str, Any] | None, str, bool]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_key = build_cache_key(url, params)
     cache_file = cache_dir / f"{cache_key}.json"
 
-    if cache_file.exists():
-        age = time.time() - cache_file.stat().st_mtime
-        if age <= cache_ttl:
-            with cache_file.open("r", encoding="utf-8") as handle:
-                return json.load(handle), "cache"
+    if cache_file.exists() and time.time() - cache_file.stat().st_mtime <= cache_ttl:
+        with cache_file.open("r", encoding="utf-8") as handle:
+            return json.load(handle), "OK", True
 
     try:
         response = session.get(url, params=params, timeout=45)
-        if response.status_code != 200:
-            LOGGER.debug("Пропуск endpoint %s: HTTP %s", response.url, response.status_code)
-            return None, f"http_{response.status_code}"
     except requests.RequestException as exc:
         LOGGER.warning("Ошибка запроса %s: %s", url, exc)
-        return None, "error"
+        return None, "ERROR", False
+
+    if response.status_code != 200:
+        return None, "ERROR", False
 
     try:
         payload = response.json()
     except (JSONDecodeError, ValueError):
-        content_type = response.headers.get("Content-Type", "")
-        LOGGER.debug("Endpoint вернул не-JSON %s (content-type=%s)", response.url, content_type)
-        return None, "non_json"
+        body_start = response.text[:200].strip().lower()
+        if "<html" in body_start or "<!doctype html" in body_start:
+            return None, "BLOCKED_HTML", False
+        return None, "ERROR", False
 
     with cache_file.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False)
-    return payload, "api"
+    return payload, "OK", False
 
 
-def payload_to_frames(payload: dict[str, Any], secid: str, request_url: str) -> dict[str, pd.DataFrame]:
-    frames: dict[str, pd.DataFrame] = {}
-    for block_name, block in payload.items():
+def parse_payload_tables(payload: dict[str, Any]) -> list[TableInfo]:
+    tables: list[TableInfo] = []
+    for table_name, block in payload.items():
         if not isinstance(block, dict):
             continue
-        data = block.get("data")
         columns = block.get("columns")
-        if not isinstance(data, list) or not isinstance(columns, list):
+        rows = block.get("data")
+        if not isinstance(columns, list) or not isinstance(rows, list):
             continue
-        frame = pd.DataFrame(data, columns=columns)
-        if "REQUEST_URL" not in frame.columns:
-            frame.insert(0, "REQUEST_URL", request_url)
-        if "SECID" not in frame.columns:
-            frame.insert(0, "SECID", secid)
-        frames[block_name] = frame
-    return frames
+        frame = pd.DataFrame(rows, columns=columns)
+        sample = frame.head(5).to_dict(orient="records")
+        tables.append(TableInfo(name=table_name, rows=len(frame), columns=[str(c) for c in columns], sample_rows=sample))
+    return tables
 
 
-def drop_unwanted_columns_for_endpoint(endpoint_slug: str, frame: pd.DataFrame) -> pd.DataFrame:
-    if endpoint_slug != TARGET_ENDPOINT_SLUG:
-        return frame
-    filtered = frame.drop(columns=[col for col in TARGET_ENDPOINT_DROP_COLUMNS if col in frame.columns], errors="ignore")
-    return filtered
+def sheet_name_for_endpoint(endpoint: str, used: set[str]) -> str:
+    base = re.sub(r"[^A-Za-z0-9_]", "_", f"sample_{endpoint}")[:31]
+    name = base
+    index = 1
+    while name in used:
+        suffix = f"_{index}"
+        name = f"{base[:31-len(suffix)]}{suffix}"
+        index += 1
+    used.add(name)
+    return name
 
 
-def drop_unwanted_sheets_for_endpoint(endpoint_slug: str, sheet_name: str) -> bool:
-    return endpoint_slug == TARGET_ENDPOINT_SLUG and sheet_name in TARGET_ENDPOINT_DROP_SHEETS
-
-
-def estimate_column_width(series: pd.Series, column_name: str) -> int:
-    samples = [column_name]
-    samples.extend(str(value) for value in series.dropna().head(250).tolist())
-    max_len = max((len(value) for value in samples), default=10)
-    return max(10, min(max_len + 2, 60))
-
-
-def style_endpoint_worksheet(worksheet, frame: pd.DataFrame, table_name: str) -> None:
-    worksheet.freeze_panes = "A2"
-    worksheet.sheet_view.zoomScale = 110
-    worksheet.row_dimensions[1].height = 22
-
-    for idx, column_name in enumerate(frame.columns, start=1):
-        column_letter = get_column_letter(idx)
-        header_cell = worksheet.cell(row=1, column=idx)
-        header_cell.fill = HEADER_FILL
-        header_cell.font = HEADER_FONT
-        header_cell.border = BORDER
-        header_cell.alignment = Alignment(horizontal="center", vertical="center")
-        worksheet.column_dimensions[column_letter].width = estimate_column_width(frame[column_name], column_name)
-
-    for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
-        for cell in row:
-            cell.border = BORDER
-            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
-
-    if worksheet.max_row >= 2 and worksheet.max_column >= 1:
-        table = Table(displayName=table_name, ref=worksheet.dimensions)
-        table.tableStyleInfo = TableStyleInfo(
-            name="TableStyleMedium2",
-            showFirstColumn=False,
-            showLastColumn=False,
-            showRowStripes=True,
-            showColumnStripes=False,
-        )
-        worksheet.add_table(table)
-
-
-def save_endpoint_workbook(endpoint_slug: str, frames: dict[str, pd.DataFrame], output_dir: Path) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{endpoint_slug}.xlsx"
-    used_sheet_names: set[str] = set()
-
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        rendered_frames: dict[str, pd.DataFrame] = {}
-        for sheet_raw_name, frame in frames.items():
-            if drop_unwanted_sheets_for_endpoint(endpoint_slug, sheet_raw_name):
-                continue
-            prepared_frame = drop_unwanted_columns_for_endpoint(endpoint_slug, frame)
-            sheet_name = normalize_sheet_name(sheet_raw_name, used_sheet_names)
-            prepared_frame.to_excel(writer, index=False, sheet_name=sheet_name)
-            rendered_frames[sheet_name] = prepared_frame
-
-        for idx, (sheet_name, frame) in enumerate(rendered_frames.items(), start=1):
-            worksheet = writer.sheets[sheet_name]
-            table_name = f"TBL_{idx:02d}_{endpoint_slug[:18]}"
-            table_name = re.sub(r"[^A-Za-z0-9_]", "_", table_name)[:31]
-            style_endpoint_worksheet(worksheet=worksheet, frame=frame, table_name=table_name)
-
-    return output_path
-
-
-
-def endpoint_slug_from_template(template: str) -> str:
-    slug = template.strip("/")
-    slug = (
-        slug.replace("[engine]", "engine")
-        .replace("[market]", "market")
-        .replace("[security]", "security")
-        .replace("[board]", "board")
-        .replace("[boardgroup]", "boardgroup")
-        .replace("[session]", "session")
-    )
-    slug = re.sub(r"[^a-zA-Z0-9_\-/]+", "_", slug)
-    slug = slug.replace("/", "__")
-    return slug[:180]
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Собирает данные по endpoint'ам ISS MOEX для облигаций.")
-    parser.add_argument("--input", type=Path, default=Path("moex_bonds.xlsx"), help="Excel-файл со списком облигаций (SECID).")
-    parser.add_argument("--output-dir", type=Path, default=Path("endpoint_excels"), help="Каталог для Excel-файлов по endpoint'ам.")
-    parser.add_argument("--cache-dir", type=Path, default=Path(".cache/moex_endpoint_probe"), help="Каталог кэша HTTP JSON.")
-    parser.add_argument("--cache-ttl", type=int, default=1800, help="TTL кэша в секундах.")
-    parser.add_argument("--static-secid", type=str, default="SU26238RMFS4", help="Статичный SECID для проверки кэша.")
-    parser.add_argument("--seed", type=int, default=42, help="Seed для выбора random SECID.")
-    parser.add_argument("--log-file", type=Path, default=Path("logs/moex_bond_endpoints_probe.log"), help="Путь к log-файлу.")
-    parser.add_argument("--log-level", type=str, default="INFO", help="Уровень логирования: DEBUG/INFO/WARNING/ERROR.")
-    parser.add_argument("--workers", type=int, default=8, help="Количество потоков для загрузки endpoint'ов.")
-    return parser.parse_args()
-
-
-def fetch_job_payload(
-    endpoint_slug: str,
-    secid: str,
-    url: str,
-    cache_dir: Path,
-    cache_ttl: int,
-) -> tuple[str, str, str, dict[str, Any] | None, str]:
+def probe_one(spec: EndpointSpec, secid: str, cache_dir: Path, cache_ttl: int) -> ProbeResult:
     session = get_thread_session()
-    params = {"iss.meta": "off", "limit": 100}
-    payload, source = fetch_json_with_cache(
+    path = spec.path_template.format(secid=secid)
+    url = f"{BASE_URL}{path}"
+    params = dict(BASE_ISS_PARAMS)
+    params.update(spec.params)
+
+    started = time.perf_counter()
+    payload, base_status, from_cache = request_json_or_status(
         session=session,
         url=url,
         params=params,
         cache_dir=cache_dir,
         cache_ttl=cache_ttl,
     )
-    return endpoint_slug, secid, url, payload, source
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+    if payload is None:
+        return ProbeResult(secid=secid, endpoint=spec.name, status=base_status, tables=[], elapsed_ms=elapsed_ms, from_cache=from_cache)
+
+    tables = parse_payload_tables(payload)
+    total_rows = sum(table.rows for table in tables)
+    status = "OK" if total_rows > 0 else "NO_DATA"
+    return ProbeResult(secid=secid, endpoint=spec.name, status=status, tables=tables, elapsed_ms=elapsed_ms, from_cache=from_cache)
+
+
+def save_probe_workbook(results: list[ProbeResult]) -> Path:
+    date_folder = datetime.now().strftime("%Y-%m-%d")
+    output_dir = Path("data/raw/moex/bonds_probe") / date_folder
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "bonds_probe.xlsx"
+
+    catalog_rows: list[dict[str, Any]] = []
+    table_rows: list[dict[str, Any]] = []
+    sample_frames: dict[str, pd.DataFrame] = {}
+
+    for result in results:
+        table_names = [table.name for table in result.tables]
+        total_rows = sum(table.rows for table in result.tables)
+        catalog_rows.append(
+            {
+                "secid": result.secid,
+                "endpoint": result.endpoint,
+                "status": result.status,
+                "tables": ", ".join(table_names),
+                "total_rows": total_rows,
+                "elapsed_ms": result.elapsed_ms,
+                "from_cache": result.from_cache,
+            }
+        )
+
+        samples_accum: list[dict[str, Any]] = []
+        for table in result.tables:
+            table_rows.append(
+                {
+                    "secid": result.secid,
+                    "endpoint": result.endpoint,
+                    "table_name": table.name,
+                    "rows": table.rows,
+                    "columns": ", ".join(table.columns),
+                }
+            )
+            for row in table.sample_rows:
+                enriched = {"secid": result.secid, "table_name": table.name, **row}
+                samples_accum.append(enriched)
+
+        if samples_accum:
+            sample_frames[result.endpoint] = pd.DataFrame(samples_accum).head(5)
+
+    catalog_df = pd.DataFrame(catalog_rows)
+    tables_df = pd.DataFrame(table_rows)
+
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        catalog_df.to_excel(writer, sheet_name="catalog", index=False)
+        tables_df.to_excel(writer, sheet_name="tables", index=False)
+
+        used_sheet_names = {"catalog", "tables"}
+        for endpoint, frame in sample_frames.items():
+            frame.to_excel(writer, sheet_name=sheet_name_for_endpoint(endpoint, used_sheet_names), index=False)
+
+    LOGGER.info("Сохранён файл инвентаризации: %s", output_path)
+    return output_path
 
 
 def main() -> None:
-    started_at = time.perf_counter()
+    started = time.perf_counter()
     args = parse_args()
     setup_logging(args.log_file, args.log_level)
 
-    secids = load_secids_from_excel(args.input)
-    if not secids:
+    all_secids = load_secids_from_excel(args.input)
+    if not all_secids:
         raise ValueError("Список SECID пуст")
 
-    random.seed(args.seed)
-    random_candidates = [secid for secid in secids if secid != args.static_secid]
-    random_secid = random.choice(random_candidates) if random_candidates else args.static_secid
-    selected_secids = [args.static_secid, random_secid] if random_secid != args.static_secid else [args.static_secid]
+    selected_secids = pick_secids(all_secids, args.static_secid, args.seed)
+    endpoint_specs = curated_bond_endpoint_specs()
+    LOGGER.info("Curated endpoint'ов: %s", len(endpoint_specs))
 
-    LOGGER.info("Выбранные SECID на период отладки: %s", selected_secids)
+    jobs: list[tuple[EndpointSpec, str]] = [(spec, secid) for secid in selected_secids for spec in endpoint_specs]
+    results: list[ProbeResult] = []
 
-    with build_configured_session() as session:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        futures = [
+            executor.submit(probe_one, spec, secid, args.cache_dir, args.cache_ttl)
+            for spec, secid in jobs
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
 
-        LOGGER.info("Получаю список endpoint'ов из %s", REFERENCE_URL)
-        reference_html = fetch_reference_html(session)
-        templates = parse_security_endpoint_templates(reference_html)
+    results.sort(key=lambda item: (item.secid, item.endpoint))
+    output_path = save_probe_workbook(results)
 
-        endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {}
-        stats = {"api": 0, "cache": 0, "non_json": 0, "http_skipped": 0, "errors": 0}
+    status_count: dict[str, int] = {}
+    for result in results:
+        status_count[result.status] = status_count.get(result.status, 0) + 1
 
-        jobs: list[tuple[str, str, str]] = []
-        for secid in selected_secids:
-            LOGGER.info("Обрабатываю SECID=%s", secid)
-            context = build_context_for_secid(session=session, secid=secid)
-            LOGGER.debug("Контекст SECID=%s: %s", secid, context)
-
-            secid_urls_total = 0
-            for template in templates:
-                endpoint_slug = endpoint_slug_from_template(template)
-                urls = instantiate_endpoints(template=template, secid=secid, context=context)
-                secid_urls_total += len(urls)
-                for url in urls:
-                    jobs.append((endpoint_slug, secid, url))
-
-            LOGGER.info("SECID=%s: сформировано endpoint URL: %s", secid, secid_urls_total)
-
-        LOGGER.info("Всего endpoint URL для обработки: %s", len(jobs))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
-            futures = [
-                executor.submit(
-                    fetch_job_payload,
-                    endpoint_slug,
-                    secid,
-                    url,
-                    args.cache_dir,
-                    args.cache_ttl,
-                )
-                for endpoint_slug, secid, url in jobs
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                endpoint_slug, secid, url, payload, source = future.result()
-
-                if payload is None:
-                    if source == "non_json":
-                        stats["non_json"] += 1
-                    elif source.startswith("http_"):
-                        stats["http_skipped"] += 1
-                    else:
-                        stats["errors"] += 1
-                    continue
-
-                stats[source] += 1
-                frames = payload_to_frames(payload=payload, secid=secid, request_url=url)
-                if not frames:
-                    continue
-
-                endpoint_frames.setdefault(endpoint_slug, {})
-                for block_name, frame in frames.items():
-                    endpoint_frames[endpoint_slug].setdefault(block_name, []).append(frame)
-
-        LOGGER.info(
-            "Статистика запросов: api=%s cache=%s non_json=%s http_skipped=%s errors=%s",
-            stats["api"],
-            stats["cache"],
-            stats["non_json"],
-            stats["http_skipped"],
-            stats["errors"],
-        )
-
-        LOGGER.info("Сохраняю Excel по endpoint-шаблонам в %s", args.output_dir)
-        for endpoint_slug, blocks in endpoint_frames.items():
-            sheets: dict[str, pd.DataFrame] = {}
-            for block_name, frames in blocks.items():
-                non_empty_frames = [
-                    frame for frame in frames if not frame.empty and not frame.dropna(how="all").empty
-                ]
-                frames_for_concat = non_empty_frames or frames
-                if len(frames_for_concat) == 1:
-                    sheets[block_name] = frames_for_concat[0].copy()
-                else:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", FutureWarning)
-                        sheets[block_name] = pd.concat(frames_for_concat, ignore_index=True)
-            output_path = save_endpoint_workbook(endpoint_slug=endpoint_slug, frames=sheets, output_dir=args.output_dir)
-            LOGGER.info("Сохранён endpoint Excel: %s (листов=%s)", output_path, len(sheets))
-
-    total_seconds = time.perf_counter() - started_at
-    LOGGER.info("Готово. Всего endpoint Excel: %s", len(endpoint_frames))
-    LOGGER.info("Общее время выполнения: %.2f сек.", total_seconds)
+    LOGGER.info("Статусы: %s", status_count)
+    LOGGER.info("Готово за %.2f сек. Файл: %s", time.perf_counter() - started, output_path)
 
 
 if __name__ == "__main__":
