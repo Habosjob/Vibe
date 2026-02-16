@@ -54,8 +54,8 @@ NUMERIC_COLUMNS = {
     "PRICE_RUB": "#,##0.00",
     "PRICE_RUB_WA": "#,##0.00",
     "DIRTY_PRICE_RUB": "#,##0.00",
-    "OFFER_PRICE": "#,##0.00",
     "OFFER_PRICE_PCT": "0.00",
+    "OFFER_PRICE_RUB": "#,##0.00",
     "NEXT_AMORT_VALUE": "#,##0.00",
     "NEXT_COUPON_VALUE": "#,##0.00",
     "YTM_SIMPLE": "0.00%",
@@ -119,8 +119,8 @@ EXPECTED_COLUMNS = [
     "HAS_OFFER",
     "NEXT_OFFER_DATE",
     "OFFER_TYPE",
-    "OFFER_PRICE",
     "OFFER_PRICE_PCT",
+    "OFFER_PRICE_RUB",
     "HAS_AMORTIZATION",
     "AMORT_START_DATE",
     "NEXT_AMORT_DATE",
@@ -407,9 +407,6 @@ def _aggregate_bondization(
                     offer_price_pct = price
                     if faceunit.upper() in {"RUB", "SUR", "RUR"} and facevalue is not None:
                         offer_price_rub = facevalue * price / 100.0
-                else:
-                    picked_offer, offer_scale = _pick_money_per_bond(offer_cols, row, facevalue, prefer_rub=True)
-                    offer_price_rub, _ = _sanitize_per_bond_value(picked_offer, facevalue, offer_scale)
 
     next_coupon_date: pd.Timestamp | None = None
     next_coupon_value: float | None = None
@@ -447,8 +444,8 @@ def _aggregate_bondization(
         "HAS_OFFER": bool(next_offer_date is not None),
         "NEXT_OFFER_DATE": next_offer_date,
         "OFFER_TYPE": offer_type,
-        "OFFER_PRICE": offer_price_rub,
         "OFFER_PRICE_PCT": offer_price_pct,
+        "OFFER_PRICE_RUB": offer_price_rub,
         "HAS_AMORTIZATION": bool(next_amort_date is not None),
         "AMORT_START_DATE": amort_start_date,
         "NEXT_AMORT_DATE": next_amort_date,
@@ -497,17 +494,12 @@ def _xirr(dates: list[pd.Timestamp], cashflows: list[float]) -> float | None:
 
 def _build_cashflows_for_ytm(row: pd.Series, bondization: dict[str, pd.DataFrame]) -> tuple[list[pd.Timestamp], list[float]]:
     dirty_price = pd.to_numeric(row.get("DIRTY_PRICE_RUB"), errors="coerce")
-    price = pd.to_numeric(row.get("PRICE_RUB"), errors="coerce")
-    price_wa = pd.to_numeric(row.get("PRICE_RUB_WA"), errors="coerce")
-    initial = dirty_price if pd.notna(dirty_price) and dirty_price > 0 else price
-    if (pd.isna(initial) or float(initial) <= 0) and pd.notna(price_wa) and float(price_wa) > 0:
-        initial = price_wa
-    if pd.isna(initial) or float(initial) <= 0:
+    if pd.isna(dirty_price) or float(dirty_price) <= 0:
         return [], []
 
     today = pd.Timestamp.today().normalize()
     dates = [today]
-    cashflows = [-float(initial)]
+    cashflows = [-float(dirty_price)]
 
     facevalue = pd.to_numeric(row.get("FACEVALUE"), errors="coerce")
     facevalue_float = float(facevalue) if pd.notna(facevalue) else None
@@ -528,12 +520,14 @@ def _build_cashflows_for_ytm(row: pd.Series, bondization: dict[str, pd.DataFrame
 
     amortizations = bondization.get("amortizations", pd.DataFrame()).copy()
     amort_sum = 0.0
+    has_future_amortizations = False
     if not amortizations.empty:
         date_col = _find_column(amortizations, ["AMORT", "DATE"])
         if date_col:
             amort_cols = amortizations.columns.tolist()
             amortizations[date_col] = pd.to_datetime(amortizations[date_col], errors="coerce")
             amortizations = amortizations[amortizations[date_col] > today].sort_values(date_col)
+            has_future_amortizations = not amortizations.empty
             for _, a in amortizations.iterrows():
                 amort_value_raw, amort_scale = _pick_money_per_bond(amort_cols, a, facevalue_float, prefer_rub=True)
                 amort_value, _ = _sanitize_per_bond_value(amort_value_raw, facevalue_float, amort_scale)
@@ -549,9 +543,8 @@ def _build_cashflows_for_ytm(row: pd.Series, bondization: dict[str, pd.DataFrame
         if remainder > 0.01:
             dates.append(matdate)
             cashflows.append(remainder)
-        elif amort_sum == 0:
-            dates.append(matdate)
-            cashflows.append(float(facevalue))
+        elif has_future_amortizations and abs(remainder) <= 0.01:
+            pass
 
     pairs = sorted([(d, cf) for d, cf in zip(dates, cashflows) if pd.notna(d) and pd.notna(cf)], key=lambda x: x[0])
     if len(pairs) < 2:
@@ -585,6 +578,11 @@ def build_report_dataframe(securities: pd.DataFrame, marketdata: pd.DataFrame, o
     report["DIRTY_PRICE_RUB"] = pd.to_numeric(report["PRICE_RUB"], errors="coerce") + pd.to_numeric(
         report["ACCRUEDINT_RUB"], errors="coerce"
     )
+    report.loc[report["ACCRUEDINT_RUB"].isna(), "DIRTY_PRICE_RUB"] = pd.to_numeric(
+        report.loc[report["ACCRUEDINT_RUB"].isna(), "PRICE_RUB"], errors="coerce"
+    )
+    report.loc[~is_rub, "PRICE_RUB"] = pd.NA
+    report.loc[~is_rub, "DIRTY_PRICE_RUB"] = pd.NA
 
     for col in EXPECTED_COLUMNS:
         if col not in report.columns:
