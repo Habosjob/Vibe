@@ -41,19 +41,12 @@ NUMERIC_COLUMNS = {
 
 COLUMN_WIDTHS = {
     "SECID": 14,
-    "ISIN": 14,
     "SHORTNAME": 16,
-    "SECNAME": 34,
-    "BOARDID": 9,
-    "REGNUMBER": 16,
-    "LISTLEVEL": 10,
     "FACEVALUE": 14,
     "FACEUNIT": 10,
     "COUPONVALUE": 14,
     "COUPONPERIOD": 13,
     "MATDATE": 12,
-    "STATUS": 10,
-    "TRADINGSTATUS": 14,
     "LAST": 10,
     "WAPRICE": 10,
     "YIELD": 10,
@@ -62,23 +55,16 @@ COLUMN_WIDTHS = {
     "NUMTRADES": 12,
 }
 
-CENTER_COLUMNS = {"BOARDID", "LISTLEVEL", "FACEUNIT", "STATUS", "TRADINGSTATUS", "MATDATE"}
+CENTER_COLUMNS = {"FACEUNIT", "MATDATE"}
 
 COLUMN_DESCRIPTIONS = {
     "SECID": "Уникальный тикер (код) облигации на MOEX.",
-    "ISIN": "Международный идентификационный номер ценной бумаги.",
     "SHORTNAME": "Краткое наименование облигации.",
-    "SECNAME": "Полное наименование облигации.",
-    "BOARDID": "Идентификатор торгового режима (доски торгов).",
-    "REGNUMBER": "Регистрационный номер выпуска облигации.",
-    "LISTLEVEL": "Уровень листинга на бирже.",
     "FACEVALUE": "Номинальная стоимость облигации.",
     "FACEUNIT": "Валюта номинальной стоимости.",
     "COUPONVALUE": "Размер купонной выплаты за период.",
     "COUPONPERIOD": "Периодичность купона в днях.",
     "MATDATE": "Дата погашения облигации.",
-    "STATUS": "Статус инструмента (например, A — активен).",
-    "TRADINGSTATUS": "Текущий торговый статус по рыночным данным.",
     "LAST": "Последняя цена сделки.",
     "WAPRICE": "Средневзвешенная цена.",
     "YIELD": "Доходность, рассчитанная по рыночным данным.",
@@ -118,10 +104,10 @@ def fetch_moex_bonds(
         "iss.meta": "off",
         "iss.only": "securities,marketdata",
         "securities.columns": (
-            "SECID,SHORTNAME,SECNAME,ISIN,REGNUMBER,BOARDID,FACEUNIT,"
-            "FACEVALUE,COUPONVALUE,COUPONPERIOD,MATDATE,STATUS,LISTLEVEL"
+            "SECID,SHORTNAME,FACEUNIT,"
+            "FACEVALUE,COUPONVALUE,COUPONPERIOD,MATDATE,STATUS"
         ),
-        "marketdata.columns": "SECID,LAST,WAPRICE,YIELD,VALUE,VOLRUR,NUMTRADES,TRADINGSTATUS",
+        "marketdata.columns": "SECID,LAST,WAPRICE,YIELD,VALUE,VOLRUR,NUMTRADES",
     }
     payload = load_payload_from_cache(cache_file=cache_file, cache_ttl_seconds=cache_ttl_seconds)
     source = "cache"
@@ -157,22 +143,17 @@ def build_report_dataframe(
 
     if "MATDATE" in report.columns:
         report["MATDATE"] = pd.to_datetime(report["MATDATE"], errors="coerce")
+        min_maturity_date = pd.Timestamp.today().normalize() + pd.DateOffset(years=1)
+        report = report[(report["MATDATE"].isna()) | (report["MATDATE"] >= min_maturity_date)].copy()
 
     ordered_columns = [
         "SECID",
-        "ISIN",
         "SHORTNAME",
-        "SECNAME",
-        "BOARDID",
-        "REGNUMBER",
-        "LISTLEVEL",
         "FACEVALUE",
         "FACEUNIT",
         "COUPONVALUE",
         "COUPONPERIOD",
         "MATDATE",
-        "STATUS",
-        "TRADINGSTATUS",
         "LAST",
         "WAPRICE",
         "YIELD",
