@@ -11,6 +11,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bonds_to_excel.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links_latest.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/~$moex_bonds.xlsx
 
 ------------------------------------------------------------
 Директория: .cache/
@@ -499,6 +500,27 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/RU0
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/RU000A10DDH1.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29007RMFS0.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/XS1843437036.json
+
+    --------------------------------------------------------
+    Директория: .cache/moex/emitter/
+    --------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/1039.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/10856.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/11306.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/11315.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/12606.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/14807.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/15282.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/269.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/33.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/3588.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/4033.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/465.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/4682.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/4779.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/484.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/6199.json
 
         ----------------------------------------------------
         Директория: data/raw/moex/bonds_probe/2026-02-16/
