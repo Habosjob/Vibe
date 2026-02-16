@@ -22,7 +22,7 @@ MOEX_BONDIZATION_URL = "https://iss.moex.com/iss/securities/{secid}/bondization.
 
 OUTPUT_XLSX = "moex_bonds.xlsx"
 ENRICH_ENABLE = True
-ENRICH_LIMIT = 200
+ENRICH_LIMIT = 20
 ENRICH_SECIDS: list[str] = []
 CACHE_ENABLE = True
 CACHE_TTL_HOURS = 24
