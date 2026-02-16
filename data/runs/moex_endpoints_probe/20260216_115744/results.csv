@@ -1,8 +1,0 @@
-isin,board,endpoint,status,reason,http_status,content_type,from_cache,elapsed_ms,rows_total,rows_effective,error
-RU0002868001,TQCB,securities,NO_DATA,empty_table,200,application/json; charset=utf-8,False,371,0,0,
-RU0002868001,TQCB,marketdata,NO_DATA,only_meta_tables,200,application/json; charset=utf-8,False,371,1,0,
-RU0002868001,TQCB,history,OK,,200,application/json; charset=utf-8,False,383,1,1,
-RU0002868001,TQCB,candles,NO_DATA,empty_table,200,application/json; charset=utf-8,False,365,0,0,
-RU0002868001,TQCB,trades,NO_DATA,only_meta_tables,200,application/json; charset=utf-8,False,719,1,0,
-RU0002868001,TQCB,orderbook,BLOCKED_HTML,html_instead_of_json,200,text/html,False,352,0,0,HTML_INSTEAD_OF_JSON
-RU0002868001,TQCB,bondization,NO_DATA,empty_table,200,application/json; charset=utf-8,False,357,0,0,
