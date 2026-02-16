@@ -121,15 +121,25 @@ def _extract_top_of_book_from_marketdata(frame: pd.DataFrame) -> dict[str, Any] 
     if frame.empty:
         return None
 
-    marketdata_scope = frame
+    search_scopes = [frame]
     if "__table" in frame.columns:
         table_names = frame["__table"].astype(str).str.lower()
         scoped = frame[table_names.isin(["marketdata", "marketdata_yields"])]
         if not scoped.empty:
-            marketdata_scope = scoped
+            search_scopes = [scoped, frame]
 
-    bestbid = _pick_first_value(marketdata_scope, ["BESTBID", "BID", "BIDPRICE"])
-    bestoffer = _pick_first_value(marketdata_scope, ["BESTOFFER", "OFFER", "OFFERPRICE"])
+    bestbid = None
+    bestoffer = None
+    bid_depth = None
+    offer_depth = None
+    for scope in search_scopes:
+        bestbid = _pick_first_value(scope, ["BESTBID", "BID", "BIDPRICE"])
+        bestoffer = _pick_first_value(scope, ["BESTOFFER", "OFFER", "OFFERPRICE"])
+        bid_depth = _pick_first_value(scope, ["BIDDEPTH", "NUMBIDS", "BIDQTY"])
+        offer_depth = _pick_first_value(scope, ["OFFERDEPTH", "NUMOFFERS", "OFFERQTY"])
+        if bestbid is not None or bestoffer is not None:
+            break
+
     if bestbid is None and bestoffer is None:
         return None
 
@@ -138,9 +148,6 @@ def _extract_top_of_book_from_marketdata(frame: pd.DataFrame) -> dict[str, Any] 
     offer_value = pd.to_numeric(pd.Series([bestoffer]), errors="coerce").iloc[0]
     if pd.notna(bid_value) and pd.notna(offer_value):
         spread = float(offer_value - bid_value)
-
-    bid_depth = _pick_first_value(marketdata_scope, ["BIDDEPTH", "NUMBIDS", "BIDQTY"])
-    offer_depth = _pick_first_value(marketdata_scope, ["OFFERDEPTH", "NUMOFFERS", "OFFERQTY"])
 
     return {
         "top_of_book_best_bid": bestbid,
@@ -240,6 +247,7 @@ def write_isin_workbook(
 
     try:
         with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+            summary_all_rows: list[dict[str, Any]] = []
             for sheet_name, frame in endpoint_frames_map.items():
                 safe_summary_name = f"{sheet_name}_summary"[:31]
                 safe_data_name = sheet_name[:31]
@@ -248,6 +256,27 @@ def write_isin_workbook(
 
                 data_df = frame.head(max_rows_per_sheet)
                 data_df.to_excel(writer, sheet_name=safe_data_name, index=False)
+                data_ws = writer.sheets[safe_data_name]
+                data_ws.freeze_panes = "A2"
+                if data_df.columns.size > 0:
+                    data_ws.auto_filter.ref = data_ws.dimensions
+
+                summary_row = summary_df.iloc[0].to_dict() if not summary_df.empty else {}
+                summary_all_rows.append(
+                    {
+                        "endpoint": sheet_name,
+                        "__status": summary_row.get("__status", ""),
+                        "http_status": summary_row.get("http_status", ""),
+                        "rows": len(data_df),
+                        "reason": summary_row.get("reason", ""),
+                        "error": summary_row.get("error", ""),
+                        "content_type": summary_row.get("content_type", ""),
+                        "from_cache": summary_row.get("from_cache", ""),
+                        "elapsed_ms": summary_row.get("elapsed_ms", ""),
+                    }
+                )
+
+            pd.DataFrame(summary_all_rows).to_excel(writer, sheet_name="summary_all", index=False)
 
             pd.DataFrame([meta]).to_excel(writer, sheet_name="meta", index=False)
         atomic_replace_with_retry(temp_path, out_path)
