@@ -4,6 +4,7 @@
 ============================================================
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.gitignore
+https://raw.githubusercontent.com/Habosjob/Vibe/main/Git_auto.bat
 https://raw.githubusercontent.com/Habosjob/Vibe/main/README.md
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/pytest.ini
@@ -237,3 +238,9 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoin
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/fbb6eea4ab9f84d1d0ede560217f51d0041591db5d73bb122bd0d8069884d44b.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/fcd4c1983bffc29d8221e7b742c8edddee2e30d5bfa142f9a37645c4dfb0a53a.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/ff8bf0e68ff6c6ecc993e4b9a38513eb450a231b86dd1ea1b5a4ef60bdbc2fdb.json
+
+        ----------------------------------------------------
+        Директория: data/curated/moex/endpoints_probe/20260216/
+        ----------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/curated/moex/endpoints_probe/20260216/RU0002868001.xlsx

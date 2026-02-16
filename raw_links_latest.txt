@@ -56,3 +56,4 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoin
 ПОСЛЕДНИЕ CURATED XLSX (endpoints_probe):
 ============================================================
 
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/curated/moex/endpoints_probe/20260216/RU0002868001.xlsx
