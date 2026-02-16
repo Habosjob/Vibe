@@ -1,0 +1,1 @@
+{"securities": {"columns": ["tradedate", "tradetime", "secid", "rate", "clearing"], "data": []}, "securities.cursor": {"columns": ["INDEX", "TOTAL", "PAGESIZE"], "data": [[0, 0, 100]]}, "securities.dates": {"columns": ["from", "till"], "data": []}, "securities.current": {"columns": ["secid", "tradedate", "tradetime", "rate"], "data": []}}
