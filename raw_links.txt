@@ -26,8 +26,10 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_endpoints_probe_2
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/conftest.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_cache_key_stability.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_capture_without_cache_read.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_cli_defaults.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_excel_atomic_write.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_excel_writes_tables.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_http.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_http_response_contract.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_http_utils.py
@@ -43,6 +45,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_orderbook_html_c
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_orderbook_html_fallback.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_probe_writes_summary_for_empty.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_retention_cleanup.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_rows_effective_and_status.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_top_of_book_extraction.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/tests/test_workbook_layout.py
 
@@ -238,6 +241,19 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoin
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/fbb6eea4ab9f84d1d0ede560217f51d0041591db5d73bb122bd0d8069884d44b.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/fcd4c1983bffc29d8221e7b742c8edddee2e30d5bfa142f9a37645c4dfb0a53a.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/ff8bf0e68ff6c6ecc993e4b9a38513eb450a231b86dd1ea1b5a4ef60bdbc2fdb.json
+
+        ----------------------------------------------------
+        Директория: data/cache/moex_iss/endpoint_probe/20260216/
+        ----------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/126ff68f59d725182e2415b0ac112067603f821a83a58bcf6ff51c57970aa88c.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/31c78f239dc04e979547f1711dd688303572a8531c5f44c8fe03d31ed0011bf1.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/36ff5a83c2864caa5bd851835c005a08c24106a1a5b27e33a381f39bd8e7511f.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/6a6b8461bfa673e9241e6674157e9a5d1dc688bcc7515aca8071b6be4fe9c153.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/9f63a82c1ef57efb4def26a0831eef1f0e3258d9a8b4bd5c86e6949784e93f92.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/ac72a8f9f788155589ac123ee2aad0db2565ec639117a99616e408bdff342847.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/e563509ee59263ff9def25f23f5e55f5327c0b64f3c71a847f20d6273852ca77.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/f2a8c2fa9298774f8bb94de34ed12310c3ea0102497ca4f8119e5ef3b5f2978f.json
 
         ----------------------------------------------------
         Директория: data/curated/moex/endpoints_probe/20260216/

@@ -21,14 +21,6 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_endpoints_probe_2
 ПОСЛЕДНИЕ CACHE JSON (endpoint_probe):
 ============================================================
 
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/d88979155e9541c4f8f4db85e66322fb53d4c14b13c3221484ff86ecc9289a6d.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/d9fe72ad03a4e797d5f77cd0a43827dcae5eab89a5114497211adcbc5df78c03.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/dd4babdc3f75543a715f77352d489482846e6305f87ac39f1fa3b5ffc8396d33.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/df35bb1a4098323e0f76cf43033070a0498fc3810531bac860a3d72ac78cf1de.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e1bbae8ee4cc8d0bdf0d6c67fde4ec160361a84c594ff712c8ea112b85cde028.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e1f18a58905aa484f822f60f6cc796404708b16c2645dc3d950fcf253e26ea6f.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e38b80e688b5a7b52ba96ba4e76f68adc1dc2d7ec53ca8a718b09b6721b6bfdf.json
-https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e3a87aed37b885f7519fd4124fa9669b9cd9dd36cc2c3a5f13b0ae620ead440e.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e4215fa180d6fc36be9d47d4cf5dbc6fa931b37567548bd58c193bbd3f8a268a.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e46011c90642565fcca78af6167e8cfda8717fa5835e6147f6fc42babf2c759f.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/e54fb0c202f15642eb516a67c405e58130daf43d154bda3c4c6de6e0275ee76b.json
@@ -51,6 +43,14 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoin
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/fbb6eea4ab9f84d1d0ede560217f51d0041591db5d73bb122bd0d8069884d44b.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/fcd4c1983bffc29d8221e7b742c8edddee2e30d5bfa142f9a37645c4dfb0a53a.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260215/ff8bf0e68ff6c6ecc993e4b9a38513eb450a231b86dd1ea1b5a4ef60bdbc2fdb.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/126ff68f59d725182e2415b0ac112067603f821a83a58bcf6ff51c57970aa88c.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/31c78f239dc04e979547f1711dd688303572a8531c5f44c8fe03d31ed0011bf1.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/36ff5a83c2864caa5bd851835c005a08c24106a1a5b27e33a381f39bd8e7511f.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/6a6b8461bfa673e9241e6674157e9a5d1dc688bcc7515aca8071b6be4fe9c153.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/9f63a82c1ef57efb4def26a0831eef1f0e3258d9a8b4bd5c86e6949784e93f92.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/ac72a8f9f788155589ac123ee2aad0db2565ec639117a99616e408bdff342847.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/e563509ee59263ff9def25f23f5e55f5327c0b64f3c71a847f20d6273852ca77.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/data/cache/moex_iss/endpoint_probe/20260216/f2a8c2fa9298774f8bb94de34ed12310c3ea0102497ca4f8119e5ef3b5f2978f.json
 
 ============================================================
 ПОСЛЕДНИЕ CURATED XLSX (endpoints_probe):
