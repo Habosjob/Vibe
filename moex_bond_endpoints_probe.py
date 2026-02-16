@@ -23,6 +23,18 @@ BASE_URL = "https://iss.moex.com"
 
 LOGGER = logging.getLogger("moex_bond_endpoints_probe")
 
+TARGET_ENDPOINT_SLUG = "iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security"
+TARGET_ENDPOINT_DROP_COLUMNS = {
+    "BOARDID",
+    "BOARDNAME",
+    "SECNAME",
+    "ISIN",
+    "LATNAME",
+    "REGNUMBER",
+    "LISTLEVEL",
+}
+TARGET_ENDPOINT_DROP_SHEETS = {"dataversion"}
+
 
 def setup_logging(log_file: Path, level: str) -> None:
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -172,21 +184,20 @@ def fetch_json_with_cache(
         if response.status_code != 200:
             LOGGER.debug("Пропуск endpoint %s: HTTP %s", response.url, response.status_code)
             return None, f"http_{response.status_code}"
-
-        payload = response.json()
-        with cache_file.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False)
-        return payload, "api"
-    except JSONDecodeError:
-        LOGGER.debug(
-            "Endpoint вернул не-JSON %s (content-type=%s)",
-            response.url if "response" in locals() else url,
-            response.headers.get("Content-Type", "") if "response" in locals() else "",
-        )
-        return None, "non_json"
     except requests.RequestException as exc:
         LOGGER.warning("Ошибка запроса %s: %s", url, exc)
         return None, "error"
+
+    try:
+        payload = response.json()
+    except (JSONDecodeError, ValueError):
+        content_type = response.headers.get("Content-Type", "")
+        LOGGER.debug("Endpoint вернул не-JSON %s (content-type=%s)", response.url, content_type)
+        return None, "non_json"
+
+    with cache_file.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+    return payload, "api"
 
 
 def payload_to_frames(payload: dict[str, Any], secid: str, request_url: str) -> dict[str, pd.DataFrame]:
@@ -207,14 +218,30 @@ def payload_to_frames(payload: dict[str, Any], secid: str, request_url: str) -> 
     return frames
 
 
+def drop_unwanted_columns_for_endpoint(endpoint_slug: str, frame: pd.DataFrame) -> pd.DataFrame:
+    if endpoint_slug != TARGET_ENDPOINT_SLUG:
+        return frame
+    filtered = frame.drop(columns=[col for col in TARGET_ENDPOINT_DROP_COLUMNS if col in frame.columns], errors="ignore")
+    return filtered
+
+
+def drop_unwanted_sheets_for_endpoint(endpoint_slug: str, sheet_name: str) -> bool:
+    return endpoint_slug == TARGET_ENDPOINT_SLUG and sheet_name in TARGET_ENDPOINT_DROP_SHEETS
+
+
 def save_endpoint_workbook(endpoint_slug: str, frames: dict[str, pd.DataFrame], output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{endpoint_slug}.xlsx"
     used_sheet_names: set[str] = set()
+
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         for sheet_raw_name, frame in frames.items():
+            if drop_unwanted_sheets_for_endpoint(endpoint_slug, sheet_raw_name):
+                continue
+            prepared_frame = drop_unwanted_columns_for_endpoint(endpoint_slug, frame)
             sheet_name = normalize_sheet_name(sheet_raw_name, used_sheet_names)
-            frame.to_excel(writer, index=False, sheet_name=sheet_name)
+            prepared_frame.to_excel(writer, index=False, sheet_name=sheet_name)
+
     return output_path
 
 

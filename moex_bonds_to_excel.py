@@ -57,23 +57,6 @@ COLUMN_WIDTHS = {
 
 CENTER_COLUMNS = {"FACEUNIT", "MATDATE"}
 
-COLUMN_DESCRIPTIONS = {
-    "SECID": "Уникальный тикер (код) облигации на MOEX.",
-    "SHORTNAME": "Краткое наименование облигации.",
-    "FACEVALUE": "Номинальная стоимость облигации.",
-    "FACEUNIT": "Валюта номинальной стоимости.",
-    "COUPONVALUE": "Размер купонной выплаты за период.",
-    "COUPONPERIOD": "Периодичность купона в днях.",
-    "MATDATE": "Дата погашения облигации.",
-    "LAST": "Последняя цена сделки.",
-    "WAPRICE": "Средневзвешенная цена.",
-    "YIELD": "Доходность, рассчитанная по рыночным данным.",
-    "VALUE": "Общий объем торгов в штуках/лотах по данным ISS.",
-    "VOLRUR": "Объем торгов в рублях.",
-    "NUMTRADES": "Количество сделок за сессию.",
-}
-
-
 def load_payload_from_cache(cache_file: Path, cache_ttl_seconds: int) -> dict[str, Any] | None:
     """Возвращает кэшированный payload, если кэш существует и не устарел."""
     if not cache_file.exists():
@@ -214,37 +197,6 @@ def save_to_excel(df: pd.DataFrame, output_path: Path) -> None:
                 showColumnStripes=False,
             )
             worksheet.add_table(table)
-
-        docs_sheet = writer.book.create_sheet(title="COLUMN_DOCS")
-        docs_sheet.append(["COLUMN_NAME", "DESCRIPTION_RU"])
-        for column_name in df.columns:
-            docs_sheet.append([column_name, COLUMN_DESCRIPTIONS.get(column_name, "Описание не задано")])
-
-        docs_sheet.freeze_panes = "A2"
-        docs_sheet.column_dimensions["A"].width = 20
-        docs_sheet.column_dimensions["B"].width = 90
-
-        for cell in docs_sheet[1]:
-            cell.fill = HEADER_FILL
-            cell.font = HEADER_FONT
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = BORDER
-
-        for row in docs_sheet.iter_rows(min_row=2, max_row=docs_sheet.max_row, min_col=1, max_col=2):
-            for cell in row:
-                cell.border = BORDER
-                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-
-        if docs_sheet.max_row >= 2:
-            docs_table = Table(displayName="MOEX_BONDS_COLUMN_DOCS", ref=docs_sheet.dimensions)
-            docs_table.tableStyleInfo = TableStyleInfo(
-                name="TableStyleMedium2",
-                showFirstColumn=False,
-                showLastColumn=False,
-                showRowStripes=True,
-                showColumnStripes=False,
-            )
-            docs_sheet.add_table(docs_table)
 
 
 def log_step(message: str) -> None:
