@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import logging
 import random
 import re
+import threading
 import time
 import warnings
 from json import JSONDecodeError
@@ -17,6 +19,9 @@ from typing import Any
 
 import pandas as pd
 import requests
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -24,6 +29,28 @@ REFERENCE_URL = "https://iss.moex.com/iss/reference"
 BASE_URL = "https://iss.moex.com"
 
 LOGGER = logging.getLogger("moex_bond_endpoints_probe")
+THREAD_LOCAL = threading.local()
+
+HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+HEADER_FONT = Font(color="FFFFFF", bold=True)
+BORDER = Border(
+    left=Side(style="thin", color="D9D9D9"),
+    right=Side(style="thin", color="D9D9D9"),
+    top=Side(style="thin", color="D9D9D9"),
+    bottom=Side(style="thin", color="D9D9D9"),
+)
+
+TARGET_ENDPOINT_SLUG = "iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security"
+TARGET_ENDPOINT_DROP_COLUMNS = {
+    "BOARDID",
+    "BOARDNAME",
+    "SECNAME",
+    "ISIN",
+    "LATNAME",
+    "REGNUMBER",
+    "LISTLEVEL",
+}
+TARGET_ENDPOINT_DROP_SHEETS = {"dataversion"}
 
 TARGET_ENDPOINT_SLUG = "iss__engines__engine__markets__market__boardgroups__boardgroup__securities__security"
 TARGET_ENDPOINT_DROP_COLUMNS = {
@@ -92,6 +119,21 @@ def configure_session_retries(session: requests.Session) -> None:
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+
+
+def build_configured_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({"User-Agent": "moex-bonds-endpoints-probe/1.0"})
+    configure_session_retries(session)
+    return session
+
+
+def get_thread_session() -> requests.Session:
+    session = getattr(THREAD_LOCAL, "session", None)
+    if session is None:
+        session = build_configured_session()
+        THREAD_LOCAL.session = session
+    return session
 
 
 def fetch_reference_html(session: requests.Session) -> str:
@@ -271,6 +313,44 @@ def drop_unwanted_sheets_for_endpoint(endpoint_slug: str, sheet_name: str) -> bo
     return endpoint_slug == TARGET_ENDPOINT_SLUG and sheet_name in TARGET_ENDPOINT_DROP_SHEETS
 
 
+def estimate_column_width(series: pd.Series, column_name: str) -> int:
+    samples = [column_name]
+    samples.extend(str(value) for value in series.dropna().head(250).tolist())
+    max_len = max((len(value) for value in samples), default=10)
+    return max(10, min(max_len + 2, 60))
+
+
+def style_endpoint_worksheet(worksheet, frame: pd.DataFrame, table_name: str) -> None:
+    worksheet.freeze_panes = "A2"
+    worksheet.sheet_view.zoomScale = 110
+    worksheet.row_dimensions[1].height = 22
+
+    for idx, column_name in enumerate(frame.columns, start=1):
+        column_letter = get_column_letter(idx)
+        header_cell = worksheet.cell(row=1, column=idx)
+        header_cell.fill = HEADER_FILL
+        header_cell.font = HEADER_FONT
+        header_cell.border = BORDER
+        header_cell.alignment = Alignment(horizontal="center", vertical="center")
+        worksheet.column_dimensions[column_letter].width = estimate_column_width(frame[column_name], column_name)
+
+    for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
+        for cell in row:
+            cell.border = BORDER
+            cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=False)
+
+    if worksheet.max_row >= 2 and worksheet.max_column >= 1:
+        table = Table(displayName=table_name, ref=worksheet.dimensions)
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        worksheet.add_table(table)
+
+
 def save_endpoint_workbook(endpoint_slug: str, frames: dict[str, pd.DataFrame], output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{endpoint_slug}.xlsx"
@@ -284,6 +364,13 @@ def save_endpoint_workbook(endpoint_slug: str, frames: dict[str, pd.DataFrame], 
             prepared_frame = drop_unwanted_columns_for_endpoint(endpoint_slug, frame)
             sheet_name = normalize_sheet_name(sheet_raw_name, used_sheet_names)
             prepared_frame.to_excel(writer, index=False, sheet_name=sheet_name)
+            rendered_frames[sheet_name] = prepared_frame
+
+        for idx, (sheet_name, frame) in enumerate(rendered_frames.items(), start=1):
+            worksheet = writer.sheets[sheet_name]
+            table_name = f"TBL_{idx:02d}_{endpoint_slug[:18]}"
+            table_name = re.sub(r"[^A-Za-z0-9_]", "_", table_name)[:31]
+            style_endpoint_worksheet(worksheet=worksheet, frame=frame, table_name=table_name)
 
     return output_path
 
@@ -314,7 +401,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Seed для выбора random SECID.")
     parser.add_argument("--log-file", type=Path, default=Path("logs/moex_bond_endpoints_probe.log"), help="Путь к log-файлу.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Уровень логирования: DEBUG/INFO/WARNING/ERROR.")
+    parser.add_argument("--workers", type=int, default=8, help="Количество потоков для загрузки endpoint'ов.")
     return parser.parse_args()
+
+
+def fetch_job_payload(
+    endpoint_slug: str,
+    secid: str,
+    url: str,
+    cache_dir: Path,
+    cache_ttl: int,
+) -> tuple[str, str, str, dict[str, Any] | None, str]:
+    session = get_thread_session()
+    params = {"iss.meta": "off", "limit": 100}
+    payload, source = fetch_json_with_cache(
+        session=session,
+        url=url,
+        params=params,
+        cache_dir=cache_dir,
+        cache_ttl=cache_ttl,
+    )
+    return endpoint_slug, secid, url, payload, source
 
 
 def main() -> None:
@@ -333,9 +440,7 @@ def main() -> None:
 
     LOGGER.info("Выбранные SECID на период отладки: %s", selected_secids)
 
-    with requests.Session() as session:
-        session.headers.update({"User-Agent": "moex-bonds-endpoints-probe/1.0"})
-        configure_session_retries(session)
+    with build_configured_session() as session:
 
         LOGGER.info("Получаю список endpoint'ов из %s", REFERENCE_URL)
         reference_html = fetch_reference_html(session)
@@ -344,6 +449,7 @@ def main() -> None:
         endpoint_frames: dict[str, dict[str, list[pd.DataFrame]]] = {}
         stats = {"api": 0, "cache": 0, "non_json": 0, "http_skipped": 0, "errors": 0}
 
+        jobs: list[tuple[str, str, str]] = []
         for secid in selected_secids:
             LOGGER.info("Обрабатываю SECID=%s", secid)
             context = build_context_for_secid(session=session, secid=secid)
@@ -354,36 +460,44 @@ def main() -> None:
                 endpoint_slug = endpoint_slug_from_template(template)
                 urls = instantiate_endpoints(template=template, secid=secid, context=context)
                 secid_urls_total += len(urls)
-
                 for url in urls:
-                    params = {"iss.meta": "off", "limit": 100}
-                    payload, source = fetch_json_with_cache(
-                        session=session,
-                        url=url,
-                        params=params,
-                        cache_dir=args.cache_dir,
-                        cache_ttl=args.cache_ttl,
-                    )
-
-                    if payload is None:
-                        if source == "non_json":
-                            stats["non_json"] += 1
-                        elif source.startswith("http_"):
-                            stats["http_skipped"] += 1
-                        else:
-                            stats["errors"] += 1
-                        continue
-
-                    stats[source] += 1
-                    frames = payload_to_frames(payload=payload, secid=secid, request_url=url)
-                    if not frames:
-                        continue
-
-                    endpoint_frames.setdefault(endpoint_slug, {})
-                    for block_name, frame in frames.items():
-                        endpoint_frames[endpoint_slug].setdefault(block_name, []).append(frame)
+                    jobs.append((endpoint_slug, secid, url))
 
             LOGGER.info("SECID=%s: сформировано endpoint URL: %s", secid, secid_urls_total)
+
+        LOGGER.info("Всего endpoint URL для обработки: %s", len(jobs))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+            futures = [
+                executor.submit(
+                    fetch_job_payload,
+                    endpoint_slug,
+                    secid,
+                    url,
+                    args.cache_dir,
+                    args.cache_ttl,
+                )
+                for endpoint_slug, secid, url in jobs
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                endpoint_slug, secid, url, payload, source = future.result()
+
+                if payload is None:
+                    if source == "non_json":
+                        stats["non_json"] += 1
+                    elif source.startswith("http_"):
+                        stats["http_skipped"] += 1
+                    else:
+                        stats["errors"] += 1
+                    continue
+
+                stats[source] += 1
+                frames = payload_to_frames(payload=payload, secid=secid, request_url=url)
+                if not frames:
+                    continue
+
+                endpoint_frames.setdefault(endpoint_slug, {})
+                for block_name, frame in frames.items():
+                    endpoint_frames[endpoint_slug].setdefault(block_name, []).append(frame)
 
         LOGGER.info(
             "Статистика запросов: api=%s cache=%s non_json=%s http_skipped=%s errors=%s",
