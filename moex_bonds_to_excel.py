@@ -64,6 +64,7 @@ HIDDEN_COLUMN_NAME = "SECID"
 ISSUER_COLUMN_NAME = "ISSUER_NAME"
 ISSUER_INN_COLUMN_NAME = "ISSUER_INN"
 FIRST_COLUMN_NAME = "ISIN"
+GROUP_SEPARATOR_PREFIX = "GROUP_SEPARATOR__"
 QUALIFIED_INVESTOR_COLUMN_NAME = "QUALIFIED_INVESTOR"
 MATURITY_DATE_COLUMN_NAME = "MATDATE"
 AMORTIZATION_FLAG_COLUMN_NAME = "HAS_AMORTIZATION"
@@ -1033,23 +1034,37 @@ def save_raw(rows: list[dict[str, Any]]) -> None:
 
 
 def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
-    """Применяет форматирование итогового Excel, добавляет подписи групп и скрывает SECID."""
+    """Применяет форматирование итогового Excel, добавляет разделители групп и скрывает SECID."""
     ws = writer.sheets["MOEX_BONDS"]
     ws.insert_rows(1)
     ws.freeze_panes = "A3"
     ws.auto_filter.ref = f"A2:{get_column_letter(ws.max_column)}{ws.max_row}"
     ws.sheet_view.showGridLines = False
-    ws.sheet_properties.outlinePr.summaryRight = True
+    ws.sheet_properties.outlinePr.summaryRight = False
 
     header_fill = PatternFill(fill_type="solid", start_color="1F4E78", end_color="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
     even_fill = PatternFill(fill_type="solid", start_color="F5F9FF", end_color="F5F9FF")
     odd_fill = PatternFill(fill_type="solid", start_color="FFFFFF", end_color="FFFFFF")
+    group_fill = PatternFill(fill_type="solid", start_color="D9E2F3", end_color="D9E2F3")
+    group_font = Font(color="1F4E78", bold=True)
+
+    separator_titles: dict[str, str] = df.attrs.get("group_separator_titles", {})
+    separator_columns = {c for c in df.columns if str(c).startswith(GROUP_SEPARATOR_PREFIX)}
 
     ws.row_dimensions[1].height = 24
     ws.row_dimensions[2].height = 22
 
-    for cell in ws[2]:
+    for col_idx, col_name in enumerate(df.columns, start=1):
+        if col_name in separator_columns:
+            header_cell = ws.cell(row=2, column=col_idx)
+            header_cell.value = ""
+            header_cell.fill = group_fill
+            header_cell.font = group_font
+            header_cell.alignment = Alignment(horizontal="center", vertical="center")
+            continue
+
+        cell = ws.cell(row=2, column=col_idx)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -1060,6 +1075,12 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         row_fill = even_fill if row_idx % 2 == 0 else odd_fill
         for col_idx, col_name in enumerate(df.columns, start=1):
             cell = ws.cell(row=row_idx, column=col_idx)
+            if col_name in separator_columns:
+                cell.value = ""
+                cell.fill = group_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                continue
+
             cell.fill = row_fill
             cell.alignment = Alignment(vertical="center")
             if col_name in numeric_columns and isinstance(cell.value, (int, float)):
@@ -1067,6 +1088,11 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
 
     for idx, col_name in enumerate(df.columns, start=1):
         col_letter = get_column_letter(idx)
+
+        if col_name in separator_columns:
+            ws.column_dimensions[col_letter].width = 3.5
+            continue
+
         max_len = max(
             len(str(col_name)),
             *(len(str(v)) for v in df[col_name].head(500).fillna("")),
@@ -1097,44 +1123,32 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         if col_name == HIDDEN_COLUMN_NAME:
             ws.column_dimensions[col_letter].hidden = True
 
-    group_definitions = {
-        "Эмитент": [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, "SHORTNAME"],
-        "Квалификация и тип": [QUALIFIED_INVESTOR_COLUMN_NAME, BOND_TYPE_COLUMN_NAME],
-        "Оферты": [HAS_PUT_CALL_OFFER_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME],
-        "Погашение и амортизация": [AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME],
-        "Купоны": ["COUPONVALUE", ACCRUED_INT_COLUMN_NAME, "COUPONPERIOD", "COUPONPERCENT"],
-        "Рынок": ["FACEVALUE", "FACEUNIT", "PRIMARYBOARDID", "PREVLEGALCLOSEPRICE", "PREVPRICE"],
-    }
+    separator_indexes = [idx for idx, col in enumerate(df.columns, start=1) if col in separator_columns]
+    for sep_pos, sep_idx in enumerate(separator_indexes):
+        next_sep_idx = separator_indexes[sep_pos + 1] if sep_pos + 1 < len(separator_indexes) else ws.max_column + 1
+        group_indexes = list(range(sep_idx + 1, next_sep_idx))
 
-    group_fill = PatternFill(fill_type="solid", start_color="D9E2F3", end_color="D9E2F3")
-    group_font = Font(color="1F4E78", bold=True)
-
-    grouped_column_indexes: set[int] = set()
-
-    for group_title, group_columns in group_definitions.items():
-        group_indexes = [idx for idx, col_name in enumerate(df.columns, start=1) if col_name in group_columns]
-        if not group_indexes:
-            continue
-
-        for grouped_idx in group_indexes:
-            ws.column_dimensions[get_column_letter(grouped_idx)].outlineLevel = 1
-            grouped_column_indexes.add(grouped_idx)
-        ws.column_dimensions[get_column_letter(max(group_indexes))].collapsed = True
-
-        for group_idx in group_indexes:
-            group_cell = ws.cell(row=1, column=group_idx)
-            group_cell.value = group_title
-            group_cell.fill = group_fill
-            group_cell.font = group_font
-            group_cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    for col_idx in range(1, ws.max_column + 1):
-        top_cell = ws.cell(row=1, column=col_idx)
-        if col_idx not in grouped_column_indexes:
-            top_cell.value = "Прочие поля"
+        group_title = separator_titles.get(df.columns[sep_idx - 1], "Группа")
+        top_cell = ws.cell(row=1, column=sep_idx)
+        top_cell.value = group_title
         top_cell.fill = group_fill
         top_cell.font = group_font
         top_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        if not group_indexes:
+            continue
+
+        first_group_col = group_indexes[0]
+        for grouped_idx in group_indexes:
+            ws.column_dimensions[get_column_letter(grouped_idx)].outlineLevel = 1
+
+        ws.column_dimensions[get_column_letter(first_group_col)].collapsed = True
+
+    first_cell = ws.cell(row=1, column=1)
+    first_cell.value = "Основные поля"
+    first_cell.fill = group_fill
+    first_cell.font = group_font
+    first_cell.alignment = Alignment(horizontal="center", vertical="center")
 
 
 def add_info_sheet(writer: pd.ExcelWriter) -> None:
@@ -1192,26 +1206,42 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
             df[date_col] = df[date_col].map(format_date_ddmmyyyy)
 
     if FIRST_COLUMN_NAME in df.columns:
-        ordered_columns = [FIRST_COLUMN_NAME]
-        for preferred_col in [
-            ISSUER_COLUMN_NAME,
-            ISSUER_INN_COLUMN_NAME,
-            "SHORTNAME",
-            QUALIFIED_INVESTOR_COLUMN_NAME,
-            BOND_TYPE_COLUMN_NAME,
-            HAS_PUT_CALL_OFFER_COLUMN_NAME,
-            PUT_CALL_OFFER_DATE_COLUMN_NAME,
-            AMORTIZATION_FLAG_COLUMN_NAME,
-            AMORTIZATION_START_DATE_COLUMN_NAME,
-            MATURITY_DATE_COLUMN_NAME,
-        ]:
-            if preferred_col in df.columns:
-                ordered_columns.append(preferred_col)
+        group_layout = [
+            ("Эмитент", [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, "SHORTNAME"]),
+            ("Квалификация и тип", [QUALIFIED_INVESTOR_COLUMN_NAME, BOND_TYPE_COLUMN_NAME]),
+            ("Оферты", [HAS_PUT_CALL_OFFER_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]),
+            ("Погашение и амортизация", [AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME]),
+            ("Купоны", ["COUPONVALUE", ACCRUED_INT_COLUMN_NAME, "COUPONPERIOD", "COUPONPERCENT"]),
+            ("Рынок", ["FACEVALUE", "FACEUNIT", "PRIMARYBOARDID", "PREVLEGALCLOSEPRICE", "PREVPRICE"]),
+        ]
 
-        ordered_columns.extend(
-            [col for col in df.columns if col not in set(ordered_columns)]
-        )
+        ordered_columns = [FIRST_COLUMN_NAME]
+        separator_titles: dict[str, str] = {}
+        used_columns = {FIRST_COLUMN_NAME}
+
+        for group_idx, (group_title, group_columns) in enumerate(group_layout, start=1):
+            existing_columns = [col for col in group_columns if col in df.columns and col not in used_columns]
+            if not existing_columns:
+                continue
+
+            separator_col = f"{GROUP_SEPARATOR_PREFIX}{group_idx}"
+            df[separator_col] = ""
+            ordered_columns.append(separator_col)
+            separator_titles[separator_col] = group_title
+
+            ordered_columns.extend(existing_columns)
+            used_columns.update(existing_columns)
+
+        remaining_columns = [col for col in df.columns if col not in used_columns and not str(col).startswith(GROUP_SEPARATOR_PREFIX)]
+        if remaining_columns:
+            separator_col = f"{GROUP_SEPARATOR_PREFIX}MISC"
+            df[separator_col] = ""
+            ordered_columns.append(separator_col)
+            separator_titles[separator_col] = "Прочие поля"
+            ordered_columns.extend(remaining_columns)
+
         df = df[ordered_columns]
+        df.attrs["group_separator_titles"] = separator_titles
 
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="MOEX_BONDS")
