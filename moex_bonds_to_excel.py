@@ -70,6 +70,8 @@ MATURITY_DATE_COLUMN_NAME = "MATDATE"
 AMORTIZATION_FLAG_COLUMN_NAME = "HAS_AMORTIZATION"
 AMORTIZATION_START_DATE_COLUMN_NAME = "AMORTIZATION_START_DATE"
 ACCRUED_INT_COLUMN_NAME = "ACCRUEDINT"
+TRADE_VOLUME_COLUMN_NAME = "VOLTODAY"
+TRADE_VALUE_COLUMN_NAME = "VALTODAY"
 BOND_TYPE_COLUMN_NAME = "BOND_TYPE"
 HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
 PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
@@ -457,15 +459,35 @@ def fetch_page(session: requests.Session, start: int) -> IssPage:
     params = {
         "iss.meta": "off",
         "securities.columns": "SECID,SHORTNAME,ISIN,MATDATE,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE,ACCRUEDINT",
+        "marketdata.columns": f"SECID,{TRADE_VOLUME_COLUMN_NAME},{TRADE_VALUE_COLUMN_NAME},NUMTRADES",
         "start": start,
         "limit": PAGE_SIZE,
     }
     response = session.get(BASE_URL, params=params, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     data = response.json()
-    rows = data.get("securities", {}).get("data", [])
-    columns = data.get("securities", {}).get("columns", [])
-    records = [dict(zip(columns, row)) for row in rows]
+    security_rows = data.get("securities", {}).get("data", [])
+    security_columns = data.get("securities", {}).get("columns", [])
+    market_rows = data.get("marketdata", {}).get("data", [])
+    market_columns = data.get("marketdata", {}).get("columns", [])
+
+    market_by_secid: dict[str, dict[str, Any]] = {}
+    for market_row in market_rows:
+        market_record = dict(zip(market_columns, market_row))
+        secid = str(market_record.get("SECID") or "").strip()
+        if secid:
+            market_by_secid[secid] = market_record
+
+    records: list[dict[str, Any]] = []
+    for security_row in security_rows:
+        security_record = dict(zip(security_columns, security_row))
+        secid = str(security_record.get("SECID") or "").strip()
+        market_record = market_by_secid.get(secid, {})
+        security_record[TRADE_VOLUME_COLUMN_NAME] = market_record.get(TRADE_VOLUME_COLUMN_NAME)
+        security_record[TRADE_VALUE_COLUMN_NAME] = market_record.get(TRADE_VALUE_COLUMN_NAME)
+        security_record["NUMTRADES"] = market_record.get("NUMTRADES")
+        records.append(security_record)
+
     return IssPage(start=start, rows=records)
 
 
@@ -1081,7 +1103,18 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    numeric_columns = {"FACEVALUE", "COUPONVALUE", "COUPONPERIOD", "COUPONPERCENT", "PREVLEGALCLOSEPRICE", "PREVPRICE", ACCRUED_INT_COLUMN_NAME}
+    numeric_columns = {
+        "FACEVALUE",
+        "COUPONVALUE",
+        "COUPONPERIOD",
+        "COUPONPERCENT",
+        "PREVLEGALCLOSEPRICE",
+        "PREVPRICE",
+        ACCRUED_INT_COLUMN_NAME,
+        TRADE_VOLUME_COLUMN_NAME,
+        TRADE_VALUE_COLUMN_NAME,
+        "NUMTRADES",
+    }
 
     for row_idx in range(3, ws.max_row + 1):
         row_fill = even_fill if row_idx % 2 == 0 else odd_fill
@@ -1190,6 +1223,9 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "PRIMARYBOARDID", "Описание": "Основной торговый режим/секция."},
         {"Поле": "PREVLEGALCLOSEPRICE", "Описание": "Предыдущая официальная цена закрытия."},
         {"Поле": "PREVPRICE", "Описание": "Предыдущая рыночная цена."},
+        {"Поле": "VOLTODAY", "Описание": "Объём торгов за текущий день (в штуках/бумагах)."},
+        {"Поле": "VALTODAY", "Описание": "Денежный оборот торгов за текущий день."},
+        {"Поле": "NUMTRADES", "Описание": "Количество сделок за текущий день."},
     ]
 
     info_df = pd.DataFrame(info_rows)
@@ -1227,7 +1263,19 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
             ("Оферты", [HAS_PUT_CALL_OFFER_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]),
             ("Погашение и амортизация", [AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME]),
             ("Купоны", ["COUPONVALUE", ACCRUED_INT_COLUMN_NAME, "COUPONPERIOD", "COUPONPERCENT"]),
-            ("Рынок", ["FACEVALUE", "FACEUNIT", "PRIMARYBOARDID", "PREVLEGALCLOSEPRICE", "PREVPRICE"]),
+            (
+                "Рынок",
+                [
+                    "FACEVALUE",
+                    "FACEUNIT",
+                    "PRIMARYBOARDID",
+                    "PREVLEGALCLOSEPRICE",
+                    "PREVPRICE",
+                    TRADE_VOLUME_COLUMN_NAME,
+                    TRADE_VALUE_COLUMN_NAME,
+                    "NUMTRADES",
+                ],
+            ),
         ]
 
         ordered_columns = [FIRST_COLUMN_NAME]
