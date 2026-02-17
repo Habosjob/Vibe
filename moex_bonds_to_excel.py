@@ -404,8 +404,11 @@ def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tu
     return emitter_id, qualified_investor_sign
 
 
-def fetch_daily_security_metrics(session: requests.Session, secid: str) -> tuple[str, str | None]:
-    """Получает суточные метрики бумаги: наличие амортизации и дату её начала."""
+def fetch_daily_security_metrics(session: requests.Session, secid: str, maturity_date: str | None) -> tuple[str, str | None]:
+    """Получает суточные метрики бумаги: наличие амортизации и дату её начала.
+
+    Важно: финальное погашение (строка с data_source=maturity на дату MATDATE) не считаем амортизацией.
+    """
     params = {"iss.meta": "off"}
     response = session.get(f"https://iss.moex.com/iss/securities/{secid}/bondization.json", params=params, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
@@ -417,18 +420,25 @@ def fetch_daily_security_metrics(session: requests.Session, secid: str) -> tuple
         return "✖", None
 
     amort_records = [dict(zip(amort_columns, row)) for row in amort_data]
-    amort_dates = sorted(
-        [
-            str(record.get("amortdate"))
-            for record in amort_records
-            if record.get("amortdate")
-        ]
-    )
 
-    if not amort_dates:
+    real_amortization_dates: list[str] = []
+    for record in amort_records:
+        amort_date = str(record.get("amortdate") or "")
+        if not amort_date:
+            continue
+
+        data_source = str(record.get("data_source") or "").lower()
+        if data_source and data_source != "maturity":
+            real_amortization_dates.append(amort_date)
+            continue
+
+        if maturity_date and amort_date < str(maturity_date):
+            real_amortization_dates.append(amort_date)
+
+    if not real_amortization_dates:
         return "✖", None
 
-    return "✔", amort_dates[0]
+    return "✔", min(real_amortization_dates)
 
 
 def fetch_emitter_details(session: requests.Session, emitter_id: int) -> tuple[str | None, str | None]:
@@ -572,6 +582,8 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     if not secids:
         return rows
 
+    row_by_secid = {str(row.get("SECID")): row for row in rows if row.get("SECID")}
+
     cache = load_daily_security_cache()
     now = datetime.now()
 
@@ -596,7 +608,7 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         with build_session() as local_session:
             for secid in batch:
                 try:
-                    has_amortization, amort_start_date = fetch_daily_security_metrics(local_session, secid)
+                    has_amortization, amort_start_date = fetch_daily_security_metrics(local_session, secid, str(row_by_secid.get(secid, {}).get(MATURITY_DATE_COLUMN_NAME) or ""))
                     resolved[secid] = {
                         AMORTIZATION_FLAG_COLUMN_NAME: has_amortization,
                         AMORTIZATION_START_DATE_COLUMN_NAME: amort_start_date or "",

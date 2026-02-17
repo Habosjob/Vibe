@@ -32,7 +32,7 @@
 - `ISIN` — в первой колонке.
 - `ISSUER_NAME`, `ISSUER_INN`, `SHORTNAME` сгруппированы (можно сворачивать).
 - `QUALIFIED_INVESTOR` — ✔/✖.
-- `HAS_AMORTIZATION` — ✔/✖.
+- `HAS_AMORTIZATION` — ✔/✖ (финальное погашение не считается амортизацией).
 - `AMORTIZATION_START_DATE` — дата старта амортизации (если есть).
 - `ACCRUEDINT` — НКД.
 - `MATDATE` — дата погашения.
