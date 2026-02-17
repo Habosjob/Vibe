@@ -46,7 +46,19 @@ DAILY_CACHE_FILE = CACHE_DIR / "daily_security_metrics_cache.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
 # Колонки, которые пользователь попросил убрать из итогового файла
-REMOVED_COLUMNS = {"SECNAME", "LISTLEVEL", "STATUS", "EXCLUDE_BY_AMORTIZATION", "AMORTIZATION_EXCLUDE_REASON", "EXCLUDE_BY_COUPONPERIOD", "COUPONPERIOD_EXCLUDE_REASON", "EXCLUDE_BY_BOND_TYPE", "BOND_TYPE_EXCLUDE_REASON"}
+REMOVED_COLUMNS = {
+    "SECNAME",
+    "LISTLEVEL",
+    "STATUS",
+    "EXCLUDE_BY_AMORTIZATION",
+    "AMORTIZATION_EXCLUDE_REASON",
+    "EXCLUDE_BY_OFFER_DATE",
+    "OFFER_DATE_EXCLUDE_REASON",
+    "EXCLUDE_BY_COUPONPERIOD",
+    "COUPONPERIOD_EXCLUDE_REASON",
+    "EXCLUDE_BY_BOND_TYPE",
+    "BOND_TYPE_EXCLUDE_REASON",
+}
 # SECID нужен для технической работы, но в Excel должен быть скрыт
 HIDDEN_COLUMN_NAME = "SECID"
 ISSUER_COLUMN_NAME = "ISSUER_NAME"
@@ -66,6 +78,7 @@ DAILY_METRICS_CACHE_SCHEMA_VERSION = 6
 STRUCTURAL_BOND_TYPE_VALUES = {"структурная облигация", "структурные облигации"}
 COUPONPERIOD_EXCLUDE_REASON = "Купонный период не определён (COUPONPERIOD = 0)"
 BOND_TYPE_EXCLUDE_REASON = "Структурная облигация исключена из выгрузки"
+OFFER_DATE_EXCLUDE_REASON = "Дата оферты наступит менее чем через год"
 
 
 @dataclass
@@ -882,8 +895,17 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             is_excluded = True
             exclude_reason = "Амортизация уже началась или начнётся менее чем через год"
 
+        offer_date = parse_date_safe(put_call_offer_date)
+        is_offer_excluded = False
+        offer_exclude_reason = ""
+        if offer_date is not None and offer_date.date() < min_allowed_amort_date:
+            is_offer_excluded = True
+            offer_exclude_reason = OFFER_DATE_EXCLUDE_REASON
+
         row["EXCLUDE_BY_AMORTIZATION"] = is_excluded
         row["AMORTIZATION_EXCLUDE_REASON"] = exclude_reason
+        row["EXCLUDE_BY_OFFER_DATE"] = is_offer_excluded
+        row["OFFER_DATE_EXCLUDE_REASON"] = offer_exclude_reason
 
         entry[AMORTIZATION_FLAG_COLUMN_NAME] = has_amortization
         entry[AMORTIZATION_START_DATE_COLUMN_NAME] = amortization_start_date
@@ -891,6 +913,8 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         entry[PUT_CALL_OFFER_DATE_COLUMN_NAME] = put_call_offer_date
         entry["EXCLUDE_BY_AMORTIZATION"] = is_excluded
         entry["AMORTIZATION_EXCLUDE_REASON"] = exclude_reason
+        entry["EXCLUDE_BY_OFFER_DATE"] = is_offer_excluded
+        entry["OFFER_DATE_EXCLUDE_REASON"] = offer_exclude_reason
         entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
         cache[secid] = entry
 
@@ -911,6 +935,25 @@ def filter_rows_by_amortization_timing(rows: list[dict[str, Any]]) -> list[dict[
 
     logging.info(
         "Этап 4/8: Фильтр по дате амортизации: исключено %s бумаг, оставлено %s.",
+        skipped_count,
+        len(filtered_rows),
+    )
+    return filtered_rows
+
+
+def filter_rows_by_offer_date(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Исключает бумаги, у которых дата оферты наступит менее чем через год."""
+    filtered_rows: list[dict[str, Any]] = []
+    skipped_count = 0
+
+    for row in rows:
+        if bool(row.get("EXCLUDE_BY_OFFER_DATE", False)):
+            skipped_count += 1
+            continue
+        filtered_rows.append(row)
+
+    logging.info(
+        "Этап 4.1/8: Фильтр по дате оферты: исключено %s бумаг, оставлено %s.",
         skipped_count,
         len(filtered_rows),
     )
@@ -1174,6 +1217,7 @@ def main() -> None:
     rows = filter_rows_by_maturity(rows)
     rows = enrich_with_daily_metrics(rows)
     rows = filter_rows_by_amortization_timing(rows)
+    rows = filter_rows_by_offer_date(rows)
     validate_rows(rows)
     rows = enrich_with_issuer_names(rows)
     rows = filter_rows_by_bond_type(rows)
