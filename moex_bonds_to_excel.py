@@ -514,6 +514,8 @@ def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tu
 
     return emitter_id, qualified_investor_sign, bond_type, coupon_period, is_structural
 
+    if not parsed_dates:
+        return "✔", None
 
 def parse_offer_metrics(offers_data: list[list[Any]], offers_columns: list[str]) -> tuple[str, str | None]:
     """Определяет актуальную оферту: только будущая/текущая дата относительно сегодня."""
