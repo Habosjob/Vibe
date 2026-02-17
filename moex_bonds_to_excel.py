@@ -49,6 +49,7 @@ REMOVED_COLUMNS = {"SECNAME", "LISTLEVEL", "STATUS"}
 # SECID нужен для технической работы, но в Excel должен быть скрыт
 HIDDEN_COLUMN_NAME = "SECID"
 ISSUER_COLUMN_NAME = "ISSUER_NAME"
+ISSUER_INN_COLUMN_NAME = "ISSUER_INN"
 FIRST_COLUMN_NAME = "ISIN"
 
 
@@ -116,15 +117,16 @@ def save_cache(rows: list[dict[str, Any]]) -> None:
     CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str]]:
-    """Читает пожизненный кэш соответствий SECID -> EMITTER_ID и EMITTER_ID -> имя."""
+def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str], dict[int, str]]:
+    """Читает пожизненный кэш соответствий SECID -> EMITTER_ID, EMITTER_ID -> имя и ИНН."""
     if not ISSUER_CACHE_FILE.exists():
-        return {}, {}
+        return {}, {}, {}
 
     try:
         payload = json.loads(ISSUER_CACHE_FILE.read_text(encoding="utf-8"))
         secid_to_emitter_id: dict[str, int | None] = {}
         emitter_id_to_name: dict[int, str] = {}
+        emitter_id_to_inn: dict[int, str] = {}
 
         for secid, emitter_id in payload.get("secid_to_emitter_id", {}).items():
             if emitter_id is None:
@@ -140,6 +142,14 @@ def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str]
                 continue
             try:
                 emitter_id_to_name[int(emitter_id)] = str(emitter_name)
+            except (TypeError, ValueError):
+                continue
+
+        for emitter_id, emitter_inn in payload.get("emitter_id_to_inn", {}).items():
+            if not emitter_inn:
+                continue
+            try:
+                emitter_id_to_inn[int(emitter_id)] = str(emitter_inn)
             except (TypeError, ValueError):
                 continue
 
@@ -148,31 +158,35 @@ def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str]
             len(secid_to_emitter_id),
             len(emitter_id_to_name),
         )
-        return secid_to_emitter_id, emitter_id_to_name
+        return secid_to_emitter_id, emitter_id_to_name, emitter_id_to_inn
     except Exception as exc:
         logging.warning("Не удалось прочитать пожизненный кэш эмитентов: %s", exc)
-        return {}, {}
+        return {}, {}, {}
 
 
-def save_issuer_directory_cache(secid_to_emitter_id: dict[str, int | None], emitter_id_to_name: dict[int, str]) -> None:
+def save_issuer_directory_cache(
+    secid_to_emitter_id: dict[str, int | None], emitter_id_to_name: dict[int, str], emitter_id_to_inn: dict[int, str]
+) -> None:
     """Сохраняет пожизненный справочник эмитентов."""
     payload = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "secid_to_emitter_id": secid_to_emitter_id,
         "emitter_id_to_name": {str(k): v for k, v in emitter_id_to_name.items()},
+        "emitter_id_to_inn": {str(k): v for k, v in emitter_id_to_inn.items()},
     }
     ISSUER_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str]]:
+def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str], dict[int, str]]:
     """Возвращает checkpoint по этапу обогащения эмитентов, если он есть."""
     if not ISSUER_CHECKPOINT_FILE.exists():
-        return {}, {}
+        return {}, {}, {}
 
     try:
         payload = json.loads(ISSUER_CHECKPOINT_FILE.read_text(encoding="utf-8"))
         secid_to_emitter_id: dict[str, int | None] = {}
         emitter_id_to_name: dict[int, str] = {}
+        emitter_id_to_inn: dict[int, str] = {}
 
         for secid, emitter_id in payload.get("secid_to_emitter_id", {}).items():
             if emitter_id is None:
@@ -191,23 +205,34 @@ def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str]]:
             except (TypeError, ValueError):
                 continue
 
+        for emitter_id, emitter_inn in payload.get("emitter_id_to_inn", {}).items():
+            if not emitter_inn:
+                continue
+            try:
+                emitter_id_to_inn[int(emitter_id)] = str(emitter_inn)
+            except (TypeError, ValueError):
+                continue
+
         logging.info(
             "Найден checkpoint обогащения: SECID=%s, EMITTER_ID=%s.",
             len(secid_to_emitter_id),
             len(emitter_id_to_name),
         )
-        return secid_to_emitter_id, emitter_id_to_name
+        return secid_to_emitter_id, emitter_id_to_name, emitter_id_to_inn
     except Exception as exc:
         logging.warning("Не удалось прочитать checkpoint эмитентов: %s", exc)
-        return {}, {}
+        return {}, {}, {}
 
 
-def save_issuer_checkpoint(secid_to_emitter_id: dict[str, int | None], emitter_id_to_name: dict[int, str]) -> None:
+def save_issuer_checkpoint(
+    secid_to_emitter_id: dict[str, int | None], emitter_id_to_name: dict[int, str], emitter_id_to_inn: dict[int, str]
+) -> None:
     """Сохраняет checkpoint обогащения эмитентов после каждого пакета."""
     payload = {
         "saved_at": datetime.now().isoformat(timespec="seconds"),
         "secid_to_emitter_id": secid_to_emitter_id,
         "emitter_id_to_name": {str(k): v for k, v in emitter_id_to_name.items()},
+        "emitter_id_to_inn": {str(k): v for k, v in emitter_id_to_inn.items()},
     }
     ISSUER_CHECKPOINT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -290,19 +315,37 @@ def fetch_emitter_id_for_security(session: requests.Session, secid: str) -> int 
     return None
 
 
-def fetch_emitter_name(session: requests.Session, emitter_id: int) -> str | None:
-    """Возвращает краткое наименование эмитента по его ID."""
+def fetch_emitter_details(session: requests.Session, emitter_id: int) -> tuple[str | None, str | None]:
+    """Возвращает наименование и ИНН эмитента по его ID."""
     params = {"iss.meta": "off"}
     response = session.get(f"https://iss.moex.com/iss/emitters/{emitter_id}.json", params=params, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     data = response.json()
     emitter_rows = data.get("emitter", {}).get("data", [])
     if not emitter_rows:
-        return None
+        return None, None
 
     columns = data.get("emitter", {}).get("columns", [])
     record = dict(zip(columns, emitter_rows[0]))
-    return record.get("SHORT_TITLE") or record.get("TITLE")
+    emitter_name = record.get("SHORT_TITLE") or record.get("TITLE")
+    emitter_inn = record.get("INN")
+    return emitter_name, str(emitter_inn) if emitter_inn else None
+
+
+def validate_rows(rows: list[dict[str, Any]]) -> None:
+    """Проверяет качество данных перед выгрузкой и пишет понятный отчёт в лог."""
+    logging.info("Этап 3/6: Проверка качества данных...")
+
+    empty_isin_count = sum(1 for row in rows if not row.get("ISIN"))
+    duplicate_keys = len(rows) - len({(row.get("SECID"), row.get("ISIN")) for row in rows})
+    invalid_coupon_count = sum(1 for row in rows if isinstance(row.get("COUPONPERCENT"), (int, float)) and row.get("COUPONPERCENT") < 0)
+
+    logging.info(
+        "Проверка качества завершена: пустых ISIN=%s, дубликатов ключа (SECID+ISIN)=%s, отрицательных COUPONPERCENT=%s.",
+        empty_isin_count,
+        duplicate_keys,
+        invalid_coupon_count,
+    )
 
 
 def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -315,11 +358,12 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row[ISSUER_COLUMN_NAME] = ""
         return rows
 
-    cache_secid_to_emitter_id, cache_emitter_id_to_name = load_issuer_directory_cache()
-    checkpoint_secid_to_emitter_id, checkpoint_emitter_id_to_name = load_issuer_checkpoint()
+    cache_secid_to_emitter_id, cache_emitter_id_to_name, cache_emitter_id_to_inn = load_issuer_directory_cache()
+    checkpoint_secid_to_emitter_id, checkpoint_emitter_id_to_name, checkpoint_emitter_id_to_inn = load_issuer_checkpoint()
 
     secid_to_emitter_id: dict[str, int | None] = {**cache_secid_to_emitter_id, **checkpoint_secid_to_emitter_id}
     emitter_cache: dict[int, str] = {**cache_emitter_id_to_name, **checkpoint_emitter_id_to_name}
+    emitter_inn_cache: dict[int, str] = {**cache_emitter_id_to_inn, **checkpoint_emitter_id_to_inn}
 
     missing_secids = [secid for secid in secids if secid not in secid_to_emitter_id]
     secid_batches = chunked(missing_secids, SECID_BATCH_SIZE)
@@ -342,7 +386,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         futures = {executor.submit(resolve_emitter_batch, batch): idx for idx, batch in enumerate(secid_batches, start=1)}
         for processed, future in enumerate(as_completed(futures), start=1):
             secid_to_emitter_id.update(future.result())
-            save_issuer_checkpoint(secid_to_emitter_id, emitter_cache)
+            save_issuer_checkpoint(secid_to_emitter_id, emitter_cache, emitter_inn_cache)
             if processed % 5 == 0 or processed == len(secid_batches):
                 logging.info("SECID пакеты: %s/%s.", processed, len(secid_batches))
 
@@ -350,17 +394,20 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     missing_emitter_ids = [emitter_id for emitter_id in unique_emitter_ids if emitter_id not in emitter_cache]
     emitter_batches = chunked(missing_emitter_ids, EMITTER_BATCH_SIZE)
 
-    def resolve_emitter_names_batch(batch: list[int]) -> dict[int, str]:
-        resolved: dict[int, str] = {}
+    def resolve_emitter_names_batch(batch: list[int]) -> tuple[dict[int, str], dict[int, str]]:
+        resolved_names: dict[int, str] = {}
+        resolved_inn: dict[int, str] = {}
         with build_session() as local_session:
             for emitter_id in batch:
                 try:
-                    emitter_name = fetch_emitter_name(local_session, emitter_id)
+                    emitter_name, emitter_inn = fetch_emitter_details(local_session, emitter_id)
                     if emitter_name:
-                        resolved[emitter_id] = emitter_name
+                        resolved_names[emitter_id] = emitter_name
+                    if emitter_inn:
+                        resolved_inn[emitter_id] = emitter_inn
                 except Exception as exc:
                     logging.warning("Не удалось получить наименование эмитента %s: %s", emitter_id, exc)
-        return resolved
+        return resolved_names, resolved_inn
 
     if emitter_batches:
         logging.info("Пакетный режим: нужно обработать %s пакетов эмитентов.", len(emitter_batches))
@@ -368,8 +415,10 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(resolve_emitter_names_batch, batch): idx for idx, batch in enumerate(emitter_batches, start=1)}
         for processed, future in enumerate(as_completed(futures), start=1):
-            emitter_cache.update(future.result())
-            save_issuer_checkpoint(secid_to_emitter_id, emitter_cache)
+            names_chunk, inn_chunk = future.result()
+            emitter_cache.update(names_chunk)
+            emitter_inn_cache.update(inn_chunk)
+            save_issuer_checkpoint(secid_to_emitter_id, emitter_cache, emitter_inn_cache)
             if processed % 5 == 0 or processed == len(emitter_batches):
                 logging.info("Пакеты эмитентов: %s/%s.", processed, len(emitter_batches))
 
@@ -377,8 +426,9 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         secid = str(row.get("SECID", ""))
         emitter_id = secid_to_emitter_id.get(secid)
         row[ISSUER_COLUMN_NAME] = emitter_cache.get(emitter_id) or ""
+        row[ISSUER_INN_COLUMN_NAME] = emitter_inn_cache.get(emitter_id) or ""
 
-    save_issuer_directory_cache(secid_to_emitter_id, emitter_cache)
+    save_issuer_directory_cache(secid_to_emitter_id, emitter_cache, emitter_inn_cache)
     clear_issuer_checkpoint()
 
     return rows
@@ -446,6 +496,12 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         )
         ws.column_dimensions[col_letter].width = min(max_len + 2, 48)
 
+        if col_name == ISSUER_COLUMN_NAME:
+            ws.column_dimensions[col_letter].width = 70
+
+        if col_name == ISSUER_INN_COLUMN_NAME:
+            ws.column_dimensions[col_letter].width = 16
+
         if col_name == HIDDEN_COLUMN_NAME:
             ws.column_dimensions[col_letter].hidden = True
 
@@ -457,6 +513,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "ISIN", "Описание": "Международный идентификатор ценной бумаги."},
         {"Поле": "SHORTNAME", "Описание": "Краткое название облигации."},
         {"Поле": "ISSUER_NAME", "Описание": "Наименование эмитента облигации (компании или организации, которая выпустила бумагу)."},
+        {"Поле": "ISSUER_INN", "Описание": "ИНН эмитента для быстрой сверки компании в ваших внутренних системах и документах."},
         {"Поле": "FACEVALUE", "Описание": "Номинал облигации."},
         {"Поле": "FACEUNIT", "Описание": "Валюта номинала (например, RUB)."},
         {"Поле": "COUPONVALUE", "Описание": "Размер купонной выплаты."},
@@ -492,7 +549,14 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
         df = df.sort_values(by=sort_columns).reset_index(drop=True)
 
     if FIRST_COLUMN_NAME in df.columns:
-        ordered_columns = [FIRST_COLUMN_NAME] + [col for col in df.columns if col != FIRST_COLUMN_NAME]
+        ordered_columns = [FIRST_COLUMN_NAME]
+        for preferred_col in [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME]:
+            if preferred_col in df.columns:
+                ordered_columns.append(preferred_col)
+
+        ordered_columns.extend(
+            [col for col in df.columns if col not in set(ordered_columns)]
+        )
         df = df[ordered_columns]
 
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
@@ -530,6 +594,7 @@ def main() -> None:
             raise
         logging.warning("Используем резервный кэш из-за недоступности API.")
 
+    validate_rows(rows)
     rows = enrich_with_issuer_names(rows)
     save_cache(rows)
     save_raw(rows)
