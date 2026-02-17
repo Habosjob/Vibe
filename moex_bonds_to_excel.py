@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ REQUEST_TIMEOUT = 20
 CACHE_TTL_HOURS = 6
 MAX_RETRIES = 4
 BACKOFF_FACTOR = 1.2
+MAX_WORKERS = 10
 
 ROOT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = ROOT_DIR / "logs"
@@ -42,6 +44,8 @@ OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 REMOVED_COLUMNS = {"SECNAME", "LISTLEVEL", "STATUS"}
 # SECID нужен для технической работы, но в Excel должен быть скрыт
 HIDDEN_COLUMN_NAME = "SECID"
+ISSUER_COLUMN_NAME = "ISSUER_NAME"
+FIRST_COLUMN_NAME = "ISIN"
 
 
 @dataclass
@@ -145,7 +149,7 @@ def fetch_page(session: requests.Session, start: int) -> IssPage:
 
 def fetch_all_bonds() -> list[dict[str, Any]]:
     """Собирает облигации с MOEX ISS API."""
-    logging.info("Этап 1/5: Запрос данных с MOEX ISS...")
+    logging.info("Этап 1/6: Запрос данных с MOEX ISS...")
 
     with build_session() as session:
         page = fetch_page(session, 0)
@@ -153,6 +157,92 @@ def fetch_all_bonds() -> list[dict[str, Any]]:
         rows = list(unique.values())
         logging.info("Получено записей: %s", len(rows))
         return rows
+
+
+def fetch_emitter_id_for_security(session: requests.Session, secid: str) -> int | None:
+    """Возвращает ID эмитента по SECID, если доступен."""
+    params = {
+        "iss.meta": "off",
+        "iss.only": "description",
+        "description.columns": "name,value",
+    }
+    response = session.get(f"https://iss.moex.com/iss/securities/{secid}.json", params=params, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+    rows = data.get("description", {}).get("data", [])
+    for name, value in rows:
+        if name == "EMITTER_ID" and value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def fetch_emitter_name(session: requests.Session, emitter_id: int) -> str | None:
+    """Возвращает краткое наименование эмитента по его ID."""
+    params = {"iss.meta": "off"}
+    response = session.get(f"https://iss.moex.com/iss/emitters/{emitter_id}.json", params=params, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+    emitter_rows = data.get("emitter", {}).get("data", [])
+    if not emitter_rows:
+        return None
+
+    columns = data.get("emitter", {}).get("columns", [])
+    record = dict(zip(columns, emitter_rows[0]))
+    return record.get("SHORT_TITLE") or record.get("TITLE")
+
+
+def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Добавляет в каждую строку имя эмитента облигации."""
+    logging.info("Этап 2/6: Обогащение данных наименованиями эмитентов...")
+    secids = sorted({str(row.get("SECID")) for row in rows if row.get("SECID")})
+
+    if not secids:
+        for row in rows:
+            row[ISSUER_COLUMN_NAME] = ""
+        return rows
+
+    secid_to_emitter_id: dict[str, int | None] = {}
+    emitter_cache: dict[int, str | None] = {}
+
+    def resolve_emitter(secid: str) -> tuple[str, int | None]:
+        with build_session() as local_session:
+            return secid, fetch_emitter_id_for_security(local_session, secid)
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(resolve_emitter, secid): secid for secid in secids}
+        for idx, future in enumerate(as_completed(futures), start=1):
+            secid, emitter_id = future.result()
+            secid_to_emitter_id[secid] = emitter_id
+            if idx % 200 == 0 or idx == len(secids):
+                logging.info("Обработано %s/%s бумаг для поиска эмитента.", idx, len(secids))
+
+    unique_emitter_ids = sorted({emitter_id for emitter_id in secid_to_emitter_id.values() if emitter_id is not None})
+
+    def resolve_emitter_name(emitter_id: int) -> tuple[int, str | None]:
+        with build_session() as local_session:
+            try:
+                return emitter_id, fetch_emitter_name(local_session, emitter_id)
+            except Exception as exc:
+                logging.warning("Не удалось получить наименование эмитента %s: %s", emitter_id, exc)
+                return emitter_id, None
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(resolve_emitter_name, emitter_id): emitter_id for emitter_id in unique_emitter_ids}
+        for idx, future in enumerate(as_completed(futures), start=1):
+            emitter_id, emitter_name = future.result()
+            emitter_cache[emitter_id] = emitter_name
+            if idx % 50 == 0 or idx == len(unique_emitter_ids):
+                logging.info("Обработано %s/%s эмитентов.", idx, len(unique_emitter_ids))
+
+    for row in rows:
+        secid = str(row.get("SECID", ""))
+        emitter_id = secid_to_emitter_id.get(secid)
+        row[ISSUER_COLUMN_NAME] = emitter_cache.get(emitter_id) or ""
+
+    return rows
 
 
 def merge_incremental_data(cached_rows: list[dict[str, Any]], fresh_rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
@@ -176,7 +266,7 @@ def merge_incremental_data(cached_rows: list[dict[str, Any]], fresh_rows: list[d
 def save_raw(rows: list[dict[str, Any]]) -> None:
     """Сохраняет сырые данные для отладки."""
     RAW_FILE.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    logging.info("Этап 3/5: Сырые данные сохранены: %s", RAW_FILE)
+    logging.info("Этап 4/6: Сырые данные сохранены: %s", RAW_FILE)
 
 
 def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
@@ -184,14 +274,30 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
     ws = writer.sheets["MOEX_BONDS"]
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
 
     header_fill = PatternFill(fill_type="solid", start_color="1F4E78", end_color="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
+    even_fill = PatternFill(fill_type="solid", start_color="F5F9FF", end_color="F5F9FF")
+    odd_fill = PatternFill(fill_type="solid", start_color="FFFFFF", end_color="FFFFFF")
+
+    ws.row_dimensions[1].height = 22
 
     for cell in ws[1]:
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    numeric_columns = {"FACEVALUE", "COUPONVALUE", "COUPONPERIOD", "COUPONPERCENT", "PREVLEGALCLOSEPRICE", "PREVPRICE"}
+
+    for row_idx in range(2, ws.max_row + 1):
+        row_fill = even_fill if row_idx % 2 == 0 else odd_fill
+        for col_idx, col_name in enumerate(df.columns, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.fill = row_fill
+            cell.alignment = Alignment(vertical="center")
+            if col_name in numeric_columns and isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0.00"
 
     for idx, col_name in enumerate(df.columns, start=1):
         col_letter = get_column_letter(idx)
@@ -211,6 +317,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "SECID", "Описание": "Технический код бумаги на бирже. В основном листе скрыт, но сохранён для аналитики и связок."},
         {"Поле": "ISIN", "Описание": "Международный идентификатор ценной бумаги."},
         {"Поле": "SHORTNAME", "Описание": "Краткое название облигации."},
+        {"Поле": "ISSUER_NAME", "Описание": "Наименование эмитента облигации (компании или организации, которая выпустила бумагу)."},
         {"Поле": "FACEVALUE", "Описание": "Номинал облигации."},
         {"Поле": "FACEUNIT", "Описание": "Валюта номинала (например, RUB)."},
         {"Поле": "COUPONVALUE", "Описание": "Размер купонной выплаты."},
@@ -234,7 +341,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
 
 def save_excel(rows: list[dict[str, Any]]) -> None:
     """Сохраняет итоговый набор в Excel."""
-    logging.info("Этап 4/5: Подготовка итогового Excel...")
+    logging.info("Этап 5/6: Подготовка итогового Excel...")
     df = pd.DataFrame(rows)
 
     for col in REMOVED_COLUMNS:
@@ -245,12 +352,16 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
     if sort_columns:
         df = df.sort_values(by=sort_columns).reset_index(drop=True)
 
+    if FIRST_COLUMN_NAME in df.columns:
+        ordered_columns = [FIRST_COLUMN_NAME] + [col for col in df.columns if col != FIRST_COLUMN_NAME]
+        df = df[ordered_columns]
+
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="MOEX_BONDS")
         apply_excel_formatting(writer, df)
         add_info_sheet(writer)
 
-    logging.info("Этап 5/5: Excel файл сохранён: %s", OUTPUT_FILE)
+    logging.info("Этап 6/6: Excel файл сохранён: %s", OUTPUT_FILE)
 
 
 def main() -> None:
@@ -268,7 +379,7 @@ def main() -> None:
             fresh_rows = fetch_all_bonds()
             rows, new_count, updated_count = merge_incremental_data(cached_rows, fresh_rows)
             logging.info(
-                "Этап 2/5: Инкрементальное обновление завершено. Новых: %s, обновлённых: %s, всего: %s.",
+                "Этап 3/6: Инкрементальное обновление завершено. Новых: %s, обновлённых: %s, всего: %s.",
                 new_count,
                 updated_count,
                 len(rows),
@@ -280,6 +391,7 @@ def main() -> None:
             raise
         logging.warning("Используем резервный кэш из-за недоступности API.")
 
+    rows = enrich_with_issuer_names(rows)
     save_cache(rows)
     save_raw(rows)
     save_excel(rows)
