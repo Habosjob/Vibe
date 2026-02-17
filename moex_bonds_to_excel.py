@@ -28,6 +28,8 @@ CACHE_TTL_HOURS = 6
 MAX_RETRIES = 4
 BACKOFF_FACTOR = 1.2
 MAX_WORKERS = 10
+SECID_BATCH_SIZE = 50
+EMITTER_BATCH_SIZE = 80
 
 ROOT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = ROOT_DIR / "logs"
@@ -38,6 +40,8 @@ CACHE_DIR = ROOT_DIR / "cache"
 LOG_FILE = LOGS_DIR / "moex_bonds.log"
 RAW_FILE = RAW_DIR / "moex_bonds_raw.json"
 CACHE_FILE = CACHE_DIR / "moex_bonds_cache.json"
+ISSUER_CACHE_FILE = CACHE_DIR / "issuer_directory_cache.json"
+ISSUER_CHECKPOINT_FILE = CACHE_DIR / "issuer_enrichment_checkpoint.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
 # Колонки, которые пользователь попросил убрать из итогового файла
@@ -110,6 +114,113 @@ def save_cache(rows: list[dict[str, Any]]) -> None:
         "rows": rows,
     }
     CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str]]:
+    """Читает пожизненный кэш соответствий SECID -> EMITTER_ID и EMITTER_ID -> имя."""
+    if not ISSUER_CACHE_FILE.exists():
+        return {}, {}
+
+    try:
+        payload = json.loads(ISSUER_CACHE_FILE.read_text(encoding="utf-8"))
+        secid_to_emitter_id: dict[str, int | None] = {}
+        emitter_id_to_name: dict[int, str] = {}
+
+        for secid, emitter_id in payload.get("secid_to_emitter_id", {}).items():
+            if emitter_id is None:
+                secid_to_emitter_id[str(secid)] = None
+            else:
+                try:
+                    secid_to_emitter_id[str(secid)] = int(emitter_id)
+                except (TypeError, ValueError):
+                    secid_to_emitter_id[str(secid)] = None
+
+        for emitter_id, emitter_name in payload.get("emitter_id_to_name", {}).items():
+            if not emitter_name:
+                continue
+            try:
+                emitter_id_to_name[int(emitter_id)] = str(emitter_name)
+            except (TypeError, ValueError):
+                continue
+
+        logging.info(
+            "Загружен пожизненный справочник эмитентов: SECID=%s, EMITTER_ID=%s.",
+            len(secid_to_emitter_id),
+            len(emitter_id_to_name),
+        )
+        return secid_to_emitter_id, emitter_id_to_name
+    except Exception as exc:
+        logging.warning("Не удалось прочитать пожизненный кэш эмитентов: %s", exc)
+        return {}, {}
+
+
+def save_issuer_directory_cache(secid_to_emitter_id: dict[str, int | None], emitter_id_to_name: dict[int, str]) -> None:
+    """Сохраняет пожизненный справочник эмитентов."""
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "secid_to_emitter_id": secid_to_emitter_id,
+        "emitter_id_to_name": {str(k): v for k, v in emitter_id_to_name.items()},
+    }
+    ISSUER_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str]]:
+    """Возвращает checkpoint по этапу обогащения эмитентов, если он есть."""
+    if not ISSUER_CHECKPOINT_FILE.exists():
+        return {}, {}
+
+    try:
+        payload = json.loads(ISSUER_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+        secid_to_emitter_id: dict[str, int | None] = {}
+        emitter_id_to_name: dict[int, str] = {}
+
+        for secid, emitter_id in payload.get("secid_to_emitter_id", {}).items():
+            if emitter_id is None:
+                secid_to_emitter_id[str(secid)] = None
+            else:
+                try:
+                    secid_to_emitter_id[str(secid)] = int(emitter_id)
+                except (TypeError, ValueError):
+                    secid_to_emitter_id[str(secid)] = None
+
+        for emitter_id, emitter_name in payload.get("emitter_id_to_name", {}).items():
+            if not emitter_name:
+                continue
+            try:
+                emitter_id_to_name[int(emitter_id)] = str(emitter_name)
+            except (TypeError, ValueError):
+                continue
+
+        logging.info(
+            "Найден checkpoint обогащения: SECID=%s, EMITTER_ID=%s.",
+            len(secid_to_emitter_id),
+            len(emitter_id_to_name),
+        )
+        return secid_to_emitter_id, emitter_id_to_name
+    except Exception as exc:
+        logging.warning("Не удалось прочитать checkpoint эмитентов: %s", exc)
+        return {}, {}
+
+
+def save_issuer_checkpoint(secid_to_emitter_id: dict[str, int | None], emitter_id_to_name: dict[int, str]) -> None:
+    """Сохраняет checkpoint обогащения эмитентов после каждого пакета."""
+    payload = {
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "secid_to_emitter_id": secid_to_emitter_id,
+        "emitter_id_to_name": {str(k): v for k, v in emitter_id_to_name.items()},
+    }
+    ISSUER_CHECKPOINT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def clear_issuer_checkpoint() -> None:
+    """Удаляет checkpoint после успешного завершения этапа обогащения."""
+    if ISSUER_CHECKPOINT_FILE.exists():
+        ISSUER_CHECKPOINT_FILE.unlink()
+
+
+def chunked(items: list[Any], size: int) -> list[list[Any]]:
+    """Разбивает список на пакеты фиксированного размера."""
+    return [items[idx : idx + size] for idx in range(0, len(items), size)]
 
 
 
@@ -204,43 +315,71 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row[ISSUER_COLUMN_NAME] = ""
         return rows
 
-    secid_to_emitter_id: dict[str, int | None] = {}
-    emitter_cache: dict[int, str | None] = {}
+    cache_secid_to_emitter_id, cache_emitter_id_to_name = load_issuer_directory_cache()
+    checkpoint_secid_to_emitter_id, checkpoint_emitter_id_to_name = load_issuer_checkpoint()
 
-    def resolve_emitter(secid: str) -> tuple[str, int | None]:
+    secid_to_emitter_id: dict[str, int | None] = {**cache_secid_to_emitter_id, **checkpoint_secid_to_emitter_id}
+    emitter_cache: dict[int, str] = {**cache_emitter_id_to_name, **checkpoint_emitter_id_to_name}
+
+    missing_secids = [secid for secid in secids if secid not in secid_to_emitter_id]
+    secid_batches = chunked(missing_secids, SECID_BATCH_SIZE)
+
+    def resolve_emitter_batch(batch: list[str]) -> dict[str, int | None]:
+        resolved: dict[str, int | None] = {}
         with build_session() as local_session:
-            return secid, fetch_emitter_id_for_security(local_session, secid)
+            for secid in batch:
+                try:
+                    resolved[secid] = fetch_emitter_id_for_security(local_session, secid)
+                except Exception as exc:
+                    logging.warning("Не удалось получить EMITTER_ID для %s: %s", secid, exc)
+                    resolved[secid] = None
+        return resolved
+
+    if secid_batches:
+        logging.info("Пакетный режим: нужно обработать %s пакетов SECID.", len(secid_batches))
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(resolve_emitter, secid): secid for secid in secids}
-        for idx, future in enumerate(as_completed(futures), start=1):
-            secid, emitter_id = future.result()
-            secid_to_emitter_id[secid] = emitter_id
-            if idx % 200 == 0 or idx == len(secids):
-                logging.info("Обработано %s/%s бумаг для поиска эмитента.", idx, len(secids))
+        futures = {executor.submit(resolve_emitter_batch, batch): idx for idx, batch in enumerate(secid_batches, start=1)}
+        for processed, future in enumerate(as_completed(futures), start=1):
+            secid_to_emitter_id.update(future.result())
+            save_issuer_checkpoint(secid_to_emitter_id, emitter_cache)
+            if processed % 5 == 0 or processed == len(secid_batches):
+                logging.info("SECID пакеты: %s/%s.", processed, len(secid_batches))
 
     unique_emitter_ids = sorted({emitter_id for emitter_id in secid_to_emitter_id.values() if emitter_id is not None})
+    missing_emitter_ids = [emitter_id for emitter_id in unique_emitter_ids if emitter_id not in emitter_cache]
+    emitter_batches = chunked(missing_emitter_ids, EMITTER_BATCH_SIZE)
 
-    def resolve_emitter_name(emitter_id: int) -> tuple[int, str | None]:
+    def resolve_emitter_names_batch(batch: list[int]) -> dict[int, str]:
+        resolved: dict[int, str] = {}
         with build_session() as local_session:
-            try:
-                return emitter_id, fetch_emitter_name(local_session, emitter_id)
-            except Exception as exc:
-                logging.warning("Не удалось получить наименование эмитента %s: %s", emitter_id, exc)
-                return emitter_id, None
+            for emitter_id in batch:
+                try:
+                    emitter_name = fetch_emitter_name(local_session, emitter_id)
+                    if emitter_name:
+                        resolved[emitter_id] = emitter_name
+                except Exception as exc:
+                    logging.warning("Не удалось получить наименование эмитента %s: %s", emitter_id, exc)
+        return resolved
+
+    if emitter_batches:
+        logging.info("Пакетный режим: нужно обработать %s пакетов эмитентов.", len(emitter_batches))
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(resolve_emitter_name, emitter_id): emitter_id for emitter_id in unique_emitter_ids}
-        for idx, future in enumerate(as_completed(futures), start=1):
-            emitter_id, emitter_name = future.result()
-            emitter_cache[emitter_id] = emitter_name
-            if idx % 50 == 0 or idx == len(unique_emitter_ids):
-                logging.info("Обработано %s/%s эмитентов.", idx, len(unique_emitter_ids))
+        futures = {executor.submit(resolve_emitter_names_batch, batch): idx for idx, batch in enumerate(emitter_batches, start=1)}
+        for processed, future in enumerate(as_completed(futures), start=1):
+            emitter_cache.update(future.result())
+            save_issuer_checkpoint(secid_to_emitter_id, emitter_cache)
+            if processed % 5 == 0 or processed == len(emitter_batches):
+                logging.info("Пакеты эмитентов: %s/%s.", processed, len(emitter_batches))
 
     for row in rows:
         secid = str(row.get("SECID", ""))
         emitter_id = secid_to_emitter_id.get(secid)
         row[ISSUER_COLUMN_NAME] = emitter_cache.get(emitter_id) or ""
+
+    save_issuer_directory_cache(secid_to_emitter_id, emitter_cache)
+    clear_issuer_checkpoint()
 
     return rows
 
