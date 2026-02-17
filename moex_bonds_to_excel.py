@@ -58,9 +58,12 @@ AMORTIZATION_FLAG_COLUMN_NAME = "HAS_AMORTIZATION"
 AMORTIZATION_START_DATE_COLUMN_NAME = "AMORTIZATION_START_DATE"
 ACCRUED_INT_COLUMN_NAME = "ACCRUEDINT"
 BOND_TYPE_COLUMN_NAME = "BOND_TYPE"
+HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
+PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 MIN_MATURITY_YEARS = 1
-DAILY_METRICS_CACHE_SCHEMA_VERSION = 3
+DAILY_METRICS_CACHE_SCHEMA_VERSION = 4
+STRUCTURAL_BOND_TYPE_VALUES = {"структурная облигация", "структурные облигации"}
 
 
 @dataclass
@@ -127,10 +130,10 @@ def save_cache(rows: list[dict[str, Any]]) -> None:
     CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str], dict[int, str], dict[str, str], dict[str, str]]:
-    """Читает пожизненный кэш соответствий SECID -> EMITTER_ID/QUALIFIED_INVESTOR/BOND_TYPE, EMITTER_ID -> имя и ИНН."""
+def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str], dict[int, str], dict[str, str], dict[str, str], dict[str, int]]:
+    """Читает пожизненный кэш SECID -> EMITTER_ID/QUALIFIED_INVESTOR/BOND_TYPE/COUPONPERIOD, EMITTER_ID -> имя и ИНН."""
     if not ISSUER_CACHE_FILE.exists():
-        return {}, {}, {}, {}, {}
+        return {}, {}, {}, {}, {}, {}
 
     try:
         payload = json.loads(ISSUER_CACHE_FILE.read_text(encoding="utf-8"))
@@ -139,6 +142,7 @@ def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str]
         emitter_id_to_inn: dict[int, str] = {}
         secid_to_qualified_sign: dict[str, str] = {}
         secid_to_bond_type: dict[str, str] = {}
+        secid_to_coupon_period: dict[str, int] = {}
 
         for secid, emitter_id in payload.get("secid_to_emitter_id", {}).items():
             if emitter_id is None:
@@ -173,15 +177,21 @@ def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str]
             if bond_type:
                 secid_to_bond_type[str(secid)] = str(bond_type)
 
+        for secid, coupon_period in payload.get("secid_to_coupon_period", {}).items():
+            try:
+                secid_to_coupon_period[str(secid)] = int(coupon_period)
+            except (TypeError, ValueError):
+                continue
+
         logging.info(
             "Загружен пожизненный справочник эмитентов: SECID=%s, EMITTER_ID=%s.",
             len(secid_to_emitter_id),
             len(emitter_id_to_name),
         )
-        return secid_to_emitter_id, emitter_id_to_name, emitter_id_to_inn, secid_to_qualified_sign, secid_to_bond_type
+        return secid_to_emitter_id, emitter_id_to_name, emitter_id_to_inn, secid_to_qualified_sign, secid_to_bond_type, secid_to_coupon_period
     except Exception as exc:
         logging.warning("Не удалось прочитать пожизненный кэш эмитентов: %s", exc)
-        return {}, {}, {}, {}, {}
+        return {}, {}, {}, {}, {}, {}
 
 
 def save_issuer_directory_cache(
@@ -190,6 +200,7 @@ def save_issuer_directory_cache(
     emitter_id_to_inn: dict[int, str],
     secid_to_qualified_sign: dict[str, str],
     secid_to_bond_type: dict[str, str],
+    secid_to_coupon_period: dict[str, int],
 ) -> None:
     """Сохраняет пожизненный справочник эмитентов."""
     payload = {
@@ -197,16 +208,17 @@ def save_issuer_directory_cache(
         "secid_to_emitter_id": secid_to_emitter_id,
         "secid_to_qualified_sign": secid_to_qualified_sign,
         "secid_to_bond_type": secid_to_bond_type,
+        "secid_to_coupon_period": secid_to_coupon_period,
         "emitter_id_to_name": {str(k): v for k, v in emitter_id_to_name.items()},
         "emitter_id_to_inn": {str(k): v for k, v in emitter_id_to_inn.items()},
     }
     ISSUER_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str], dict[int, str], dict[str, str], dict[str, str]]:
+def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str], dict[int, str], dict[str, str], dict[str, str], dict[str, int]]:
     """Возвращает checkpoint по этапу обогащения эмитентов, если он есть."""
     if not ISSUER_CHECKPOINT_FILE.exists():
-        return {}, {}, {}, {}, {}
+        return {}, {}, {}, {}, {}, {}
 
     try:
         payload = json.loads(ISSUER_CHECKPOINT_FILE.read_text(encoding="utf-8"))
@@ -215,6 +227,7 @@ def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str], dic
         emitter_id_to_inn: dict[int, str] = {}
         secid_to_qualified_sign: dict[str, str] = {}
         secid_to_bond_type: dict[str, str] = {}
+        secid_to_coupon_period: dict[str, int] = {}
 
         for secid, emitter_id in payload.get("secid_to_emitter_id", {}).items():
             if emitter_id is None:
@@ -249,15 +262,21 @@ def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str], dic
             if bond_type:
                 secid_to_bond_type[str(secid)] = str(bond_type)
 
+        for secid, coupon_period in payload.get("secid_to_coupon_period", {}).items():
+            try:
+                secid_to_coupon_period[str(secid)] = int(coupon_period)
+            except (TypeError, ValueError):
+                continue
+
         logging.info(
             "Найден checkpoint обогащения: SECID=%s, EMITTER_ID=%s.",
             len(secid_to_emitter_id),
             len(emitter_id_to_name),
         )
-        return secid_to_emitter_id, emitter_id_to_name, emitter_id_to_inn, secid_to_qualified_sign, secid_to_bond_type
+        return secid_to_emitter_id, emitter_id_to_name, emitter_id_to_inn, secid_to_qualified_sign, secid_to_bond_type, secid_to_coupon_period
     except Exception as exc:
         logging.warning("Не удалось прочитать checkpoint эмитентов: %s", exc)
-        return {}, {}, {}, {}, {}
+        return {}, {}, {}, {}, {}, {}
 
 
 def save_issuer_checkpoint(
@@ -266,6 +285,7 @@ def save_issuer_checkpoint(
     emitter_id_to_inn: dict[int, str],
     secid_to_qualified_sign: dict[str, str],
     secid_to_bond_type: dict[str, str],
+    secid_to_coupon_period: dict[str, int],
 ) -> None:
     """Сохраняет checkpoint обогащения эмитентов после каждого пакета."""
     payload = {
@@ -273,6 +293,7 @@ def save_issuer_checkpoint(
         "secid_to_emitter_id": secid_to_emitter_id,
         "secid_to_qualified_sign": secid_to_qualified_sign,
         "secid_to_bond_type": secid_to_bond_type,
+        "secid_to_coupon_period": secid_to_coupon_period,
         "emitter_id_to_name": {str(k): v for k, v in emitter_id_to_name.items()},
         "emitter_id_to_inn": {str(k): v for k, v in emitter_id_to_inn.items()},
     }
@@ -357,6 +378,27 @@ def chunked(items: list[Any], size: int) -> list[list[Any]]:
     return [items[idx : idx + size] for idx in range(0, len(items), size)]
 
 
+def normalize_bond_type(raw_bond_type: str) -> str:
+    """Нормализует тип облигации и убирает значения, которые пользователю не нужны."""
+    value = str(raw_bond_type or "").strip()
+    if not value:
+        return "Не указан"
+    if value.lower() in STRUCTURAL_BOND_TYPE_VALUES:
+        return "Не указан"
+    return value
+
+
+def coupon_period_from_frequency(raw_frequency: Any) -> int:
+    """Пересчитывает COUPONFREQUENCY в примерный период купона в днях."""
+    try:
+        frequency = int(raw_frequency)
+    except (TypeError, ValueError):
+        return 0
+    if frequency <= 0:
+        return 0
+    return round(365 / frequency)
+
+
 
 def build_session() -> requests.Session:
     """Создаёт HTTP-сессию с ретраями при временных ошибках сети/API."""
@@ -418,8 +460,8 @@ def fetch_all_bonds() -> list[dict[str, Any]]:
         return rows
 
 
-def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tuple[int | None, str, str]:
-    """Возвращает ID эмитента, признак квалифицированного инвестора и тип облигации по SECID."""
+def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tuple[int | None, str, str, int]:
+    """Возвращает ID эмитента, квалификацию, тип облигации и период купона по SECID."""
     params = {
         "iss.meta": "off",
         "iss.only": "description",
@@ -431,7 +473,8 @@ def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tu
     rows = data.get("description", {}).get("data", [])
     emitter_id: int | None = None
     qualified_investor_sign = "✖"
-    bond_type = ""
+    bond_type = "Не указан"
+    coupon_period = 0
 
     for name, value in rows:
         if name == "EMITTER_ID" and value is not None:
@@ -441,14 +484,41 @@ def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tu
                 emitter_id = None
         if name == "ISQUALIFIEDINVESTORS":
             qualified_investor_sign = "✔" if str(value) == "1" else "✖"
-        if name == "BOND_TYPE" and value:
-            bond_type = str(value)
+        if name == "BOND_TYPE":
+            bond_type = normalize_bond_type(str(value or ""))
+        if name == "COUPONFREQUENCY":
+            coupon_period = coupon_period_from_frequency(value)
 
-    return emitter_id, qualified_investor_sign, bond_type
+    return emitter_id, qualified_investor_sign, bond_type, coupon_period
 
 
-def fetch_daily_security_metrics(session: requests.Session, secid: str, maturity_date: str | None) -> tuple[str, str | None]:
-    """Получает суточные метрики бумаги: наличие амортизации и дату её начала.
+def parse_offer_metrics(offers_data: list[list[Any]], offers_columns: list[str]) -> tuple[str, str | None]:
+    """Определяет наличие Put/Call оферты и ближайшую дату оферты."""
+    if not offers_data or not offers_columns:
+        return "✖", None
+
+    offer_dates: list[str] = []
+    has_put_or_call = False
+    for raw_offer in offers_data:
+        offer = dict(zip(offers_columns, raw_offer))
+        offer_type = str(offer.get("offertype") or "").strip().lower()
+        if not offer_type or ("put" not in offer_type and "call" not in offer_type):
+            continue
+        has_put_or_call = True
+        for date_key in ("offerdate", "offerdatestart", "offerdateend"):
+            offer_date = str(offer.get(date_key) or "").strip()
+            if offer_date:
+                offer_dates.append(offer_date)
+
+    if not has_put_or_call:
+        return "✖", None
+    if not offer_dates:
+        return "✔", None
+    return "✔", min(offer_dates)
+
+
+def fetch_daily_security_metrics(session: requests.Session, secid: str, maturity_date: str | None) -> tuple[str, str | None, str, str | None]:
+    """Получает суточные метрики бумаги: амортизация + Put/Call оферта.
 
     Важно: финальное погашение (строка с data_source=maturity на дату MATDATE) не считаем амортизацией.
     """
@@ -458,9 +528,12 @@ def fetch_daily_security_metrics(session: requests.Session, secid: str, maturity
     data = response.json()
     amort_data = data.get("amortizations", {}).get("data", [])
     amort_columns = data.get("amortizations", {}).get("columns", [])
+    offers_data = data.get("offers", {}).get("data", [])
+    offers_columns = data.get("offers", {}).get("columns", [])
+    has_put_call_offer, put_call_offer_date = parse_offer_metrics(offers_data, offers_columns)
 
     if not amort_data or not amort_columns:
-        return "✖", None
+        return "✖", None, has_put_call_offer, put_call_offer_date
 
     amort_records = [dict(zip(amort_columns, row)) for row in amort_data]
 
@@ -479,9 +552,9 @@ def fetch_daily_security_metrics(session: requests.Session, secid: str, maturity
             real_amortization_dates.append(amort_date)
 
     if not real_amortization_dates:
-        return "✖", None
+        return "✖", None, has_put_call_offer, put_call_offer_date
 
-    return "✔", min(real_amortization_dates)
+    return "✔", min(real_amortization_dates), has_put_call_offer, put_call_offer_date
 
 
 def fetch_emitter_details(session: requests.Session, emitter_id: int) -> tuple[str | None, str | None]:
@@ -518,7 +591,7 @@ def validate_rows(rows: list[dict[str, Any]]) -> None:
 
 
 def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Добавляет в каждую строку имя/ИНН эмитента и признак квалифицированного инвестора."""
+    """Добавляет в каждую строку имя/ИНН эмитента, квалификацию, тип и корректный COUPONPERIOD."""
     logging.info("Этап 5.1/8: Обогащение данных наименованиями эмитентов...")
     secids = sorted({str(row.get("SECID")) for row in rows if row.get("SECID")})
 
@@ -527,43 +600,63 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row[ISSUER_COLUMN_NAME] = ""
             row[ISSUER_INN_COLUMN_NAME] = ""
             row[QUALIFIED_INVESTOR_COLUMN_NAME] = "✖"
-            row[BOND_TYPE_COLUMN_NAME] = ""
+            row[BOND_TYPE_COLUMN_NAME] = "Не указан"
         return rows
 
-    cache_secid_to_emitter_id, cache_emitter_id_to_name, cache_emitter_id_to_inn, cache_secid_to_qualified_sign, cache_secid_to_bond_type = load_issuer_directory_cache()
-    checkpoint_secid_to_emitter_id, checkpoint_emitter_id_to_name, checkpoint_emitter_id_to_inn, checkpoint_secid_to_qualified_sign, checkpoint_secid_to_bond_type = load_issuer_checkpoint()
+    cache_secid_to_emitter_id, cache_emitter_id_to_name, cache_emitter_id_to_inn, cache_secid_to_qualified_sign, cache_secid_to_bond_type, cache_secid_to_coupon_period = load_issuer_directory_cache()
+    checkpoint_secid_to_emitter_id, checkpoint_emitter_id_to_name, checkpoint_emitter_id_to_inn, checkpoint_secid_to_qualified_sign, checkpoint_secid_to_bond_type, checkpoint_secid_to_coupon_period = load_issuer_checkpoint()
 
     secid_to_emitter_id: dict[str, int | None] = {**cache_secid_to_emitter_id, **checkpoint_secid_to_emitter_id}
     emitter_cache: dict[int, str] = {**cache_emitter_id_to_name, **checkpoint_emitter_id_to_name}
     emitter_inn_cache: dict[int, str] = {**cache_emitter_id_to_inn, **checkpoint_emitter_id_to_inn}
     secid_to_qualified_sign: dict[str, str] = {**cache_secid_to_qualified_sign, **checkpoint_secid_to_qualified_sign}
     secid_to_bond_type: dict[str, str] = {**cache_secid_to_bond_type, **checkpoint_secid_to_bond_type}
+    secid_to_coupon_period: dict[str, int] = {**cache_secid_to_coupon_period, **checkpoint_secid_to_coupon_period}
 
+    secids_with_zero_coupon_period: set[str] = set()
+    for row in rows:
+        secid = str(row.get("SECID") or "").strip()
+        if not secid:
+            continue
+        try:
+            coupon_period_raw = int(float(str(row.get("COUPONPERIOD") or 0)))
+        except ValueError:
+            coupon_period_raw = 0
+        if coupon_period_raw == 0:
+            secids_with_zero_coupon_period.add(secid)
 
     missing_secids = [
         secid
         for secid in secids
-        if secid not in secid_to_emitter_id or secid not in secid_to_qualified_sign or not str(secid_to_bond_type.get(secid, "")).strip()
+        if secid not in secid_to_emitter_id
+        or secid not in secid_to_qualified_sign
+        or secid not in secid_to_bond_type
+        or (secid in secids_with_zero_coupon_period and secid not in secid_to_coupon_period)
     ]
     secid_batches = chunked(missing_secids, SECID_BATCH_SIZE)
 
-    def resolve_emitter_batch(batch: list[str]) -> tuple[dict[str, int | None], dict[str, str], dict[str, str]]:
+    def resolve_emitter_batch(batch: list[str]) -> tuple[dict[str, int | None], dict[str, str], dict[str, str], dict[str, int]]:
         resolved: dict[str, int | None] = {}
         resolved_qualified: dict[str, str] = {}
         resolved_bond_types: dict[str, str] = {}
+        resolved_coupon_periods: dict[str, int] = {}
         with build_session() as local_session:
             for secid in batch:
                 try:
-                    emitter_id, qualified_sign, bond_type = fetch_emitter_info_for_security(local_session, secid)
+                    emitter_id, qualified_sign, bond_type, coupon_period = fetch_emitter_info_for_security(local_session, secid)
                     resolved[secid] = emitter_id
                     resolved_qualified[secid] = qualified_sign
-                    resolved_bond_types[secid] = bond_type or "Не указан"
+                    resolved_bond_types[secid] = bond_type
+                    if secid in secids_with_zero_coupon_period:
+                        resolved_coupon_periods[secid] = coupon_period
                 except Exception as exc:
-                    logging.warning("Не удалось получить EMITTER_ID для %s: %s", secid, exc)
+                    logging.warning("Не удалось получить данные эмитента для %s: %s", secid, exc)
                     resolved[secid] = None
                     resolved_qualified[secid] = "✖"
                     resolved_bond_types[secid] = "Не указан"
-        return resolved, resolved_qualified, resolved_bond_types
+                    if secid in secids_with_zero_coupon_period:
+                        resolved_coupon_periods[secid] = 0
+        return resolved, resolved_qualified, resolved_bond_types, resolved_coupon_periods
 
     if secid_batches:
         logging.info("Пакетный режим: нужно обработать %s пакетов SECID.", len(secid_batches))
@@ -571,11 +664,19 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(resolve_emitter_batch, batch): idx for idx, batch in enumerate(secid_batches, start=1)}
         for processed, future in enumerate(as_completed(futures), start=1):
-            secid_chunk, qualified_chunk, bond_types_chunk = future.result()
+            secid_chunk, qualified_chunk, bond_types_chunk, coupon_period_chunk = future.result()
             secid_to_emitter_id.update(secid_chunk)
             secid_to_qualified_sign.update(qualified_chunk)
             secid_to_bond_type.update(bond_types_chunk)
-            save_issuer_checkpoint(secid_to_emitter_id, emitter_cache, emitter_inn_cache, secid_to_qualified_sign, secid_to_bond_type)
+            secid_to_coupon_period.update(coupon_period_chunk)
+            save_issuer_checkpoint(
+                secid_to_emitter_id,
+                emitter_cache,
+                emitter_inn_cache,
+                secid_to_qualified_sign,
+                secid_to_bond_type,
+                secid_to_coupon_period,
+            )
             if processed % 5 == 0 or processed == len(secid_batches):
                 logging.info("SECID пакеты: %s/%s.", processed, len(secid_batches))
 
@@ -611,7 +712,14 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             names_chunk, inn_chunk = future.result()
             emitter_cache.update(names_chunk)
             emitter_inn_cache.update(inn_chunk)
-            save_issuer_checkpoint(secid_to_emitter_id, emitter_cache, emitter_inn_cache, secid_to_qualified_sign, secid_to_bond_type)
+            save_issuer_checkpoint(
+                secid_to_emitter_id,
+                emitter_cache,
+                emitter_inn_cache,
+                secid_to_qualified_sign,
+                secid_to_bond_type,
+                secid_to_coupon_period,
+            )
             if processed % 5 == 0 or processed == len(emitter_batches):
                 logging.info("Пакеты эмитентов: %s/%s.", processed, len(emitter_batches))
 
@@ -621,17 +729,26 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         row[ISSUER_COLUMN_NAME] = emitter_cache.get(emitter_id) or ""
         row[ISSUER_INN_COLUMN_NAME] = emitter_inn_cache.get(emitter_id) or ""
         row[QUALIFIED_INVESTOR_COLUMN_NAME] = secid_to_qualified_sign.get(secid, "✖")
-        row[BOND_TYPE_COLUMN_NAME] = secid_to_bond_type.get(secid) or row.get(BOND_TYPE_COLUMN_NAME, "Не указан")
+        row[BOND_TYPE_COLUMN_NAME] = secid_to_bond_type.get(secid, "Не указан")
+        if secid in secids_with_zero_coupon_period and "COUPONPERIOD" in row:
+            row["COUPONPERIOD"] = secid_to_coupon_period.get(secid, 0)
 
-    save_issuer_directory_cache(secid_to_emitter_id, emitter_cache, emitter_inn_cache, secid_to_qualified_sign, secid_to_bond_type)
+    save_issuer_directory_cache(
+        secid_to_emitter_id,
+        emitter_cache,
+        emitter_inn_cache,
+        secid_to_qualified_sign,
+        secid_to_bond_type,
+        secid_to_coupon_period,
+    )
     clear_issuer_checkpoint()
 
     return rows
 
 
 def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Добавляет НКД, признак амортизации и дату начала амортизации с суточным кэшем."""
-    logging.info("Этап 3/8: Обогащение суточными метриками (амортизация и НКД)...")
+    """Добавляет НКД, амортизацию и данные Put/Call оферт с суточным кэшем."""
+    logging.info("Этап 3/8: Обогащение суточными метриками (амортизация, оферты и НКД)...")
     secids = sorted({str(row.get("SECID")) for row in rows if row.get("SECID")})
     if not secids:
         return rows
@@ -668,10 +785,16 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         with build_session() as local_session:
             for secid in batch:
                 try:
-                    has_amortization, amort_start_date = fetch_daily_security_metrics(local_session, secid, str(row_by_secid.get(secid, {}).get(MATURITY_DATE_COLUMN_NAME) or ""))
+                    has_amortization, amort_start_date, has_put_call_offer, put_call_offer_date = fetch_daily_security_metrics(
+                        local_session,
+                        secid,
+                        str(row_by_secid.get(secid, {}).get(MATURITY_DATE_COLUMN_NAME) or ""),
+                    )
                     resolved[secid] = {
                         AMORTIZATION_FLAG_COLUMN_NAME: has_amortization,
                         AMORTIZATION_START_DATE_COLUMN_NAME: amort_start_date or "",
+                        HAS_PUT_CALL_OFFER_COLUMN_NAME: has_put_call_offer,
+                        PUT_CALL_OFFER_DATE_COLUMN_NAME: put_call_offer_date or "",
                         "EXCLUDE_BY_AMORTIZATION": False,
                         "AMORTIZATION_EXCLUDE_REASON": "",
                         "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -697,6 +820,8 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         entry = cache.get(secid, {})
         has_amortization = str(entry.get(AMORTIZATION_FLAG_COLUMN_NAME, "✖"))
         amortization_start_date = str(entry.get(AMORTIZATION_START_DATE_COLUMN_NAME, "") or "")
+        has_put_call_offer = str(entry.get(HAS_PUT_CALL_OFFER_COLUMN_NAME, "✖"))
+        put_call_offer_date = str(entry.get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "")
         maturity_date = str(row.get(MATURITY_DATE_COLUMN_NAME) or "")
 
         if has_amortization == "✔" and maturity_date and amortization_start_date == maturity_date:
@@ -705,6 +830,8 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
         row[AMORTIZATION_FLAG_COLUMN_NAME] = has_amortization
         row[AMORTIZATION_START_DATE_COLUMN_NAME] = amortization_start_date
+        row[HAS_PUT_CALL_OFFER_COLUMN_NAME] = has_put_call_offer
+        row[PUT_CALL_OFFER_DATE_COLUMN_NAME] = put_call_offer_date
         row[ACCRUED_INT_COLUMN_NAME] = row.get(ACCRUED_INT_COLUMN_NAME)
 
         amort_date = parse_date_safe(amortization_start_date)
@@ -718,6 +845,10 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         row["EXCLUDE_BY_AMORTIZATION"] = is_excluded
         row["AMORTIZATION_EXCLUDE_REASON"] = exclude_reason
 
+        entry[AMORTIZATION_FLAG_COLUMN_NAME] = has_amortization
+        entry[AMORTIZATION_START_DATE_COLUMN_NAME] = amortization_start_date
+        entry[HAS_PUT_CALL_OFFER_COLUMN_NAME] = has_put_call_offer
+        entry[PUT_CALL_OFFER_DATE_COLUMN_NAME] = put_call_offer_date
         entry["EXCLUDE_BY_AMORTIZATION"] = is_excluded
         entry["AMORTIZATION_EXCLUDE_REASON"] = exclude_reason
         entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
@@ -851,6 +982,8 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "ISSUER_INN", "Описание": "ИНН эмитента для быстрой сверки компании в ваших внутренних системах и документах."},
         {"Поле": "QUALIFIED_INVESTOR", "Описание": "Показывает, предназначена ли облигация только для квалифицированных инвесторов: ✔ — да, ✖ — нет."},
         {"Поле": "BOND_TYPE", "Описание": "Тип облигации по купону (например: фиксированная, флоатер и т.д.)."},
+        {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Есть ли у облигации Put/Call оферта: ✔ — есть, ✖ — нет."},
+        {"Поле": "PUT_CALL_OFFER_DATE", "Описание": "Ближайшая дата Put/Call оферты (если опубликована на MOEX)."},
         {"Поле": "HAS_AMORTIZATION", "Описание": "Есть ли у бумаги амортизация номинала: ✔ — да, ✖ — нет."},
         {"Поле": "AMORTIZATION_START_DATE", "Описание": "Дата начала амортизации (если есть)."},
         {"Поле": "MATDATE", "Описание": "Дата погашения облигации (когда эмитент должен вернуть номинал)."},
@@ -889,7 +1022,7 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
     if sort_columns:
         df = df.sort_values(by=sort_columns).reset_index(drop=True)
 
-    for date_col in [MATURITY_DATE_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME]:
+    for date_col in [MATURITY_DATE_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]:
         if date_col in df.columns:
             df[date_col] = df[date_col].map(format_date_ddmmyyyy)
 
@@ -901,6 +1034,8 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
             "SHORTNAME",
             QUALIFIED_INVESTOR_COLUMN_NAME,
             BOND_TYPE_COLUMN_NAME,
+            HAS_PUT_CALL_OFFER_COLUMN_NAME,
+            PUT_CALL_OFFER_DATE_COLUMN_NAME,
             AMORTIZATION_FLAG_COLUMN_NAME,
             AMORTIZATION_START_DATE_COLUMN_NAME,
             MATURITY_DATE_COLUMN_NAME,
