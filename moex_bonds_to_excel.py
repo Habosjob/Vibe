@@ -441,7 +441,7 @@ def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tu
                 emitter_id = None
         if name == "ISQUALIFIEDINVESTORS":
             qualified_investor_sign = "✔" if str(value) == "1" else "✖"
-        if name in {"COUPON_TYPE", "COUPONTYPE", "COUPONKIND"} and value:
+        if name == "BOND_TYPE" and value:
             bond_type = str(value)
 
     return emitter_id, qualified_investor_sign, bond_type
@@ -543,7 +543,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     missing_secids = [
         secid
         for secid in secids
-        if secid not in secid_to_emitter_id or secid not in secid_to_qualified_sign or secid not in secid_to_bond_type
+        if secid not in secid_to_emitter_id or secid not in secid_to_qualified_sign or not str(secid_to_bond_type.get(secid, "")).strip()
     ]
     secid_batches = chunked(missing_secids, SECID_BATCH_SIZE)
 
@@ -557,12 +557,12 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                     emitter_id, qualified_sign, bond_type = fetch_emitter_info_for_security(local_session, secid)
                     resolved[secid] = emitter_id
                     resolved_qualified[secid] = qualified_sign
-                    resolved_bond_types[secid] = bond_type
+                    resolved_bond_types[secid] = bond_type or "Не указан"
                 except Exception as exc:
                     logging.warning("Не удалось получить EMITTER_ID для %s: %s", secid, exc)
                     resolved[secid] = None
                     resolved_qualified[secid] = "✖"
-                    resolved_bond_types[secid] = ""
+                    resolved_bond_types[secid] = "Не указан"
         return resolved, resolved_qualified, resolved_bond_types
 
     if secid_batches:
@@ -621,7 +621,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         row[ISSUER_COLUMN_NAME] = emitter_cache.get(emitter_id) or ""
         row[ISSUER_INN_COLUMN_NAME] = emitter_inn_cache.get(emitter_id) or ""
         row[QUALIFIED_INVESTOR_COLUMN_NAME] = secid_to_qualified_sign.get(secid, "✖")
-        row[BOND_TYPE_COLUMN_NAME] = secid_to_bond_type.get(secid, row.get(BOND_TYPE_COLUMN_NAME, ""))
+        row[BOND_TYPE_COLUMN_NAME] = secid_to_bond_type.get(secid) or row.get(BOND_TYPE_COLUMN_NAME, "Не указан")
 
     save_issuer_directory_cache(secid_to_emitter_id, emitter_cache, emitter_inn_cache, secid_to_qualified_sign, secid_to_bond_type)
     clear_issuer_checkpoint()
