@@ -3,8 +3,13 @@
 КОРНЕВАЯ ДИРЕКТОРИЯ:
 ============================================================
 
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.gitignore
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Git_auto.bat
+https://raw.githubusercontent.com/Habosjob/Vibe/main/IMPROVEMENTS.md
+https://raw.githubusercontent.com/Habosjob/Vibe/main/README.md
+https://raw.githubusercontent.com/Habosjob/Vibe/main/Total_rows.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bonds_to_excel.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links_latest.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
