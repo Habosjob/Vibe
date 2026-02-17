@@ -27,7 +27,7 @@ MOEX_SECURITIES_SEARCH_URL = "https://iss.moex.com/iss/securities.json"
 
 OUTPUT_XLSX = "moex_bonds.xlsx"
 ENRICH_ENABLE = True
-ENRICH_LIMIT = 0
+ENRICH_LIMIT = 40
 ENRICH_SECIDS: list[str] = []
 CACHE_ENABLE = True
 CACHE_TTL_HOURS = 24
