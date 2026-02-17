@@ -38,7 +38,14 @@
 ## Что в итоговом Excel
 ### Лист `MOEX_BONDS`
 - `ISIN` — в первой колонке.
-- `ISSUER_NAME`, `ISSUER_INN`, `SHORTNAME` сгруппированы (можно сворачивать).
+- Добавлены столбцы-разделители между блоками данных. Название каждой группы вынесено в свой разделитель (по макету), чтобы визуально было проще ориентироваться и сворачивать блоки.
+- Теперь каждый блок колонок идёт подряд и имеет свою кнопку сворачивания/разворачивания:
+  - `Эмитент`: `ISSUER_NAME`, `ISSUER_INN`, `SHORTNAME`.
+  - `Квалификация и тип`: `QUALIFIED_INVESTOR`, `BOND_TYPE`.
+  - `Оферты`: `HAS_PUT_CALL_OFFER`, `PUT_CALL_OFFER_DATE`.
+  - `Погашение и амортизация`: `HAS_AMORTIZATION`, `AMORTIZATION_START_DATE`, `MATDATE`.
+  - `Купоны`: `COUPONVALUE`, `ACCRUEDINT`, `COUPONPERIOD`, `COUPONPERCENT`.
+  - `Рынок`: `FACEVALUE`, `FACEUNIT`, `PRIMARYBOARDID`, `PREVLEGALCLOSEPRICE`, `PREVPRICE`.
 - `QUALIFIED_INVESTOR` — ✔/✖.
 - `BOND_TYPE` — тип облигации (например, фикс/флоатер). Структурные облигации в итоговый лист не попадают.
 - `HAS_PUT_CALL_OFFER` — ✔/✖ (есть ли Put/Call оферта).
