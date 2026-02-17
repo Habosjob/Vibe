@@ -356,6 +356,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     if not secids:
         for row in rows:
             row[ISSUER_COLUMN_NAME] = ""
+            row[ISSUER_INN_COLUMN_NAME] = ""
         return rows
 
     cache_secid_to_emitter_id, cache_emitter_id_to_name, cache_emitter_id_to_inn = load_issuer_directory_cache()
@@ -391,7 +392,11 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 logging.info("SECID пакеты: %s/%s.", processed, len(secid_batches))
 
     unique_emitter_ids = sorted({emitter_id for emitter_id in secid_to_emitter_id.values() if emitter_id is not None})
-    missing_emitter_ids = [emitter_id for emitter_id in unique_emitter_ids if emitter_id not in emitter_cache]
+    missing_emitter_ids = [
+        emitter_id
+        for emitter_id in unique_emitter_ids
+        if emitter_id not in emitter_cache or emitter_id not in emitter_inn_cache
+    ]
     emitter_batches = chunked(missing_emitter_ids, EMITTER_BATCH_SIZE)
 
     def resolve_emitter_names_batch(batch: list[int]) -> tuple[dict[int, str], dict[int, str]]:
