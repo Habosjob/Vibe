@@ -1033,10 +1033,11 @@ def save_raw(rows: list[dict[str, Any]]) -> None:
 
 
 def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
-    """Применяет форматирование итогового Excel и скрывает техническую колонку SECID."""
+    """Применяет форматирование итогового Excel, добавляет подписи групп и скрывает SECID."""
     ws = writer.sheets["MOEX_BONDS"]
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
+    ws.insert_rows(1)
+    ws.freeze_panes = "A3"
+    ws.auto_filter.ref = f"A2:{get_column_letter(ws.max_column)}{ws.max_row}"
     ws.sheet_view.showGridLines = False
     ws.sheet_properties.outlinePr.summaryRight = True
 
@@ -1045,16 +1046,17 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
     even_fill = PatternFill(fill_type="solid", start_color="F5F9FF", end_color="F5F9FF")
     odd_fill = PatternFill(fill_type="solid", start_color="FFFFFF", end_color="FFFFFF")
 
-    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[2].height = 22
 
-    for cell in ws[1]:
+    for cell in ws[2]:
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     numeric_columns = {"FACEVALUE", "COUPONVALUE", "COUPONPERIOD", "COUPONPERCENT", "PREVLEGALCLOSEPRICE", "PREVPRICE", ACCRUED_INT_COLUMN_NAME}
 
-    for row_idx in range(2, ws.max_row + 1):
+    for row_idx in range(3, ws.max_row + 1):
         row_fill = even_fill if row_idx % 2 == 0 else odd_fill
         for col_idx, col_name in enumerate(df.columns, start=1):
             cell = ws.cell(row=row_idx, column=col_idx)
@@ -1095,12 +1097,40 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         if col_name == HIDDEN_COLUMN_NAME:
             ws.column_dimensions[col_letter].hidden = True
 
-    grouped_columns = [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, "SHORTNAME"]
-    grouped_indexes = [idx for idx, col_name in enumerate(df.columns, start=1) if col_name in grouped_columns]
-    if grouped_indexes:
-        for grouped_idx in grouped_indexes:
+    group_definitions = {
+        "Эмитент": [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, "SHORTNAME"],
+        "Квалификация и тип": [QUALIFIED_INVESTOR_COLUMN_NAME, BOND_TYPE_COLUMN_NAME],
+        "Оферты": [HAS_PUT_CALL_OFFER_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME],
+        "Погашение и амортизация": [AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME],
+        "Купоны": ["COUPONVALUE", ACCRUED_INT_COLUMN_NAME, "COUPONPERIOD", "COUPONPERCENT"],
+        "Рынок": ["FACEVALUE", "FACEUNIT", "PRIMARYBOARDID", "PREVLEGALCLOSEPRICE", "PREVPRICE"],
+    }
+
+    group_fill = PatternFill(fill_type="solid", start_color="D9E2F3", end_color="D9E2F3")
+    group_font = Font(color="1F4E78", bold=True)
+
+    for group_title, group_columns in group_definitions.items():
+        group_indexes = [idx for idx, col_name in enumerate(df.columns, start=1) if col_name in group_columns]
+        if not group_indexes:
+            continue
+
+        for grouped_idx in group_indexes:
             ws.column_dimensions[get_column_letter(grouped_idx)].outlineLevel = 1
-        ws.column_dimensions[get_column_letter(max(grouped_indexes))].collapsed = True
+        ws.column_dimensions[get_column_letter(max(group_indexes))].collapsed = True
+
+        group_start = min(group_indexes)
+        group_end = max(group_indexes)
+        ws.merge_cells(start_row=1, start_column=group_start, end_row=1, end_column=group_end)
+        group_cell = ws.cell(row=1, column=group_start)
+        group_cell.value = group_title
+        group_cell.fill = group_fill
+        group_cell.font = group_font
+        group_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for col_idx in range(1, ws.max_column + 1):
+        top_cell = ws.cell(row=1, column=col_idx)
+        if top_cell.value is None:
+            top_cell.fill = group_fill
 
 
 def add_info_sheet(writer: pd.ExcelWriter) -> None:
