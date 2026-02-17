@@ -1047,19 +1047,31 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
     even_fill = PatternFill(fill_type="solid", start_color="F5F9FF", end_color="F5F9FF")
     odd_fill = PatternFill(fill_type="solid", start_color="FFFFFF", end_color="FFFFFF")
     group_fill = PatternFill(fill_type="solid", start_color="D9E2F3", end_color="D9E2F3")
+    separator_palette = [
+        PatternFill(fill_type="solid", start_color="C9D5EA", end_color="C9D5EA"),
+        PatternFill(fill_type="solid", start_color="C3D0E8", end_color="C3D0E8"),
+        PatternFill(fill_type="solid", start_color="BCCBE5", end_color="BCCBE5"),
+        PatternFill(fill_type="solid", start_color="B6C6E2", end_color="B6C6E2"),
+    ]
     group_font = Font(color="1F4E78", bold=True)
 
     separator_titles: dict[str, str] = df.attrs.get("group_separator_titles", {})
     separator_columns = {c for c in df.columns if str(c).startswith(GROUP_SEPARATOR_PREFIX)}
 
-    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[1].height = 54
     ws.row_dimensions[2].height = 22
+
+    separator_indexes = [idx for idx, col in enumerate(df.columns, start=1) if col in separator_columns]
+    separator_fill_by_idx = {
+        sep_idx: separator_palette[pos % len(separator_palette)]
+        for pos, sep_idx in enumerate(separator_indexes)
+    }
 
     for col_idx, col_name in enumerate(df.columns, start=1):
         if col_name in separator_columns:
             header_cell = ws.cell(row=2, column=col_idx)
             header_cell.value = ""
-            header_cell.fill = group_fill
+            header_cell.fill = separator_fill_by_idx[col_idx]
             header_cell.font = group_font
             header_cell.alignment = Alignment(horizontal="center", vertical="center")
             continue
@@ -1077,7 +1089,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
             cell = ws.cell(row=row_idx, column=col_idx)
             if col_name in separator_columns:
                 cell.value = ""
-                cell.fill = group_fill
+                cell.fill = separator_fill_by_idx[col_idx]
                 cell.alignment = Alignment(horizontal="center", vertical="center")
                 continue
 
@@ -1090,7 +1102,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         col_letter = get_column_letter(idx)
 
         if col_name in separator_columns:
-            ws.column_dimensions[col_letter].width = 3.5
+            ws.column_dimensions[col_letter].width = 7
             continue
 
         max_len = max(
@@ -1123,17 +1135,20 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         if col_name == HIDDEN_COLUMN_NAME:
             ws.column_dimensions[col_letter].hidden = True
 
-    separator_indexes = [idx for idx, col in enumerate(df.columns, start=1) if col in separator_columns]
     for sep_pos, sep_idx in enumerate(separator_indexes):
         next_sep_idx = separator_indexes[sep_pos + 1] if sep_pos + 1 < len(separator_indexes) else ws.max_column + 1
         group_indexes = list(range(sep_idx + 1, next_sep_idx))
 
         group_title = separator_titles.get(df.columns[sep_idx - 1], "Группа")
+        ws.merge_cells(start_row=1, start_column=sep_idx, end_row=2, end_column=sep_idx)
         top_cell = ws.cell(row=1, column=sep_idx)
         top_cell.value = group_title
-        top_cell.fill = group_fill
+        top_cell.fill = separator_fill_by_idx[sep_idx]
         top_cell.font = group_font
-        top_cell.alignment = Alignment(horizontal="center", vertical="center")
+        top_cell.alignment = Alignment(horizontal="center", vertical="center", text_rotation=90, wrap_text=True)
+
+        merged_second_cell = ws.cell(row=2, column=sep_idx)
+        merged_second_cell.fill = separator_fill_by_idx[sep_idx]
 
         if not group_indexes:
             continue
