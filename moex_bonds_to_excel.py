@@ -46,7 +46,7 @@ DAILY_CACHE_FILE = CACHE_DIR / "daily_security_metrics_cache.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
 # Колонки, которые пользователь попросил убрать из итогового файла
-REMOVED_COLUMNS = {"SECNAME", "LISTLEVEL", "STATUS", "EXCLUDE_BY_AMORTIZATION", "AMORTIZATION_EXCLUDE_REASON"}
+REMOVED_COLUMNS = {"SECNAME", "LISTLEVEL", "STATUS", "EXCLUDE_BY_AMORTIZATION", "AMORTIZATION_EXCLUDE_REASON", "EXCLUDE_BY_COUPONPERIOD", "COUPONPERIOD_EXCLUDE_REASON"}
 # SECID нужен для технической работы, но в Excel должен быть скрыт
 HIDDEN_COLUMN_NAME = "SECID"
 ISSUER_COLUMN_NAME = "ISSUER_NAME"
@@ -62,8 +62,9 @@ HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
 PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 MIN_MATURITY_YEARS = 1
-DAILY_METRICS_CACHE_SCHEMA_VERSION = 4
+DAILY_METRICS_CACHE_SCHEMA_VERSION = 5
 STRUCTURAL_BOND_TYPE_VALUES = {"структурная облигация", "структурные облигации"}
+COUPONPERIOD_EXCLUDE_REASON = "Купонный период не определён (COUPONPERIOD = 0)"
 
 
 @dataclass
@@ -383,7 +384,8 @@ def normalize_bond_type(raw_bond_type: str) -> str:
     value = str(raw_bond_type or "").strip()
     if not value:
         return "Не указан"
-    if value.lower() in STRUCTURAL_BOND_TYPE_VALUES:
+    lowered = value.lower()
+    if lowered in STRUCTURAL_BOND_TYPE_VALUES or ("структур" in lowered and "облигац" in lowered):
         return "Не указан"
     return value
 
@@ -493,28 +495,29 @@ def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tu
 
 
 def parse_offer_metrics(offers_data: list[list[Any]], offers_columns: list[str]) -> tuple[str, str | None]:
-    """Определяет наличие Put/Call оферты и ближайшую дату оферты."""
+    """Определяет наличие оферты и релевантную дату (сначала ближайшую будущую)."""
     if not offers_data or not offers_columns:
         return "✖", None
 
-    offer_dates: list[str] = []
-    has_put_or_call = False
+    today = datetime.now().date()
+    parsed_dates: list[datetime] = []
+
     for raw_offer in offers_data:
         offer = dict(zip(offers_columns, raw_offer))
-        offer_type = str(offer.get("offertype") or "").strip().lower()
-        if not offer_type or ("put" not in offer_type and "call" not in offer_type):
-            continue
-        has_put_or_call = True
         for date_key in ("offerdate", "offerdatestart", "offerdateend"):
-            offer_date = str(offer.get(date_key) or "").strip()
-            if offer_date:
-                offer_dates.append(offer_date)
+            offer_date_raw = str(offer.get(date_key) or "").strip()
+            parsed = parse_date_safe(offer_date_raw)
+            if parsed is not None:
+                parsed_dates.append(parsed)
 
-    if not has_put_or_call:
-        return "✖", None
-    if not offer_dates:
+    if not parsed_dates:
         return "✔", None
-    return "✔", min(offer_dates)
+
+    future_dates = sorted(dt for dt in parsed_dates if dt.date() >= today)
+    if future_dates:
+        return "✔", future_dates[0].strftime("%Y-%m-%d")
+
+    return "✔", max(parsed_dates).strftime("%Y-%m-%d")
 
 
 def fetch_daily_security_metrics(session: requests.Session, secid: str, maturity_date: str | None) -> tuple[str, str | None, str, str | None]:
@@ -877,6 +880,35 @@ def filter_rows_by_amortization_timing(rows: list[dict[str, Any]]) -> list[dict[
     return filtered_rows
 
 
+def filter_rows_by_coupon_period(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Исключает бумаги, где купонный период не определён (0 или пусто)."""
+    filtered_rows: list[dict[str, Any]] = []
+    skipped_count = 0
+
+    for row in rows:
+        try:
+            coupon_period = int(float(str(row.get("COUPONPERIOD") or 0)))
+        except ValueError:
+            coupon_period = 0
+
+        if coupon_period <= 0:
+            row["EXCLUDE_BY_COUPONPERIOD"] = True
+            row["COUPONPERIOD_EXCLUDE_REASON"] = COUPONPERIOD_EXCLUDE_REASON
+            skipped_count += 1
+            continue
+
+        row["EXCLUDE_BY_COUPONPERIOD"] = False
+        row["COUPONPERIOD_EXCLUDE_REASON"] = ""
+        filtered_rows.append(row)
+
+    logging.info(
+        "Этап 5.2/8: Фильтр по COUPONPERIOD: исключено %s бумаг, оставлено %s.",
+        skipped_count,
+        len(filtered_rows),
+    )
+    return filtered_rows
+
+
 def merge_incremental_data(cached_rows: list[dict[str, Any]], fresh_rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
     """Инкрементально объединяет кэш и свежие данные (добавляет новые и обновляет изменённые)."""
     merged = {(row.get("SECID"), row.get("ISIN")): row for row in cached_rows}
@@ -1088,6 +1120,7 @@ def main() -> None:
     rows = filter_rows_by_amortization_timing(rows)
     validate_rows(rows)
     rows = enrich_with_issuer_names(rows)
+    rows = filter_rows_by_coupon_period(rows)
     save_cache(rows)
     save_raw(rows)
     save_excel(rows)
