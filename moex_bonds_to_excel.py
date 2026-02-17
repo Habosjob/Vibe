@@ -59,6 +59,7 @@ AMORTIZATION_START_DATE_COLUMN_NAME = "AMORTIZATION_START_DATE"
 ACCRUED_INT_COLUMN_NAME = "ACCRUEDINT"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 MIN_MATURITY_YEARS = 1
+DAILY_METRICS_CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -269,23 +270,25 @@ def clear_issuer_checkpoint() -> None:
         ISSUER_CHECKPOINT_FILE.unlink()
 
 
-def load_daily_security_cache() -> dict[str, dict[str, Any]]:
+def load_daily_security_cache() -> tuple[int, dict[str, dict[str, Any]]]:
     """Читает суточный кэш по полям, которые нужно обновлять раз в день."""
     if not DAILY_CACHE_FILE.exists():
-        return {}
+        return DAILY_METRICS_CACHE_SCHEMA_VERSION, {}
 
     try:
         payload = json.loads(DAILY_CACHE_FILE.read_text(encoding="utf-8"))
-        return payload.get("secid_to_metrics", {})
+        schema_version = int(payload.get("schema_version", 1))
+        return schema_version, payload.get("secid_to_metrics", {})
     except Exception as exc:
         logging.warning("Не удалось прочитать суточный кэш бумаг: %s", exc)
-        return {}
+        return DAILY_METRICS_CACHE_SCHEMA_VERSION, {}
 
 
 def save_daily_security_cache(secid_to_metrics: dict[str, dict[str, Any]]) -> None:
     """Сохраняет суточный кэш по полям бумаг (амортизация и НКД)."""
     payload = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "schema_version": DAILY_METRICS_CACHE_SCHEMA_VERSION,
         "secid_to_metrics": secid_to_metrics,
     }
     DAILY_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -584,10 +587,16 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
     row_by_secid = {str(row.get("SECID")): row for row in rows if row.get("SECID")}
 
-    cache = load_daily_security_cache()
+    cache_schema_version, cache = load_daily_security_cache()
     now = datetime.now()
 
+    if cache_schema_version != DAILY_METRICS_CACHE_SCHEMA_VERSION:
+        logging.info("Обнаружен старый формат суточного кэша (v%s). Метрики будут пересчитаны по новому правилу.", cache_schema_version)
+
     def needs_refresh(secid: str) -> bool:
+        if cache_schema_version != DAILY_METRICS_CACHE_SCHEMA_VERSION:
+            return True
+
         entry = cache.get(secid)
         if not entry:
             return True
@@ -633,8 +642,16 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     for row in rows:
         secid = str(row.get("SECID", ""))
         entry = cache.get(secid, {})
-        row[AMORTIZATION_FLAG_COLUMN_NAME] = entry.get(AMORTIZATION_FLAG_COLUMN_NAME, "✖")
-        row[AMORTIZATION_START_DATE_COLUMN_NAME] = entry.get(AMORTIZATION_START_DATE_COLUMN_NAME, "")
+        has_amortization = str(entry.get(AMORTIZATION_FLAG_COLUMN_NAME, "✖"))
+        amortization_start_date = str(entry.get(AMORTIZATION_START_DATE_COLUMN_NAME, "") or "")
+        maturity_date = str(row.get(MATURITY_DATE_COLUMN_NAME) or "")
+
+        if has_amortization == "✔" and maturity_date and amortization_start_date == maturity_date:
+            has_amortization = "✖"
+            amortization_start_date = ""
+
+        row[AMORTIZATION_FLAG_COLUMN_NAME] = has_amortization
+        row[AMORTIZATION_START_DATE_COLUMN_NAME] = amortization_start_date
         row[ACCRUED_INT_COLUMN_NAME] = row.get(ACCRUED_INT_COLUMN_NAME)
 
     return rows
