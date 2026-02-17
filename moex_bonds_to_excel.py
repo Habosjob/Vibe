@@ -1109,6 +1109,8 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
     group_fill = PatternFill(fill_type="solid", start_color="D9E2F3", end_color="D9E2F3")
     group_font = Font(color="1F4E78", bold=True)
 
+    grouped_column_indexes: set[int] = set()
+
     for group_title, group_columns in group_definitions.items():
         group_indexes = [idx for idx, col_name in enumerate(df.columns, start=1) if col_name in group_columns]
         if not group_indexes:
@@ -1116,21 +1118,23 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
 
         for grouped_idx in group_indexes:
             ws.column_dimensions[get_column_letter(grouped_idx)].outlineLevel = 1
+            grouped_column_indexes.add(grouped_idx)
         ws.column_dimensions[get_column_letter(max(group_indexes))].collapsed = True
 
-        group_start = min(group_indexes)
-        group_end = max(group_indexes)
-        ws.merge_cells(start_row=1, start_column=group_start, end_row=1, end_column=group_end)
-        group_cell = ws.cell(row=1, column=group_start)
-        group_cell.value = group_title
-        group_cell.fill = group_fill
-        group_cell.font = group_font
-        group_cell.alignment = Alignment(horizontal="center", vertical="center")
+        for group_idx in group_indexes:
+            group_cell = ws.cell(row=1, column=group_idx)
+            group_cell.value = group_title
+            group_cell.fill = group_fill
+            group_cell.font = group_font
+            group_cell.alignment = Alignment(horizontal="center", vertical="center")
 
     for col_idx in range(1, ws.max_column + 1):
         top_cell = ws.cell(row=1, column=col_idx)
-        if top_cell.value is None:
-            top_cell.fill = group_fill
+        if col_idx not in grouped_column_indexes:
+            top_cell.value = "Прочие поля"
+        top_cell.fill = group_fill
+        top_cell.font = group_font
+        top_cell.alignment = Alignment(horizontal="center", vertical="center")
 
 
 def add_info_sheet(writer: pd.ExcelWriter) -> None:
