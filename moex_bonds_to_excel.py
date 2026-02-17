@@ -51,6 +51,8 @@ HIDDEN_COLUMN_NAME = "SECID"
 ISSUER_COLUMN_NAME = "ISSUER_NAME"
 ISSUER_INN_COLUMN_NAME = "ISSUER_INN"
 FIRST_COLUMN_NAME = "ISIN"
+QUALIFIED_INVESTOR_COLUMN_NAME = "QUALIFIED_INVESTOR"
+MATURITY_DATE_COLUMN_NAME = "MATDATE"
 
 
 @dataclass
@@ -270,7 +272,7 @@ def fetch_page(session: requests.Session, start: int) -> IssPage:
     """Запрашивает одну страницу облигаций с MOEX ISS."""
     params = {
         "iss.meta": "off",
-        "securities.columns": "SECID,SHORTNAME,ISIN,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE",
+        "securities.columns": "SECID,SHORTNAME,ISIN,MATDATE,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE",
         "start": start,
         "limit": PAGE_SIZE,
     }
@@ -295,8 +297,8 @@ def fetch_all_bonds() -> list[dict[str, Any]]:
         return rows
 
 
-def fetch_emitter_id_for_security(session: requests.Session, secid: str) -> int | None:
-    """Возвращает ID эмитента по SECID, если доступен."""
+def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tuple[int | None, str]:
+    """Возвращает ID эмитента и признак квалифицированного инвестора по SECID."""
     params = {
         "iss.meta": "off",
         "iss.only": "description",
@@ -306,13 +308,19 @@ def fetch_emitter_id_for_security(session: requests.Session, secid: str) -> int 
     response.raise_for_status()
     data = response.json()
     rows = data.get("description", {}).get("data", [])
+    emitter_id: int | None = None
+    qualified_investor_sign = "✖"
+
     for name, value in rows:
         if name == "EMITTER_ID" and value is not None:
             try:
-                return int(value)
+                emitter_id = int(value)
             except (TypeError, ValueError):
-                return None
-    return None
+                emitter_id = None
+        if name == "ISQUALIFIEDINVESTORS":
+            qualified_investor_sign = "✔" if str(value) == "1" else "✖"
+
+    return emitter_id, qualified_investor_sign
 
 
 def fetch_emitter_details(session: requests.Session, emitter_id: int) -> tuple[str | None, str | None]:
@@ -349,7 +357,7 @@ def validate_rows(rows: list[dict[str, Any]]) -> None:
 
 
 def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Добавляет в каждую строку имя эмитента облигации."""
+    """Добавляет в каждую строку имя/ИНН эмитента и признак квалифицированного инвестора."""
     logging.info("Этап 2/6: Обогащение данных наименованиями эмитентов...")
     secids = sorted({str(row.get("SECID")) for row in rows if row.get("SECID")})
 
@@ -357,6 +365,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         for row in rows:
             row[ISSUER_COLUMN_NAME] = ""
             row[ISSUER_INN_COLUMN_NAME] = ""
+            row[QUALIFIED_INVESTOR_COLUMN_NAME] = "✖"
         return rows
 
     cache_secid_to_emitter_id, cache_emitter_id_to_name, cache_emitter_id_to_inn = load_issuer_directory_cache()
@@ -366,19 +375,29 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     emitter_cache: dict[int, str] = {**cache_emitter_id_to_name, **checkpoint_emitter_id_to_name}
     emitter_inn_cache: dict[int, str] = {**cache_emitter_id_to_inn, **checkpoint_emitter_id_to_inn}
 
-    missing_secids = [secid for secid in secids if secid not in secid_to_emitter_id]
+    secid_to_qualified_sign: dict[str, str] = {
+        str(row.get("SECID")): str(row.get(QUALIFIED_INVESTOR_COLUMN_NAME))
+        for row in rows
+        if row.get("SECID") and row.get(QUALIFIED_INVESTOR_COLUMN_NAME) in {"✔", "✖"}
+    }
+
+    missing_secids = [secid for secid in secids if secid not in secid_to_emitter_id or secid not in secid_to_qualified_sign]
     secid_batches = chunked(missing_secids, SECID_BATCH_SIZE)
 
-    def resolve_emitter_batch(batch: list[str]) -> dict[str, int | None]:
+    def resolve_emitter_batch(batch: list[str]) -> tuple[dict[str, int | None], dict[str, str]]:
         resolved: dict[str, int | None] = {}
+        resolved_qualified: dict[str, str] = {}
         with build_session() as local_session:
             for secid in batch:
                 try:
-                    resolved[secid] = fetch_emitter_id_for_security(local_session, secid)
+                    emitter_id, qualified_sign = fetch_emitter_info_for_security(local_session, secid)
+                    resolved[secid] = emitter_id
+                    resolved_qualified[secid] = qualified_sign
                 except Exception as exc:
                     logging.warning("Не удалось получить EMITTER_ID для %s: %s", secid, exc)
                     resolved[secid] = None
-        return resolved
+                    resolved_qualified[secid] = "✖"
+        return resolved, resolved_qualified
 
     if secid_batches:
         logging.info("Пакетный режим: нужно обработать %s пакетов SECID.", len(secid_batches))
@@ -386,7 +405,9 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(resolve_emitter_batch, batch): idx for idx, batch in enumerate(secid_batches, start=1)}
         for processed, future in enumerate(as_completed(futures), start=1):
-            secid_to_emitter_id.update(future.result())
+            secid_chunk, qualified_chunk = future.result()
+            secid_to_emitter_id.update(secid_chunk)
+            secid_to_qualified_sign.update(qualified_chunk)
             save_issuer_checkpoint(secid_to_emitter_id, emitter_cache, emitter_inn_cache)
             if processed % 5 == 0 or processed == len(secid_batches):
                 logging.info("SECID пакеты: %s/%s.", processed, len(secid_batches))
@@ -432,6 +453,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         emitter_id = secid_to_emitter_id.get(secid)
         row[ISSUER_COLUMN_NAME] = emitter_cache.get(emitter_id) or ""
         row[ISSUER_INN_COLUMN_NAME] = emitter_inn_cache.get(emitter_id) or ""
+        row[QUALIFIED_INVESTOR_COLUMN_NAME] = secid_to_qualified_sign.get(secid, "✖")
 
     save_issuer_directory_cache(secid_to_emitter_id, emitter_cache, emitter_inn_cache)
     clear_issuer_checkpoint()
@@ -469,6 +491,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     ws.sheet_view.showGridLines = False
+    ws.sheet_properties.outlinePr.summaryRight = True
 
     header_fill = PatternFill(fill_type="solid", start_color="1F4E78", end_color="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
@@ -507,8 +530,21 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         if col_name == ISSUER_INN_COLUMN_NAME:
             ws.column_dimensions[col_letter].width = 16
 
+        if col_name == QUALIFIED_INVESTOR_COLUMN_NAME:
+            ws.column_dimensions[col_letter].width = 15
+
+        if col_name == MATURITY_DATE_COLUMN_NAME:
+            ws.column_dimensions[col_letter].width = 14
+
         if col_name == HIDDEN_COLUMN_NAME:
             ws.column_dimensions[col_letter].hidden = True
+
+    grouped_columns = [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, "SHORTNAME"]
+    grouped_indexes = [idx for idx, col_name in enumerate(df.columns, start=1) if col_name in grouped_columns]
+    if grouped_indexes:
+        for grouped_idx in grouped_indexes:
+            ws.column_dimensions[get_column_letter(grouped_idx)].outlineLevel = 1
+        ws.column_dimensions[get_column_letter(max(grouped_indexes))].collapsed = True
 
 
 def add_info_sheet(writer: pd.ExcelWriter) -> None:
@@ -519,6 +555,8 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "SHORTNAME", "Описание": "Краткое название облигации."},
         {"Поле": "ISSUER_NAME", "Описание": "Наименование эмитента облигации (компании или организации, которая выпустила бумагу)."},
         {"Поле": "ISSUER_INN", "Описание": "ИНН эмитента для быстрой сверки компании в ваших внутренних системах и документах."},
+        {"Поле": "QUALIFIED_INVESTOR", "Описание": "Показывает, предназначена ли облигация только для квалифицированных инвесторов: ✔ — да, ✖ — нет."},
+        {"Поле": "MATDATE", "Описание": "Дата погашения облигации (когда эмитент должен вернуть номинал)."},
         {"Поле": "FACEVALUE", "Описание": "Номинал облигации."},
         {"Поле": "FACEUNIT", "Описание": "Валюта номинала (например, RUB)."},
         {"Поле": "COUPONVALUE", "Описание": "Размер купонной выплаты."},
@@ -555,7 +593,7 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
 
     if FIRST_COLUMN_NAME in df.columns:
         ordered_columns = [FIRST_COLUMN_NAME]
-        for preferred_col in [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME]:
+        for preferred_col in [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, "SHORTNAME", QUALIFIED_INVESTOR_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME]:
             if preferred_col in df.columns:
                 ordered_columns.append(preferred_col)
 
