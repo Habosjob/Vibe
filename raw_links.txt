@@ -11,6 +11,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bonds_to_excel.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links_latest.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
+https://raw.githubusercontent.com/Habosjob/Vibe/main/~$moex_bonds.xlsx
 
 ------------------------------------------------------------
 Директория: .cache/
@@ -134,6 +135,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex_endpoint_probe/
     --------------------------------------------------------
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/BYM000001818.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/BYM000001925.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/BYM000002154.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/RU000A0JSQ58.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/RU000A0JXK99.json
@@ -452,7 +454,45 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/RU0
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/RU000A10DXL1.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/RU000A10DYH7.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/RU000A10E6J7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26212RMFS9.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26218RMFS6.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26221RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26224RMFS4.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26225RMFS1.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26228RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26232RMFS7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26233RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26235RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26236RMFS8.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26237RMFS6.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26239RMFS2.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26240RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26241RMFS8.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26242RMFS6.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26243RMFS4.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26244RMFS2.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26245RMFS9.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26246RMFS7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26247RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26248RMFS3.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26249RMFS1.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26250RMFS9.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26251RMFS7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26252RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26253RMFS3.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU26254RMFS1.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29007RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29021RMFS1.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29022RMFS9.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29023RMFS7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29024RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29025RMFS2.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29026RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29027RMFS8.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29028RMFS6.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU29029RMFS4.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/SU52005RMFS4.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/XS0114288789.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/XS1634369224.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/XS1843437036.json
 
@@ -461,6 +501,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/bondization/XS1
     --------------------------------------------------------
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/BYM000001818.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/BYM000001925.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/BYM000002154.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/RU000A0JSQ58.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/RU000A0JXK99.json
@@ -780,7 +821,45 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/RU0
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/RU000A10DXL1.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/RU000A10DYH7.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/RU000A10E6J7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26212RMFS9.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26218RMFS6.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26221RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26224RMFS4.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26225RMFS1.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26228RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26232RMFS7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26233RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26235RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26236RMFS8.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26237RMFS6.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26239RMFS2.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26240RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26241RMFS8.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26242RMFS6.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26243RMFS4.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26244RMFS2.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26245RMFS9.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26246RMFS7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26247RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26248RMFS3.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26249RMFS1.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26250RMFS9.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26251RMFS7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26252RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26253RMFS3.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU26254RMFS1.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29007RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29021RMFS1.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29022RMFS9.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29023RMFS7.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29024RMFS5.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29025RMFS2.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29026RMFS0.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29027RMFS8.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29028RMFS6.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU29029RMFS4.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/SU52005RMFS4.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/XS0114288789.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/XS1634369224.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/description/XS1843437036.json
 
@@ -937,6 +1016,14 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/9751.js
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/9848.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/9909.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/emitter/994.json
+
+    --------------------------------------------------------
+    Директория: .cache/moex/fx/
+    --------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/fx/CNYRUB_TOM.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/fx/EURRUB_TOM.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/.cache/moex/fx/USDRUB_TOM.json
 
         ----------------------------------------------------
         Директория: data/raw/moex/bonds_probe/2026-02-16/
