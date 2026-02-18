@@ -889,10 +889,14 @@ def normalize_offer_type(value: str | None) -> str:
     lowered = str(value or "").strip().lower()
     if not lowered:
         return "✖"
+    if any(keyword in lowered for keyword in ("погаш", "maturity", "redemption", "амортиз")):
+        return "✖"
     if "put" in lowered or "продат" in lowered:
         return "PUT"
     if "call" in lowered or "выкуп" in lowered:
         return "Call"
+    if "оферт" in lowered:
+        return "PUT"
     return "✖"
 
 
@@ -1372,32 +1376,35 @@ def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tu
     return emitter_id, qualified_investor_sign, bond_type, coupon_period, is_structural
 
 def parse_offer_metrics(offers_data: list[list[Any]], offers_columns: list[str]) -> tuple[str, str | None]:
-    """Определяет актуальную оферту: только будущая/текущая дата относительно сегодня."""
+    """Определяет актуальную оферту MOEX: тип + ближайшая дата (только сегодня/будущее)."""
     if not offers_data or not offers_columns:
         return "✖", None
 
     today = datetime.now().date()
-    active_offer_dates: list[datetime] = []
+    active_offer_records: list[tuple[datetime, str]] = []
 
     for raw_offer in offers_data:
         offer = dict(zip(offers_columns, raw_offer))
+        offer_type = normalize_offer_type(str(offer.get("offertype") or offer.get("offer_type") or ""))
+        if offer_type == "✖":
+            continue
+
         candidates: list[datetime] = []
         for date_key in ("offerdate", "offerdatestart", "offerdateend"):
             parsed = parse_date_safe(offer.get(date_key))
-            if parsed is not None:
+            if parsed is not None and parsed.date() >= today:
                 candidates.append(parsed)
 
         if not candidates:
             continue
 
-        if any(candidate.date() >= today for candidate in candidates):
-            active_offer_dates.append(min(candidates))
+        active_offer_records.append((min(candidates), offer_type))
 
-    if not active_offer_dates:
+    if not active_offer_records:
         return "✖", None
 
-    nearest = min(active_offer_dates)
-    return "✔", nearest.strftime("%Y-%m-%d")
+    nearest_date, nearest_type = min(active_offer_records, key=lambda item: item[0])
+    return nearest_type, nearest_date.strftime("%Y-%m-%d")
 
 
 def fetch_daily_security_metrics(session: requests.Session, secid: str, maturity_date: str | None) -> tuple[str, str | None, str, str | None]:
@@ -1890,7 +1897,7 @@ def enrich_with_daily_metrics(
         entry = daily_cache.get(secid, {})
         has_amortization = str(entry.get(AMORTIZATION_FLAG_COLUMN_NAME, "✖"))
         amortization_start_date = str(entry.get(AMORTIZATION_START_DATE_COLUMN_NAME, "") or "")
-        moex_offer_sign = str(entry.get("MOEX_HAS_PUT_CALL_OFFER", "✖"))
+        moex_offer_type = normalize_offer_type(str(entry.get("MOEX_HAS_PUT_CALL_OFFER", "✖")))
         moex_offer_date = str(entry.get("MOEX_PUT_CALL_OFFER_DATE", "") or "")
 
         isin = str(row.get("ISIN") or "")
@@ -1901,8 +1908,8 @@ def enrich_with_daily_metrics(
         has_put_call_offer = external_offer_type
         put_call_offer_date = external_offer_date
 
-        if has_put_call_offer == "✖" and moex_offer_sign == "✔":
-            has_put_call_offer = "PUT"
+        if has_put_call_offer == "✖" and moex_offer_type in {"PUT", "Call"}:
+            has_put_call_offer = moex_offer_type
             if moex_offer_date:
                 put_call_offer_date = moex_offer_date
 
@@ -1942,7 +1949,7 @@ def enrich_with_daily_metrics(
 
         entry[AMORTIZATION_FLAG_COLUMN_NAME] = has_amortization
         entry[AMORTIZATION_START_DATE_COLUMN_NAME] = amortization_start_date
-        entry["MOEX_HAS_PUT_CALL_OFFER"] = moex_offer_sign
+        entry["MOEX_HAS_PUT_CALL_OFFER"] = moex_offer_type
         entry["MOEX_PUT_CALL_OFFER_DATE"] = moex_offer_date
         entry[HAS_PUT_CALL_OFFER_COLUMN_NAME] = has_put_call_offer
         entry[PUT_CALL_OFFER_DATE_COLUMN_NAME] = put_call_offer_date
