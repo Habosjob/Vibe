@@ -30,6 +30,8 @@ CACHE_TTL_HOURS = 6
 MAX_RETRIES = 4
 BACKOFF_FACTOR = 1.2
 MAX_WORKERS = 10
+DOHOD_MAX_WORKERS = 8
+DOHOD_REQUEST_RETRIES = 3
 SECID_BATCH_SIZE = 50
 EMITTER_BATCH_SIZE = 80
 
@@ -401,6 +403,7 @@ def load_coupon_formula_cache() -> dict[str, dict[str, Any]]:
 
 def save_coupon_formula_cache(rows: dict[str, dict[str, Any]]) -> None:
     """Сохраняет кэш расчётных купонных ставок по ISIN."""
+    CACHE_DIR.mkdir(exist_ok=True)
     payload = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "rows": rows,
@@ -573,6 +576,24 @@ def fetch_g_curve_value(session: requests.Session, period_years: float) -> float
 
 def extract_dohod_section_value(html: str, label: str) -> str:
     """Извлекает текст значения из блока ДОХОД по заголовку секции."""
+    soup = BeautifulSoup(html, "html.parser")
+    for p_tag in soup.find_all("p"):
+        label_text = re.sub(r"\s+", " ", p_tag.get_text(" ", strip=True))
+        if label not in label_text:
+            continue
+
+        info_block = p_tag.find_parent("div", class_=re.compile("dohod-description-info"))
+        if info_block is None:
+            continue
+
+        data_tag = info_block.find("p", class_=re.compile("dohod-description-info_data"))
+        if data_tag is None:
+            continue
+
+        value = re.sub(r"\s+", " ", data_tag.get_text(" ", strip=True)).strip()
+        if value:
+            return value
+
     pattern = (
         rf"<p[^>]*>\s*{re.escape(label)}\s*</p>"
         r'.*?<p[^>]*class="[^"]*dohod-description-info_data[^"]*"[^>]*>(.*?)</p>'
@@ -585,18 +606,42 @@ def extract_dohod_section_value(html: str, label: str) -> str:
     return re.sub(r"\s+", " ", text_value).strip()
 
 
+def fetch_dohod_page_html(session: requests.Session, isin: str) -> str:
+    """Возвращает HTML карточки облигации ДОХОД с дополнительными повторами запроса."""
+    last_error: Exception | None = None
+    url = DOHOD_BOND_URL.format(isin=isin)
+
+    for attempt in range(1, DOHOD_REQUEST_RETRIES + 1):
+        try:
+            response = session.get(
+                url,
+                timeout=REQUEST_TIMEOUT,
+                headers={"User-Agent": DOHOD_USER_AGENT},
+            )
+            response.raise_for_status()
+            html = response.text or ""
+            if len(html) < 500:
+                raise ValueError(f"Пустой/слишком короткий HTML (длина={len(html)})")
+            return html
+        except Exception as exc:  # noqa: PERF203
+            last_error = exc
+            logging.warning("ДОХОД: попытка %s/%s для %s не удалась: %s", attempt, DOHOD_REQUEST_RETRIES, isin, exc)
+            time.sleep(0.4 * attempt)
+
+    raise RuntimeError(f"Не удалось загрузить страницу ДОХОД для {isin}: {last_error}")
+
+
 def parse_dohod_formula(session: requests.Session, isin: str) -> tuple[str, str, str, float, float]:
     """Парсит формулу с analytics.dohod.ru: индекс, сдвиг, описание и срок G-curve (если нужен)."""
-    response = session.get(
-        DOHOD_BOND_URL.format(isin=isin),
-        timeout=REQUEST_TIMEOUT,
-        headers={"User-Agent": DOHOD_USER_AGENT},
-    )
-    response.raise_for_status()
-    html = response.text
+    html = fetch_dohod_page_html(session, isin)
 
     formula_text = extract_dohod_section_value(html, "Привязка к индексу")
     description_text = extract_dohod_section_value(html, "Описание формулы изменяемого купона/номинала")
+
+    if not formula_text:
+        fallback = re.search(r"(CBR_RATE|RUONIA|G_CURVE_RUS)\s*[+-]\s*\d+[.,]?\d*", html, flags=re.IGNORECASE)
+        if fallback:
+            formula_text = re.sub(r"\s+", " ", fallback.group(0)).strip()
 
     formula_match = re.search(r"(CBR_RATE|RUONIA|G_CURVE_RUS)\s*([+-])?\s*(\d+[.,]?\d*)?", formula_text, flags=re.IGNORECASE)
     if not formula_match:
@@ -670,6 +715,7 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
     with build_session() as session:
         index_values = fetch_reference_index_values(session)
 
+        to_fetch: list[tuple[str, str]] = []
         for row in candidates:
             isin = str(row.get("ISIN") or "").strip()
             secid = str(row.get("SECID") or "").strip()
@@ -698,20 +744,79 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
                         calculated_cells.add((isin, secid))
                         continue
 
-            try:
-                index_name, formula_text, description_text, spread, g_curve_years = parse_dohod_formula(session, isin)
-            except Exception as exc:
-                logging.warning("ДОХОД: не удалось получить формулу для %s: %s", isin, exc)
+            to_fetch.append((isin, secid))
+
+        formula_by_isin: dict[str, tuple[str, str, str, float, float]] = {}
+
+        def resolve_formula_job(job: tuple[str, str]) -> tuple[str, str, tuple[str, str, str, float, float] | None, str | None]:
+            isin_job, secid_job = job
+            with build_session() as local_session:
+                try:
+                    parsed = parse_dohod_formula(local_session, isin_job)
+                    return isin_job, secid_job, parsed, None
+                except Exception as exc:
+                    return isin_job, secid_job, None, str(exc)
+
+        if to_fetch:
+            logging.info("ДОХОД: нужно опросить формулы для %s выпусков (многопоточно, потоков=%s).", len(to_fetch), DOHOD_MAX_WORKERS)
+
+            with ThreadPoolExecutor(max_workers=DOHOD_MAX_WORKERS) as executor:
+                futures = [executor.submit(resolve_formula_job, job) for job in to_fetch]
+                for processed, future in enumerate(as_completed(futures), start=1):
+                    isin_job, _secid_job, parsed, error_text = future.result()
+                    if parsed is not None:
+                        formula_by_isin[isin_job] = parsed
+                    else:
+                        logging.warning("ДОХОД: не удалось получить формулу для %s: %s", isin_job, error_text)
+
+                    if processed % 25 == 0 or processed == len(futures):
+                        logging.info("ДОХОД: обработано формул %s/%s", processed, len(futures))
+
+        g_curve_cache: dict[float, float] = {}
+
+        for row in candidates:
+            isin = str(row.get("ISIN") or "").strip()
+            secid = str(row.get("SECID") or "").strip()
+            if not isin:
                 continue
 
+            try:
+                moex_coupon = float(str(row.get("COUPONPERCENT") or 0).replace(",", "."))
+            except ValueError:
+                moex_coupon = 0.0
+            if moex_coupon > 0:
+                continue
+
+            cached_entry = cache.get(isin)
+            if cached_entry is not None:
+                try:
+                    cached_at = datetime.fromisoformat(str(cached_entry.get("updated_at")))
+                except ValueError:
+                    cached_at = now - timedelta(days=COUPON_FORMULA_CACHE_TTL_DAYS + 1)
+                if now - cached_at <= timedelta(days=COUPON_FORMULA_CACHE_TTL_DAYS):
+                    coupon_percent = cached_entry.get("coupon_percent")
+                    if isinstance(coupon_percent, (float, int)):
+                        row["COUPONPERCENT"] = round(float(coupon_percent), 4)
+                        calculated_cells.add((isin, secid))
+                        continue
+
+            parsed = formula_by_isin.get(isin)
+            if parsed is None:
+                continue
+
+            index_name, formula_text, description_text, spread, g_curve_years = parsed
+
             if index_name == "G_CURVE_RUS":
-                g_curve_value = fetch_g_curve_value(session, g_curve_years)
-                if g_curve_value is None:
-                    logging.warning("ДОХОД: нет значения G_CURVE_RUS для %s (%.2f лет)", isin, g_curve_years)
-                    continue
-                base_value = g_curve_value
-                index_cache_key = f"G_CURVE_RUS_{g_curve_years:.2f}"
-                index_values[index_cache_key] = g_curve_value
+                if g_curve_years in g_curve_cache:
+                    base_value = g_curve_cache[g_curve_years]
+                else:
+                    g_curve_value = fetch_g_curve_value(session, g_curve_years)
+                    if g_curve_value is None:
+                        logging.warning("ДОХОД: нет значения G_CURVE_RUS для %s (%.2f лет)", isin, g_curve_years)
+                        continue
+                    base_value = g_curve_value
+                    g_curve_cache[g_curve_years] = g_curve_value
+                    index_values[f"G_CURVE_RUS_{g_curve_years:.2f}"] = g_curve_value
             else:
                 base_value = index_values.get(index_name, 0.0)
 
@@ -733,6 +838,7 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
     save_coupon_formula_cache(cache)
     logging.info("COUPONPERCENT рассчитан через ДОХОД для %s выпусков.", len(calculated_cells))
     return rows, calculated_cells
+
 
 def fetch_page(session: requests.Session, start: int) -> IssPage:
     """Запрашивает одну страницу облигаций с MOEX ISS."""
