@@ -75,6 +75,7 @@ AMORTIZATION_START_DATE_COLUMN_NAME = "AMORTIZATION_START_DATE"
 ACCRUED_INT_COLUMN_NAME = "ACCRUEDINT"
 TRADE_VOLUME_COLUMN_NAME = "VOLTODAY"
 TRADE_VALUE_COLUMN_NAME = "VALTODAY"
+YIELD_COLUMN_NAME = "YIELD"
 BOND_TYPE_COLUMN_NAME = "BOND_TYPE"
 HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
 PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
@@ -471,7 +472,7 @@ def fetch_page(session: requests.Session, start: int) -> IssPage:
     params = {
         "iss.meta": "off",
         "securities.columns": "SECID,SHORTNAME,ISIN,MATDATE,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE,ACCRUEDINT,SECTORID,INSTRID",
-        "marketdata.columns": f"SECID,{TRADE_VOLUME_COLUMN_NAME},{TRADE_VALUE_COLUMN_NAME},NUMTRADES",
+        "marketdata.columns": f"SECID,{TRADE_VOLUME_COLUMN_NAME},{TRADE_VALUE_COLUMN_NAME},NUMTRADES,{YIELD_COLUMN_NAME}",
         "start": start,
         "limit": PAGE_SIZE,
     }
@@ -498,6 +499,7 @@ def fetch_page(session: requests.Session, start: int) -> IssPage:
         security_record[TRADE_VOLUME_COLUMN_NAME] = market_record.get(TRADE_VOLUME_COLUMN_NAME)
         security_record[TRADE_VALUE_COLUMN_NAME] = market_record.get(TRADE_VALUE_COLUMN_NAME)
         security_record["NUMTRADES"] = market_record.get("NUMTRADES")
+        security_record[YIELD_COLUMN_NAME] = market_record.get(YIELD_COLUMN_NAME)
         records.append(security_record)
 
     return IssPage(start=start, rows=records)
@@ -1142,6 +1144,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         TRADE_VOLUME_COLUMN_NAME,
         TRADE_VALUE_COLUMN_NAME,
         "NUMTRADES",
+        YIELD_COLUMN_NAME,
     }
 
     for row_idx in range(3, ws.max_row + 1):
@@ -1255,6 +1258,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "VOLTODAY", "Описание": "Объём торгов за текущий день (в штуках/бумагах)."},
         {"Поле": "VALTODAY", "Описание": "Денежный оборот торгов за текущий день."},
         {"Поле": "NUMTRADES", "Описание": "Количество сделок за текущий день."},
+        {"Поле": "YIELD", "Описание": "Доходность к погашению по данным биржи (в процентах годовых)."},
     ]
 
     info_df = pd.DataFrame(info_rows)
@@ -1311,6 +1315,7 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
                     TRADE_VOLUME_COLUMN_NAME,
                     TRADE_VALUE_COLUMN_NAME,
                     "NUMTRADES",
+                    YIELD_COLUMN_NAME,
                 ],
             ),
         ]
