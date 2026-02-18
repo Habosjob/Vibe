@@ -47,6 +47,7 @@ CACHE_FILE = CACHE_DIR / "moex_bonds_cache.json"
 ISSUER_CACHE_FILE = CACHE_DIR / "issuer_directory_cache.json"
 ISSUER_CHECKPOINT_FILE = CACHE_DIR / "issuer_enrichment_checkpoint.json"
 DAILY_CACHE_FILE = CACHE_DIR / "daily_security_metrics_cache.json"
+OFFER_VERIFICATION_CACHE_FILE = CACHE_DIR / "offer_verification_cache.json"
 COUPON_FORMULA_CACHE_FILE = CACHE_DIR / "coupon_formula_cache.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
@@ -85,9 +86,10 @@ BOND_TYPE_COLUMN_NAME = "BOND_TYPE"
 HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
 PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
+OFFER_VERIFICATION_CACHE_TTL_DAYS = 7
 COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
-DAILY_METRICS_CACHE_SCHEMA_VERSION = 6
+DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
 DOHOD_BOND_URL = "https://analytics.dohod.ru/bond/{isin}"
 CORPBONDS_BOND_URL = "https://corpbonds.ru/bond/{isin}"
 DOHOD_USER_AGENT = (
@@ -396,6 +398,30 @@ def save_daily_security_cache(secid_to_metrics: dict[str, dict[str, Any]]) -> No
     DAILY_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_offer_verification_cache() -> dict[str, dict[str, Any]]:
+    """Читает 7-дневный кэш проверки оферт через ДОХОД и Corpbonds."""
+    if not OFFER_VERIFICATION_CACHE_FILE.exists():
+        return {}
+
+    try:
+        payload = json.loads(OFFER_VERIFICATION_CACHE_FILE.read_text(encoding="utf-8"))
+        rows = payload.get("rows", {})
+        if isinstance(rows, dict):
+            return {str(isin): value for isin, value in rows.items() if isinstance(value, dict)}
+    except Exception as exc:
+        logging.warning("Не удалось прочитать кэш проверки оферт: %s", exc)
+    return {}
+
+
+def save_offer_verification_cache(rows: dict[str, dict[str, Any]]) -> None:
+    """Сохраняет 7-дневный кэш проверки оферт через ДОХОД и Corpbonds."""
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "rows": rows,
+    }
+    OFFER_VERIFICATION_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def load_coupon_formula_cache() -> dict[str, dict[str, Any]]:
     """Читает кэш расчётов COUPONPERCENT для бумаг с нулевым COUPONVALUE."""
     if not COUPON_FORMULA_CACHE_FILE.exists():
@@ -691,7 +717,10 @@ def fetch_corpbonds_page_html(session: requests.Session, isin: str) -> str:
             return html
         except Exception as exc:  # noqa: PERF203
             last_error = exc
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
             logging.warning("CORPBONDS: попытка %s/%s для %s не удалась: %s", attempt, DOHOD_REQUEST_RETRIES, isin, exc)
+            if status_code == 404:
+                break
             time.sleep(0.4 * attempt)
 
     raise RuntimeError(f"Не удалось загрузить страницу CORPBONDS для {isin}: {last_error}")
@@ -732,6 +761,141 @@ def parse_corpbonds_formula(session: requests.Session, isin: str) -> tuple[str, 
             g_curve_years = float(years_match.group(1).replace(",", "."))
 
     return index_name, formula_text, "Источник corpbonds.ru", spread, g_curve_years
+
+
+def normalize_offer_type(value: str | None) -> str:
+    """Нормализует тип оферты к одному из значений: PUT, Call, ✖."""
+    lowered = str(value or "").strip().lower()
+    if not lowered:
+        return "✖"
+    if "put" in lowered or "продат" in lowered:
+        return "PUT"
+    if "call" in lowered or "выкуп" in lowered:
+        return "Call"
+    return "✖"
+
+
+def extract_offer_date_from_text(text: str) -> str | None:
+    """Извлекает дату оферты из текста в формате YYYY-MM-DD, если удаётся."""
+    match = re.search(r"(\d{2}[.]\d{2}[.]\d{4})", text)
+    if not match:
+        return None
+
+    day, month, year = match.group(1).split(".")
+    try:
+        parsed = datetime(year=int(year), month=int(month), day=int(day))
+    except ValueError:
+        return None
+    return parsed.strftime("%Y-%m-%d")
+
+
+def parse_dohod_offer_metrics(session: requests.Session, isin: str) -> tuple[str, str | None]:
+    """Парсит тип и дату оферты со страницы ДОХОД."""
+    html = fetch_dohod_page_html(session, isin)
+    soup = BeautifulSoup(html, "html.parser")
+    full_text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
+
+    offer_type = "✖"
+    event_match = re.search(r"Событие\s+в\s+ближ\.\s*дату\s*[:\-]?\s*([^|]+)", full_text, flags=re.IGNORECASE)
+    if event_match:
+        offer_type = normalize_offer_type(event_match.group(1))
+
+    offer_date = None
+    for label in (
+        "Дата ближайшей оферты",
+        "Дата, к которой рассчит. YTM",
+        "Дата, к которой рассчитана YTM",
+    ):
+        section_match = re.search(rf"{label}\s*[:\-]?\s*([^|]+)", full_text, flags=re.IGNORECASE)
+        if not section_match:
+            continue
+        offer_date = extract_offer_date_from_text(section_match.group(1))
+        if offer_date:
+            break
+
+    if offer_type == "✖" and offer_date:
+        offer_type = "PUT"
+
+    return offer_type, offer_date
+
+
+def parse_corpbonds_offer_metrics(session: requests.Session, isin: str) -> tuple[str, str | None]:
+    """Парсит тип и дату оферты со страницы Corpbonds."""
+    html = fetch_corpbonds_page_html(session, isin)
+    soup = BeautifulSoup(html, "html.parser")
+
+    full_text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
+    offer_date = None
+    date_match = re.search(r"Дата\s+ближайшей\s+оферты\s*[:\-]?\s*([^|]+)", full_text, flags=re.IGNORECASE)
+    if date_match:
+        offer_date = extract_offer_date_from_text(date_match.group(1))
+
+    offer_type = "✖"
+    call_match = re.search(r"Наличие\s+call-опциона\s*[:\-]?\s*([^|]+)", full_text, flags=re.IGNORECASE)
+    if call_match:
+        call_value = call_match.group(1).strip().lower()
+        if "да" in call_value:
+            offer_type = "Call"
+
+    if offer_type == "✖" and re.search(r"\bput\b|право\s+продать", full_text, flags=re.IGNORECASE):
+        offer_type = "PUT"
+    if offer_type == "✖" and offer_date:
+        offer_type = "PUT"
+
+    return offer_type, offer_date
+
+
+def merge_offer_metrics(dohod_type: str, dohod_date: str | None, corpbonds_type: str, corpbonds_date: str | None) -> tuple[str, str | None]:
+    """Объединяет данные оферты из ДОХОД и Corpbonds в единый результат."""
+    offer_type = "✖"
+
+    if dohod_type == "PUT" or corpbonds_type == "PUT":
+        offer_type = "PUT"
+    elif dohod_type == "Call" or corpbonds_type == "Call":
+        offer_type = "Call"
+
+    candidate_dates = [date for date in [dohod_date, corpbonds_date] if parse_date_safe(date)]
+    if candidate_dates:
+        nearest = min(candidate_dates, key=lambda value: parse_date_safe(value) or datetime.max)
+        if offer_type == "✖":
+            offer_type = "PUT"
+        return offer_type, nearest
+
+    return offer_type, None
+
+
+def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: str) -> tuple[str, str | None, str]:
+    """Проверяет оферту через ДОХОД и Corpbonds и возвращает объединённый результат."""
+    dohod_type = "✖"
+    dohod_date = None
+    corpbonds_type = "✖"
+    corpbonds_date = None
+
+    dohod_error = None
+    corpbonds_error = None
+
+    try:
+        dohod_type, dohod_date = parse_dohod_offer_metrics(session, isin)
+    except Exception as exc:
+        dohod_error = str(exc)
+        logging.warning("Не удалось проверить оферту в ДОХОД для %s: %s", isin, exc)
+
+    try:
+        corpbonds_type, corpbonds_date = parse_corpbonds_offer_metrics(session, isin)
+    except Exception as exc:
+        corpbonds_error = str(exc)
+        logging.warning("Не удалось проверить оферту в Corpbonds для %s: %s", isin, exc)
+
+    offer_type, offer_date = merge_offer_metrics(dohod_type, dohod_date, corpbonds_type, corpbonds_date)
+
+    sources: list[str] = []
+    if dohod_error is None:
+        sources.append("dohod")
+    if corpbonds_error is None:
+        sources.append("corpbonds")
+    source_label = "+".join(sources) if sources else "none"
+
+    return offer_type, offer_date, source_label
 
 
 def fetch_reference_index_values(session: requests.Session) -> dict[str, float]:
@@ -1020,9 +1184,6 @@ def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tu
 
     return emitter_id, qualified_investor_sign, bond_type, coupon_period, is_structural
 
-    if not parsed_dates:
-        return "✔", None
-
 def parse_offer_metrics(offers_data: list[list[Any]], offers_columns: list[str]) -> tuple[str, str | None]:
     """Определяет актуальную оферту: только будущая/текущая дата относительно сегодня."""
     if not offers_data or not offers_columns:
@@ -1309,7 +1470,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Добавляет НКД, амортизацию и данные Put/Call оферт с суточным кэшем."""
+    """Добавляет НКД, амортизацию и проверку Put/Call оферт с кэшированием."""
     logging.info("Этап 3/8: Обогащение суточными метриками (амортизация, оферты и НКД)...")
     secids = sorted({str(row.get("SECID")) for row in rows if row.get("SECID")})
     if not secids:
@@ -1317,29 +1478,33 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
     row_by_secid = {str(row.get("SECID")): row for row in rows if row.get("SECID")}
 
-    cache_schema_version, cache = load_daily_security_cache()
+    cache_schema_version, daily_cache = load_daily_security_cache()
+    offer_cache = load_offer_verification_cache()
     now = datetime.now()
 
     if cache_schema_version != DAILY_METRICS_CACHE_SCHEMA_VERSION:
         logging.info("Обнаружен старый формат суточного кэша (v%s). Метрики будут пересчитаны по новому правилу.", cache_schema_version)
 
-    def needs_refresh(secid: str) -> bool:
+    def needs_daily_refresh(secid: str) -> bool:
         if cache_schema_version != DAILY_METRICS_CACHE_SCHEMA_VERSION:
             return True
 
-        entry = cache.get(secid)
+        entry = daily_cache.get(secid)
         if not entry:
             return True
+
         updated_at_raw = entry.get("updated_at")
         if not updated_at_raw:
             return True
+
         try:
             updated_at = datetime.fromisoformat(str(updated_at_raw))
         except ValueError:
             return True
+
         return now - updated_at > timedelta(hours=SECURITY_DAILY_CACHE_TTL_HOURS)
 
-    missing_secids = [secid for secid in secids if needs_refresh(secid)]
+    missing_secids = [secid for secid in secids if needs_daily_refresh(secid)]
     batches = chunked(missing_secids, SECID_BATCH_SIZE)
 
     def resolve_daily_batch(batch: list[str]) -> dict[str, dict[str, Any]]:
@@ -1355,8 +1520,10 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
                     resolved[secid] = {
                         AMORTIZATION_FLAG_COLUMN_NAME: has_amortization,
                         AMORTIZATION_START_DATE_COLUMN_NAME: amort_start_date or "",
-                        HAS_PUT_CALL_OFFER_COLUMN_NAME: has_put_call_offer,
-                        PUT_CALL_OFFER_DATE_COLUMN_NAME: put_call_offer_date or "",
+                        "MOEX_HAS_PUT_CALL_OFFER": has_put_call_offer,
+                        "MOEX_PUT_CALL_OFFER_DATE": put_call_offer_date or "",
+                        HAS_PUT_CALL_OFFER_COLUMN_NAME: "✖",
+                        PUT_CALL_OFFER_DATE_COLUMN_NAME: "",
                         "EXCLUDE_BY_AMORTIZATION": False,
                         "AMORTIZATION_EXCLUDE_REASON": "",
                         "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -1371,21 +1538,88 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [executor.submit(resolve_daily_batch, batch) for batch in batches]
         for processed, future in enumerate(as_completed(futures), start=1):
-            cache.update(future.result())
+            daily_cache.update(future.result())
             if processed % 5 == 0 or processed == len(batches):
                 logging.info("Суточные пакеты: %s/%s.", processed, len(batches))
 
-    save_daily_security_cache(cache)
+    save_daily_security_cache(daily_cache)
+
+    def needs_offer_refresh(isin: str) -> bool:
+        entry = offer_cache.get(isin)
+        if not entry:
+            return True
+
+        checked_at_raw = entry.get("checked_at")
+        if not checked_at_raw:
+            return True
+
+        try:
+            checked_at = datetime.fromisoformat(str(checked_at_raw))
+        except ValueError:
+            return True
+
+        return now - checked_at > timedelta(days=OFFER_VERIFICATION_CACHE_TTL_DAYS)
+
+    isins_for_offer_refresh = sorted({str(row.get("ISIN")) for row in rows if row.get("ISIN") and needs_offer_refresh(str(row.get("ISIN")))})
+    offer_batches = chunked(isins_for_offer_refresh, SECID_BATCH_SIZE)
+
+    def resolve_offer_batch(batch: list[str]) -> dict[str, dict[str, Any]]:
+        resolved: dict[str, dict[str, Any]] = {}
+        with build_session() as local_session:
+            for isin in batch:
+                try:
+                    offer_type, offer_date, source = fetch_offer_metrics_from_external_sources(local_session, isin)
+                    resolved[isin] = {
+                        HAS_PUT_CALL_OFFER_COLUMN_NAME: offer_type,
+                        PUT_CALL_OFFER_DATE_COLUMN_NAME: offer_date or "",
+                        "source": source,
+                        "checked_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                except Exception as exc:
+                    logging.warning("Не удалось проверить оферту по внешним источникам для %s: %s", isin, exc)
+        return resolved
+
+    if offer_batches:
+        logging.info(
+            "Проверка оферт через ДОХОД и Corpbonds: нужно обработать %s пакетов ISIN (кэш %s дней).",
+            len(offer_batches),
+            OFFER_VERIFICATION_CACHE_TTL_DAYS,
+        )
+
+    with ThreadPoolExecutor(max_workers=DOHOD_MAX_WORKERS) as executor:
+        futures = [executor.submit(resolve_offer_batch, batch) for batch in offer_batches]
+        for processed, future in enumerate(as_completed(futures), start=1):
+            offer_cache.update(future.result())
+            if processed % 5 == 0 or processed == len(offer_batches):
+                logging.info("Пакеты проверки оферт: %s/%s.", processed, len(offer_batches))
+
+    save_offer_verification_cache(offer_cache)
 
     for row in rows:
         secid = str(row.get("SECID", ""))
-        entry = cache.get(secid, {})
+        entry = daily_cache.get(secid, {})
         has_amortization = str(entry.get(AMORTIZATION_FLAG_COLUMN_NAME, "✖"))
         amortization_start_date = str(entry.get(AMORTIZATION_START_DATE_COLUMN_NAME, "") or "")
-        has_put_call_offer = str(entry.get(HAS_PUT_CALL_OFFER_COLUMN_NAME, "✖"))
-        put_call_offer_date = str(entry.get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "")
-        maturity_date = str(row.get(MATURITY_DATE_COLUMN_NAME) or "")
+        moex_offer_sign = str(entry.get("MOEX_HAS_PUT_CALL_OFFER", "✖"))
+        moex_offer_date = str(entry.get("MOEX_PUT_CALL_OFFER_DATE", "") or "")
 
+        isin = str(row.get("ISIN") or "")
+        offer_entry = offer_cache.get(isin, {})
+        external_offer_type = normalize_offer_type(str(offer_entry.get(HAS_PUT_CALL_OFFER_COLUMN_NAME, "✖")))
+        external_offer_date = str(offer_entry.get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "")
+
+        has_put_call_offer = external_offer_type
+        put_call_offer_date = external_offer_date
+
+        if has_put_call_offer == "✖" and moex_offer_sign == "✔":
+            has_put_call_offer = "PUT"
+            if moex_offer_date:
+                put_call_offer_date = moex_offer_date
+
+        if has_put_call_offer in {"PUT", "Call"} and not put_call_offer_date and moex_offer_date:
+            put_call_offer_date = moex_offer_date
+
+        maturity_date = str(row.get(MATURITY_DATE_COLUMN_NAME) or "")
         if has_amortization == "✔" and maturity_date and amortization_start_date == maturity_date:
             has_amortization = "✖"
             amortization_start_date = ""
@@ -1397,17 +1631,17 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         row[ACCRUED_INT_COLUMN_NAME] = row.get(ACCRUED_INT_COLUMN_NAME)
 
         amort_date = parse_date_safe(amortization_start_date)
-        min_allowed_amort_date = datetime.now().date() + timedelta(days=365 * MIN_MATURITY_YEARS)
+        min_allowed_date = datetime.now().date() + timedelta(days=365 * MIN_MATURITY_YEARS)
         is_excluded = False
         exclude_reason = ""
-        if amort_date is not None and amort_date.date() < min_allowed_amort_date:
+        if amort_date is not None and amort_date.date() < min_allowed_date:
             is_excluded = True
             exclude_reason = "Амортизация уже началась или начнётся менее чем через год"
 
         offer_date = parse_date_safe(put_call_offer_date)
         is_offer_excluded = False
         offer_exclude_reason = ""
-        if offer_date is not None and offer_date.date() < min_allowed_amort_date:
+        if offer_date is not None and offer_date.date() < min_allowed_date:
             is_offer_excluded = True
             offer_exclude_reason = OFFER_DATE_EXCLUDE_REASON
 
@@ -1418,6 +1652,8 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
         entry[AMORTIZATION_FLAG_COLUMN_NAME] = has_amortization
         entry[AMORTIZATION_START_DATE_COLUMN_NAME] = amortization_start_date
+        entry["MOEX_HAS_PUT_CALL_OFFER"] = moex_offer_sign
+        entry["MOEX_PUT_CALL_OFFER_DATE"] = moex_offer_date
         entry[HAS_PUT_CALL_OFFER_COLUMN_NAME] = has_put_call_offer
         entry[PUT_CALL_OFFER_DATE_COLUMN_NAME] = put_call_offer_date
         entry["EXCLUDE_BY_AMORTIZATION"] = is_excluded
@@ -1425,9 +1661,9 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         entry["EXCLUDE_BY_OFFER_DATE"] = is_offer_excluded
         entry["OFFER_DATE_EXCLUDE_REASON"] = offer_exclude_reason
         entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        cache[secid] = entry
+        daily_cache[secid] = entry
 
-    save_daily_security_cache(cache)
+    save_daily_security_cache(daily_cache)
 
     return rows
 
@@ -1707,8 +1943,8 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "ISSUER_BOND_CLASS", "Описание": "Тип бумаги на рынке облигаций (например: государственный, корпоративный, муниципальный, иностранный)."},
         {"Поле": "QUALIFIED_INVESTOR", "Описание": "Показывает, предназначена ли облигация только для квалифицированных инвесторов: ✔ — да, ✖ — нет."},
         {"Поле": "BOND_TYPE", "Описание": "Тип облигации по купону (например: фиксированная, флоатер и т.д.)."},
-        {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Есть ли у облигации Put/Call оферта: ✔ — есть, ✖ — нет."},
-        {"Поле": "PUT_CALL_OFFER_DATE", "Описание": "Ближайшая дата Put/Call оферты (если опубликована на MOEX)."},
+        {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Тип ближайшей оферты: PUT, Call или ✖ (оферта не найдена)."},
+        {"Поле": "PUT_CALL_OFFER_DATE", "Описание": "Ближайшая дата оферты (проверка через ДОХОД + Corpbonds, с fallback на MOEX)."},
         {"Поле": "HAS_AMORTIZATION", "Описание": "Есть ли у бумаги амортизация номинала: ✔ — да, ✖ — нет."},
         {"Поле": "AMORTIZATION_START_DATE", "Описание": "Дата начала амортизации (если есть)."},
         {"Поле": "MATDATE", "Описание": "Дата погашения облигации (когда эмитент должен вернуть номинал)."},
