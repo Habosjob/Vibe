@@ -16,7 +16,7 @@
 3. Лог `logs/moex_bonds.log` перезаписывается (всегда только последний запуск).
 4. Читается основной кэш выгрузки.
 5. Запрашиваются свежие бумаги с MOEX.
-6. Дополнительно парсится блок рыночных данных: объём торгов (`VOLTODAY`), оборот (`VALTODAY`), число сделок (`NUMTRADES`) и биржевая доходность (`YIELD`).
+6. Дополнительно парсятся дата начала торгов (`ISSUEDATE`) и блок рыночных данных: объём торгов (`VOLTODAY`), оборот (`VALTODAY`), число сделок (`NUMTRADES`) и биржевая доходность (`YIELD`).
 7. Исключаются бумаги, у которых до погашения меньше 1 года.
 8. Загружаются суточные метрики и отмечаются бумаги, где амортизация уже началась или начнётся менее чем через 1 год.
 9. Выполняется **первичная фильтрация по данным MOEX**: по датам погашения, амортизации и оферт.
@@ -50,7 +50,7 @@
   - `Эмитент`: `ISSUER_NAME`, `ISSUER_INN`, `ISSUER_BOND_CLASS`, `SHORTNAME`.
   - `Квалификация и тип`: `QUALIFIED_INVESTOR`, `BOND_TYPE`.
   - `Оферты`: `HAS_PUT_CALL_OFFER`, `PUT_CALL_OFFER_DATE`.
-  - `Погашение и амортизация`: `HAS_AMORTIZATION`, `AMORTIZATION_START_DATE`, `MATDATE`.
+  - `Торги, погашение и амортизация`: `ISSUEDATE`, `HAS_AMORTIZATION`, `AMORTIZATION_START_DATE`, `MATDATE`.
   - `Купоны`: `COUPONVALUE`, `ACCRUEDINT`, `COUPONPERIOD`, `COUPONPERCENT`.
   - `Рынок`: `FACEVALUE`, `FACEUNIT`, `PRIMARYBOARDID`, `PREVLEGALCLOSEPRICE`, `PREVPRICE`, `VOLTODAY`, `VALTODAY`, `NUMTRADES`, `YIELD`.
 - `QUALIFIED_INVESTOR` — ✔/✖.
@@ -60,6 +60,7 @@
 - `PUT_CALL_OFFER_DATE` — ближайшая дата оферты (по ДОХОД + Corpbonds, при недоступности — fallback на MOEX).
 - `HAS_AMORTIZATION` — ✔/✖ (финальное погашение не считается амортизацией).
 - `AMORTIZATION_START_DATE` — дата старта амортизации (если есть).
+- `ISSUEDATE` — дата начала торгов выпуска на MOEX.
 - `ACCRUEDINT` — НКД.
 - `MATDATE` — дата погашения (формат `ДД.ММ.ГГГГ`).
 - `VOLTODAY` — объём торгов за день (количество бумаг).
