@@ -460,7 +460,7 @@ def save_coupon_formula_cache(rows: dict[str, dict[str, Any]]) -> None:
 
 
 def load_trade_start_date_cache() -> dict[str, str]:
-    """Читает кэш дат начала торгов по SECID."""
+    """Читает пожизненный кэш дат начала торгов (ISSUEDATE) по SECID."""
     if not TRADE_START_DATE_CACHE_FILE.exists():
         return {}
 
@@ -476,7 +476,7 @@ def load_trade_start_date_cache() -> dict[str, str]:
 
 
 def save_trade_start_date_cache(rows: dict[str, str]) -> None:
-    """Сохраняет кэш дат начала торгов по SECID."""
+    """Сохраняет пожизненный кэш дат начала торгов (ISSUEDATE) по SECID."""
     payload = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "rows": rows,
@@ -2385,7 +2385,6 @@ def main() -> None:
     # 1) Базовый сбор и первичная фильтрация по данным MOEX
     rows = filter_rows_by_maturity(rows)
     rows = enrich_with_daily_metrics(rows, include_daily_metrics=True, include_external_offers=False)
-    rows = enrich_trade_start_dates(rows)
     rows = filter_rows_by_amortization_timing(rows)
     rows = filter_rows_by_offer_date(rows)
 
@@ -2394,6 +2393,7 @@ def main() -> None:
     rows = enrich_with_issuer_names(rows)
     rows = filter_rows_by_bond_type(rows)
     rows = filter_rows_by_coupon_period(rows)
+    rows = enrich_trade_start_dates(rows)
     rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
 
     # 3) Повторная фильтрация после обогащения новыми данными
