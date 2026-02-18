@@ -48,7 +48,7 @@
   - `Купоны`: `COUPONVALUE`, `ACCRUEDINT`, `COUPONPERIOD`, `COUPONPERCENT`.
   - `Рынок`: `FACEVALUE`, `FACEUNIT`, `PRIMARYBOARDID`, `PREVLEGALCLOSEPRICE`, `PREVPRICE`, `VOLTODAY`, `VALTODAY`, `NUMTRADES`.
 - `QUALIFIED_INVESTOR` — ✔/✖.
-- `ISSUER_SECTOR` — сектор эмитента по классификации MOEX (значение поля `SECTORID`).
+- `ISSUER_SECTOR` — сектор эмитента: сначала из `SECTORID`, а если MOEX не заполнил это поле, то из укрупнённой классификации `INSTRID` (государственный, корпоративный, муниципальный/субфедеральный, иностранный).
 - `BOND_TYPE` — тип облигации (например, фикс/флоатер). Структурные облигации в итоговый лист не попадают.
 - `HAS_PUT_CALL_OFFER` — ✔/✖ (есть ли Put/Call оферта).
 - `PUT_CALL_OFFER_DATE` — ближайшая дата Put/Call оферты (если есть).
