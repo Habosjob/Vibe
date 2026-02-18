@@ -947,8 +947,13 @@ def merge_offer_metrics(dohod_type: str, dohod_date: str | None, corpbonds_type:
     return offer_type, None
 
 
-def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: str, secid: str | None = None) -> tuple[str, str | None, str]:
-    """Проверяет оферту через ДОХОД и Corpbonds и возвращает объединённый результат."""
+def fetch_offer_metrics_from_external_sources(isin: str, secid: str | None = None) -> tuple[str, str | None, str]:
+    """Параллельно проверяет оферту через ДОХОД и Corpbonds и возвращает объединённый результат.
+
+    Правила объединения:
+    1) Оба источника опрашиваются всегда (для снижения конфликтов/пропусков).
+    2) Если в одном источнике оферта есть, а в другом нет — считаем, что оферта есть.
+    """
     dohod_type = "✖"
     dohod_date = None
     corpbonds_type = "✖"
@@ -958,15 +963,27 @@ def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: s
     corpbonds_error = None
     corpbonds_lookup = "none"
 
-    try:
-        dohod_type, dohod_date = parse_dohod_offer_metrics(session, isin)
-    except Exception as exc:
-        dohod_error = str(exc)
+    def resolve_dohod() -> tuple[str, str | None]:
+        with build_session() as local_session:
+            return parse_dohod_offer_metrics(local_session, isin)
 
-    try:
-        corpbonds_type, corpbonds_date, corpbonds_lookup = parse_corpbonds_offer_metrics(session, isin, secid)
-    except Exception as exc:
-        corpbonds_error = str(exc)
+    def resolve_corpbonds() -> tuple[str, str | None, str]:
+        with build_session() as local_session:
+            return parse_corpbonds_offer_metrics(local_session, isin, secid)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        dohod_future = executor.submit(resolve_dohod)
+        corpbonds_future = executor.submit(resolve_corpbonds)
+
+        try:
+            dohod_type, dohod_date = dohod_future.result()
+        except Exception as exc:
+            dohod_error = str(exc)
+
+        try:
+            corpbonds_type, corpbonds_date, corpbonds_lookup = corpbonds_future.result()
+        except Exception as exc:
+            corpbonds_error = str(exc)
 
     offer_type, offer_date = merge_offer_metrics(dohod_type, dohod_date, corpbonds_type, corpbonds_date)
 
@@ -1695,18 +1712,17 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
     def resolve_offer_batch(batch: list[tuple[str, str]]) -> dict[str, dict[str, Any]]:
         resolved: dict[str, dict[str, Any]] = {}
-        with build_session() as local_session:
-            for isin, secid in batch:
-                try:
-                    offer_type, offer_date, source = fetch_offer_metrics_from_external_sources(local_session, isin, secid or None)
-                    resolved[isin] = {
-                        HAS_PUT_CALL_OFFER_COLUMN_NAME: offer_type,
-                        PUT_CALL_OFFER_DATE_COLUMN_NAME: offer_date or "",
-                        "source": source,
-                        "checked_at": datetime.now().isoformat(timespec="seconds"),
-                    }
-                except Exception as exc:
-                    logging.warning("Не удалось проверить оферту по внешним источникам для %s: %s", isin, exc)
+        for isin, secid in batch:
+            try:
+                offer_type, offer_date, source = fetch_offer_metrics_from_external_sources(isin, secid or None)
+                resolved[isin] = {
+                    HAS_PUT_CALL_OFFER_COLUMN_NAME: offer_type,
+                    PUT_CALL_OFFER_DATE_COLUMN_NAME: offer_date or "",
+                    "source": source,
+                    "checked_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            except Exception as exc:
+                logging.warning("Не удалось проверить оферту по внешним источникам для %s: %s", isin, exc)
         return resolved
 
     if offer_batches:
