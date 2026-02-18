@@ -436,7 +436,6 @@ def coupon_period_from_frequency(raw_frequency: Any) -> int:
     return round(365 / frequency)
 
 
-
 def build_session() -> requests.Session:
     """Создаёт HTTP-сессию с ретраями при временных ошибках сети/API."""
     session = requests.Session()
