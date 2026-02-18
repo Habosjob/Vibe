@@ -56,6 +56,7 @@ ISSUER_CHECKPOINT_FILE = CACHE_DIR / "issuer_enrichment_checkpoint.json"
 DAILY_CACHE_FILE = CACHE_DIR / "daily_security_metrics_cache.json"
 OFFER_VERIFICATION_CACHE_FILE = CACHE_DIR / "offer_verification_cache.json"
 COUPON_FORMULA_CACHE_FILE = CACHE_DIR / "coupon_formula_cache.json"
+TRADE_START_DATE_CACHE_FILE = CACHE_DIR / "trade_start_date_cache.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
 # Колонки, которые пользователь попросил убрать из итогового файла
@@ -453,6 +454,31 @@ def save_coupon_formula_cache(rows: dict[str, dict[str, Any]]) -> None:
         "rows": rows,
     }
     COUPON_FORMULA_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_trade_start_date_cache() -> dict[str, str]:
+    """Читает кэш дат начала торгов по SECID."""
+    if not TRADE_START_DATE_CACHE_FILE.exists():
+        return {}
+
+    try:
+        payload = json.loads(TRADE_START_DATE_CACHE_FILE.read_text(encoding="utf-8"))
+        rows = payload.get("rows", {})
+        if not isinstance(rows, dict):
+            return {}
+        return {str(secid): str(value) for secid, value in rows.items() if str(value).strip()}
+    except Exception as exc:
+        logging.warning("Не удалось прочитать кэш дат начала торгов: %s", exc)
+        return {}
+
+
+def save_trade_start_date_cache(rows: dict[str, str]) -> None:
+    """Сохраняет кэш дат начала торгов по SECID."""
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "rows": rows,
+    }
+    TRADE_START_DATE_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def parse_date_safe(value: Any) -> datetime | None:
@@ -1202,6 +1228,76 @@ def fetch_all_bonds() -> list[dict[str, Any]]:
         return rows
 
 
+def fetch_trade_start_date_for_security(session: requests.Session, secid: str) -> str:
+    """Возвращает дату начала торгов по SECID через карточку бумаги ISS."""
+    params = {
+        "iss.meta": "off",
+        "iss.only": "description",
+        "description.columns": "name,value",
+    }
+    response = session.get(f"https://iss.moex.com/iss/securities/{secid}.json", params=params, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+    rows = data.get("description", {}).get("data", [])
+
+    issue_date = ""
+    start_date_moex = ""
+    for name, value in rows:
+        if name == "ISSUEDATE" and value:
+            issue_date = str(value)
+        elif name == "STARTDATEMOEX" and value:
+            start_date_moex = str(value)
+
+    return issue_date or start_date_moex or ""
+
+
+def enrich_trade_start_dates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Добавляет колонку ISSUEDATE (дата начала торгов) через карточку бумаги MOEX и кэш."""
+    logging.info("Этап 5.05/8: Обогащение датой начала торгов (ISSUEDATE)...")
+    secids = sorted({str(row.get("SECID") or "").strip() for row in rows if row.get("SECID")})
+    if not secids:
+        for row in rows:
+            row[TRADE_START_DATE_COLUMN_NAME] = ""
+        return rows
+
+    cache = load_trade_start_date_cache()
+    missing_secids = [secid for secid in secids if not str(cache.get(secid) or "").strip()]
+
+    if missing_secids:
+        logging.info("ISSUEDATE: требуется запросить %s SECID (из %s).", len(missing_secids), len(secids))
+
+        def fetch_one(secid: str) -> tuple[str, str]:
+            with build_session() as local_session:
+                try:
+                    return secid, fetch_trade_start_date_for_security(local_session, secid)
+                except Exception as exc:
+                    logging.warning("ISSUEDATE: не удалось получить дату для %s: %s", secid, exc)
+                    return secid, ""
+
+        fetched_count = 0
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(fetch_one, secid): secid for secid in missing_secids}
+            for future in as_completed(futures):
+                secid, trade_start_date = future.result()
+                if trade_start_date:
+                    cache[secid] = trade_start_date
+                fetched_count += 1
+                if fetched_count % 50 == 0 or fetched_count == len(missing_secids):
+                    logging.info("ISSUEDATE: обработано %s/%s SECID.", fetched_count, len(missing_secids))
+
+        save_trade_start_date_cache(cache)
+    else:
+        logging.info("ISSUEDATE: все даты взяты из кэша (%s SECID).", len(secids))
+
+    for row in rows:
+        secid = str(row.get("SECID") or "").strip()
+        row[TRADE_START_DATE_COLUMN_NAME] = str(cache.get(secid) or "") if secid else ""
+
+    non_empty_count = sum(1 for row in rows if str(row.get(TRADE_START_DATE_COLUMN_NAME) or "").strip())
+    logging.info("ISSUEDATE: заполнено %s из %s бумаг.", non_empty_count, len(rows))
+    return rows
+
+
 def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tuple[int | None, str, str, int, bool]:
     """Возвращает ID эмитента, квалификацию, тип облигации и период купона по SECID."""
     params = {
@@ -1328,12 +1424,14 @@ def validate_rows(rows: list[dict[str, Any]]) -> None:
     empty_isin_count = sum(1 for row in rows if not row.get("ISIN"))
     duplicate_keys = len(rows) - len({(row.get("SECID"), row.get("ISIN")) for row in rows})
     invalid_coupon_count = sum(1 for row in rows if isinstance(row.get("COUPONPERCENT"), (int, float)) and row.get("COUPONPERCENT") < 0)
+    empty_trade_start_date_count = sum(1 for row in rows if not str(row.get(TRADE_START_DATE_COLUMN_NAME) or "").strip())
 
     logging.info(
-        "Проверка качества завершена: пустых ISIN=%s, дубликатов ключа (SECID+ISIN)=%s, отрицательных COUPONPERCENT=%s.",
+        "Проверка качества завершена: пустых ISIN=%s, дубликатов ключа (SECID+ISIN)=%s, отрицательных COUPONPERCENT=%s, пустых ISSUEDATE=%s.",
         empty_isin_count,
         duplicate_keys,
         invalid_coupon_count,
+        empty_trade_start_date_count,
     )
 
 
@@ -2253,6 +2351,7 @@ def main() -> None:
     # 2) Обогащение из альтернативных источников (после первичной фильтрации)
     rows = enrich_with_daily_metrics(rows, include_daily_metrics=False, include_external_offers=True)
     rows = enrich_with_issuer_names(rows)
+    rows = enrich_trade_start_dates(rows)
     rows = filter_rows_by_bond_type(rows)
     rows = filter_rows_by_coupon_period(rows)
     rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
