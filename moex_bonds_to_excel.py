@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import shutil
 import time
@@ -36,6 +37,7 @@ OFFER_CHECK_MAX_WORKERS = 24
 OFFER_CHECK_BATCH_SIZE = 120
 OFFER_CHECK_REQUEST_TIMEOUT = 8
 OFFER_CHECK_REQUEST_RETRIES = 2
+OFFER_RECHECK_DAILY_MIN_JOBS = 300
 SECID_BATCH_SIZE = 50
 EMITTER_BATCH_SIZE = 80
 
@@ -960,13 +962,11 @@ def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: s
         dohod_type, dohod_date = parse_dohod_offer_metrics(session, isin)
     except Exception as exc:
         dohod_error = str(exc)
-        logging.warning("Не удалось проверить оферту в ДОХОД для %s: %s", isin, exc)
 
     try:
         corpbonds_type, corpbonds_date, corpbonds_lookup = parse_corpbonds_offer_metrics(session, isin, secid)
     except Exception as exc:
         corpbonds_error = str(exc)
-        logging.warning("Не удалось проверить оферту в Corpbonds для %s: %s", isin, exc)
 
     offer_type, offer_date = merge_offer_metrics(dohod_type, dohod_date, corpbonds_type, corpbonds_date)
 
@@ -976,6 +976,9 @@ def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: s
     if corpbonds_error is None:
         sources.append(f"corpbonds:{corpbonds_lookup}")
     source_label = "+".join(sources) if sources else "none"
+
+    if dohod_error is not None and corpbonds_error is not None:
+        raise RuntimeError(f"Не удалось проверить оферту в ДОХОД и Corpbonds для {isin}: dohod={dohod_error}; corpbonds={corpbonds_error}")
 
     return offer_type, offer_date, source_label
 
@@ -1551,6 +1554,67 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     return rows
 
 
+def select_offer_jobs_for_refresh(rows: list[dict[str, Any]], offer_cache: dict[str, dict[str, Any]], now: datetime) -> list[tuple[str, str]]:
+    """Выбирает часть бумаг для пере-проверки оферт так, чтобы обновить все ISIN в течение 7 дней."""
+    unique_jobs: dict[str, str] = {}
+    for row in rows:
+        isin = str(row.get("ISIN") or "").strip()
+        if not isin:
+            continue
+        if isin not in unique_jobs:
+            unique_jobs[isin] = str(row.get("SECID") or "").strip()
+
+    total = len(unique_jobs)
+    if total == 0:
+        return []
+
+    daily_target = max(OFFER_RECHECK_DAILY_MIN_JOBS, math.ceil(total / max(OFFER_VERIFICATION_CACHE_TTL_DAYS, 1)))
+
+    never_checked: list[tuple[str, str]] = []
+    stale_checked: list[tuple[datetime, str, str]] = []
+
+    for isin, secid in unique_jobs.items():
+        entry = offer_cache.get(isin)
+        if not entry:
+            never_checked.append((isin, secid))
+            continue
+
+        checked_at_raw = entry.get("checked_at")
+        if not checked_at_raw:
+            never_checked.append((isin, secid))
+            continue
+
+        try:
+            checked_at = datetime.fromisoformat(str(checked_at_raw))
+        except ValueError:
+            never_checked.append((isin, secid))
+            continue
+
+        if now - checked_at > timedelta(days=OFFER_VERIFICATION_CACHE_TTL_DAYS):
+            stale_checked.append((checked_at, isin, secid))
+
+    stale_checked.sort(key=lambda item: item[0])
+
+    selected: list[tuple[str, str]] = []
+    if len(never_checked) >= daily_target:
+        selected = never_checked[:daily_target]
+    else:
+        selected.extend(never_checked)
+        remaining_quota = max(daily_target - len(selected), 0)
+        if remaining_quota > 0:
+            selected.extend([(isin, secid) for _checked_at, isin, secid in stale_checked[:remaining_quota]])
+
+    logging.info(
+        "План проверки оферт: всего ISIN=%s, без кэша=%s, просрочено=%s, в этом запуске проверяем=%s.",
+        total,
+        len(never_checked),
+        len(stale_checked),
+        len(selected),
+    )
+
+    return selected
+
+
 def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Добавляет НКД, амортизацию и проверку Put/Call оферт с кэшированием."""
     logging.info("Этап 3/8: Обогащение суточными метриками (амортизация, оферты и НКД)...")
@@ -1626,36 +1690,8 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
     save_daily_security_cache(daily_cache)
 
-    def needs_offer_refresh(isin: str) -> bool:
-        entry = offer_cache.get(isin)
-        if not entry:
-            return True
-
-        checked_at_raw = entry.get("checked_at")
-        if not checked_at_raw:
-            return True
-
-        try:
-            checked_at = datetime.fromisoformat(str(checked_at_raw))
-        except ValueError:
-            return True
-
-        return now - checked_at > timedelta(days=OFFER_VERIFICATION_CACHE_TTL_DAYS)
-
-    offer_jobs = [
-        (str(row.get("ISIN")), str(row.get("SECID") or ""))
-        for row in rows
-        if row.get("ISIN") and needs_offer_refresh(str(row.get("ISIN")))
-    ]
-    seen_isins: set[str] = set()
-    unique_offer_jobs: list[tuple[str, str]] = []
-    for isin, secid in offer_jobs:
-        if isin in seen_isins:
-            continue
-        seen_isins.add(isin)
-        unique_offer_jobs.append((isin, secid))
-
-    offer_batches = chunked(unique_offer_jobs, OFFER_CHECK_BATCH_SIZE)
+    offer_jobs = select_offer_jobs_for_refresh(rows, offer_cache, now)
+    offer_batches = chunked(offer_jobs, OFFER_CHECK_BATCH_SIZE)
 
     def resolve_offer_batch(batch: list[tuple[str, str]]) -> dict[str, dict[str, Any]]:
         resolved: dict[str, dict[str, Any]] = {}
@@ -1675,7 +1711,8 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
     if offer_batches:
         logging.info(
-            "Проверка оферт через ДОХОД и Corpbonds: нужно обработать %s пакетов ISIN (кэш %s дней).",
+            "Проверка оферт через ДОХОД и Corpbonds: нужно обработать %s ISIN (%s пакетов, кэш %s дней).",
+            len(offer_jobs),
             len(offer_batches),
             OFFER_VERIFICATION_CACHE_TTL_DAYS,
         )
