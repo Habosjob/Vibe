@@ -63,6 +63,7 @@ REMOVED_COLUMNS = {
 HIDDEN_COLUMN_NAME = "SECID"
 ISSUER_COLUMN_NAME = "ISSUER_NAME"
 ISSUER_INN_COLUMN_NAME = "ISSUER_INN"
+ISSUER_SECTOR_COLUMN_NAME = "ISSUER_SECTOR"
 FIRST_COLUMN_NAME = "ISIN"
 GROUP_SEPARATOR_PREFIX = "GROUP_SEPARATOR__"
 QUALIFIED_INVESTOR_COLUMN_NAME = "QUALIFIED_INVESTOR"
@@ -458,7 +459,7 @@ def fetch_page(session: requests.Session, start: int) -> IssPage:
     """Запрашивает одну страницу облигаций с MOEX ISS."""
     params = {
         "iss.meta": "off",
-        "securities.columns": "SECID,SHORTNAME,ISIN,MATDATE,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE,ACCRUEDINT",
+        "securities.columns": "SECID,SHORTNAME,ISIN,MATDATE,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE,ACCRUEDINT,SECTORID",
         "marketdata.columns": f"SECID,{TRADE_VOLUME_COLUMN_NAME},{TRADE_VALUE_COLUMN_NAME},NUMTRADES",
         "start": start,
         "limit": PAGE_SIZE,
@@ -664,6 +665,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         for row in rows:
             row[ISSUER_COLUMN_NAME] = ""
             row[ISSUER_INN_COLUMN_NAME] = ""
+            row[ISSUER_SECTOR_COLUMN_NAME] = "Не указан"
             row[QUALIFIED_INVESTOR_COLUMN_NAME] = "✖"
             row[BOND_TYPE_COLUMN_NAME] = "Не указан"
         return rows
@@ -801,6 +803,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         emitter_id = secid_to_emitter_id.get(secid)
         row[ISSUER_COLUMN_NAME] = emitter_cache.get(emitter_id) or ""
         row[ISSUER_INN_COLUMN_NAME] = emitter_inn_cache.get(emitter_id) or ""
+        row[ISSUER_SECTOR_COLUMN_NAME] = str(row.get("SECTORID") or "Не указан")
         row[QUALIFIED_INVESTOR_COLUMN_NAME] = secid_to_qualified_sign.get(secid, "✖")
         row[BOND_TYPE_COLUMN_NAME] = secid_to_bond_type.get(secid, "Не указан")
         row["EXCLUDE_BY_BOND_TYPE"] = bool(secid_to_is_structural.get(secid, False))
@@ -1207,6 +1210,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "SHORTNAME", "Описание": "Краткое название облигации."},
         {"Поле": "ISSUER_NAME", "Описание": "Наименование эмитента облигации (компании или организации, которая выпустила бумагу)."},
         {"Поле": "ISSUER_INN", "Описание": "ИНН эмитента для быстрой сверки компании в ваших внутренних системах и документах."},
+        {"Поле": "ISSUER_SECTOR", "Описание": "Сектор эмитента по классификации MOEX (берётся из поля `SECTORID`). Полезен для фильтрации бумаг по типу бизнеса."},
         {"Поле": "QUALIFIED_INVESTOR", "Описание": "Показывает, предназначена ли облигация только для квалифицированных инвесторов: ✔ — да, ✖ — нет."},
         {"Поле": "BOND_TYPE", "Описание": "Тип облигации по купону (например: фиксированная, флоатер и т.д.)."},
         {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Есть ли у облигации Put/Call оферта: ✔ — есть, ✖ — нет."},
@@ -1258,7 +1262,7 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
 
     if FIRST_COLUMN_NAME in df.columns:
         group_layout = [
-            ("Эмитент", [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, "SHORTNAME"]),
+            ("Эмитент", [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, ISSUER_SECTOR_COLUMN_NAME, "SHORTNAME"]),
             ("Квалификация и тип", [QUALIFIED_INVESTOR_COLUMN_NAME, BOND_TYPE_COLUMN_NAME]),
             ("Оферты", [HAS_PUT_CALL_OFFER_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]),
             ("Погашение и амортизация", [AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME]),
