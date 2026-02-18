@@ -31,6 +31,8 @@ CACHE_TTL_HOURS = 6
 MAX_RETRIES = 4
 BACKOFF_FACTOR = 1.2
 MAX_WORKERS = 10
+TRADE_START_MAX_WORKERS = 20
+TRADE_START_PROGRESS_SAVE_EVERY = 25
 DOHOD_MAX_WORKERS = 8
 DOHOD_REQUEST_RETRIES = 3
 OFFER_CHECK_MAX_WORKERS = 12
@@ -57,6 +59,7 @@ DAILY_CACHE_FILE = CACHE_DIR / "daily_security_metrics_cache.json"
 OFFER_VERIFICATION_CACHE_FILE = CACHE_DIR / "offer_verification_cache.json"
 COUPON_FORMULA_CACHE_FILE = CACHE_DIR / "coupon_formula_cache.json"
 TRADE_START_DATE_CACHE_FILE = CACHE_DIR / "trade_start_date_cache.json"
+TRADE_START_DATE_CHECKPOINT_FILE = CACHE_DIR / "trade_start_date_checkpoint.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
 # Колонки, которые пользователь попросил убрать из итогового файла
@@ -479,6 +482,37 @@ def save_trade_start_date_cache(rows: dict[str, str]) -> None:
         "rows": rows,
     }
     TRADE_START_DATE_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_trade_start_date_checkpoint() -> dict[str, str]:
+    """Читает checkpoint по этапу ISSUEDATE, чтобы продолжать после обрыва связи."""
+    if not TRADE_START_DATE_CHECKPOINT_FILE.exists():
+        return {}
+
+    try:
+        payload = json.loads(TRADE_START_DATE_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+        rows = payload.get("rows", {})
+        if not isinstance(rows, dict):
+            return {}
+        return {str(secid): str(value) for secid, value in rows.items() if str(value).strip()}
+    except Exception as exc:
+        logging.warning("Не удалось прочитать checkpoint ISSUEDATE: %s", exc)
+        return {}
+
+
+def save_trade_start_date_checkpoint(rows: dict[str, str]) -> None:
+    """Сохраняет checkpoint этапа ISSUEDATE во время выполнения."""
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "rows": rows,
+    }
+    TRADE_START_DATE_CHECKPOINT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def clear_trade_start_date_checkpoint() -> None:
+    """Удаляет checkpoint ISSUEDATE после успешного завершения этапа."""
+    if TRADE_START_DATE_CHECKPOINT_FILE.exists():
+        TRADE_START_DATE_CHECKPOINT_FILE.unlink()
 
 
 def parse_date_safe(value: Any) -> datetime | None:
@@ -1261,6 +1295,8 @@ def enrich_trade_start_dates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         return rows
 
     cache = load_trade_start_date_cache()
+    checkpoint_cache = load_trade_start_date_checkpoint()
+    cache.update(checkpoint_cache)
     missing_secids = [secid for secid in secids if not str(cache.get(secid) or "").strip()]
 
     if missing_secids:
@@ -1275,19 +1311,23 @@ def enrich_trade_start_dates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                     return secid, ""
 
         fetched_count = 0
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=TRADE_START_MAX_WORKERS) as executor:
             futures = {executor.submit(fetch_one, secid): secid for secid in missing_secids}
             for future in as_completed(futures):
                 secid, trade_start_date = future.result()
                 if trade_start_date:
                     cache[secid] = trade_start_date
                 fetched_count += 1
-                if fetched_count % 50 == 0 or fetched_count == len(missing_secids):
+                if fetched_count % TRADE_START_PROGRESS_SAVE_EVERY == 0 or fetched_count == len(missing_secids):
+                    save_trade_start_date_checkpoint(cache)
+                    save_trade_start_date_cache(cache)
                     logging.info("ISSUEDATE: обработано %s/%s SECID.", fetched_count, len(missing_secids))
 
         save_trade_start_date_cache(cache)
+        clear_trade_start_date_checkpoint()
     else:
         logging.info("ISSUEDATE: все даты взяты из кэша (%s SECID).", len(secids))
+        clear_trade_start_date_checkpoint()
 
     for row in rows:
         secid = str(row.get("SECID") or "").strip()
@@ -2345,13 +2385,13 @@ def main() -> None:
     # 1) Базовый сбор и первичная фильтрация по данным MOEX
     rows = filter_rows_by_maturity(rows)
     rows = enrich_with_daily_metrics(rows, include_daily_metrics=True, include_external_offers=False)
+    rows = enrich_trade_start_dates(rows)
     rows = filter_rows_by_amortization_timing(rows)
     rows = filter_rows_by_offer_date(rows)
 
     # 2) Обогащение из альтернативных источников (после первичной фильтрации)
     rows = enrich_with_daily_metrics(rows, include_daily_metrics=False, include_external_offers=True)
     rows = enrich_with_issuer_names(rows)
-    rows = enrich_trade_start_dates(rows)
     rows = filter_rows_by_bond_type(rows)
     rows = filter_rows_by_coupon_period(rows)
     rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
