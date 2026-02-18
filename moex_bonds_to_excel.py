@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +16,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from openpyxl.styles import Alignment, Font, PatternFill
+from bs4 import BeautifulSoup
 from openpyxl.utils import get_column_letter
 
 
@@ -28,6 +30,8 @@ CACHE_TTL_HOURS = 6
 MAX_RETRIES = 4
 BACKOFF_FACTOR = 1.2
 MAX_WORKERS = 10
+DOHOD_MAX_WORKERS = 8
+DOHOD_REQUEST_RETRIES = 3
 SECID_BATCH_SIZE = 50
 EMITTER_BATCH_SIZE = 80
 
@@ -43,6 +47,7 @@ CACHE_FILE = CACHE_DIR / "moex_bonds_cache.json"
 ISSUER_CACHE_FILE = CACHE_DIR / "issuer_directory_cache.json"
 ISSUER_CHECKPOINT_FILE = CACHE_DIR / "issuer_enrichment_checkpoint.json"
 DAILY_CACHE_FILE = CACHE_DIR / "daily_security_metrics_cache.json"
+COUPON_FORMULA_CACHE_FILE = CACHE_DIR / "coupon_formula_cache.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
 # Колонки, которые пользователь попросил убрать из итогового файла
@@ -80,8 +85,16 @@ BOND_TYPE_COLUMN_NAME = "BOND_TYPE"
 HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
 PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
+COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 6
+DOHOD_BOND_URL = "https://analytics.dohod.ru/bond/{isin}"
+DOHOD_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/132.0.0.0 Safari/537.36"
+)
+CALCULATED_COUPON_FILL = PatternFill(fill_type="solid", start_color="FFF2CC", end_color="FFF2CC")
 STRUCTURAL_BOND_TYPE_VALUES = {"структурная облигация", "структурные облигации"}
 COUPONPERIOD_EXCLUDE_REASON = "Купонный период не определён (COUPONPERIOD = 0)"
 BOND_TYPE_EXCLUDE_REASON = "Структурная облигация исключена из выгрузки"
@@ -373,6 +386,31 @@ def save_daily_security_cache(secid_to_metrics: dict[str, dict[str, Any]]) -> No
     DAILY_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_coupon_formula_cache() -> dict[str, dict[str, Any]]:
+    """Читает кэш расчётов COUPONPERCENT для бумаг с нулевым COUPONVALUE."""
+    if not COUPON_FORMULA_CACHE_FILE.exists():
+        return {}
+
+    try:
+        payload = json.loads(COUPON_FORMULA_CACHE_FILE.read_text(encoding="utf-8"))
+        rows = payload.get("rows", {})
+        if isinstance(rows, dict):
+            return {str(k): v for k, v in rows.items() if isinstance(v, dict)}
+    except Exception as exc:
+        logging.warning("Не удалось прочитать кэш формул купона: %s", exc)
+    return {}
+
+
+def save_coupon_formula_cache(rows: dict[str, dict[str, Any]]) -> None:
+    """Сохраняет кэш расчётных купонных ставок по ISIN."""
+    CACHE_DIR.mkdir(exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "rows": rows,
+    }
+    COUPON_FORMULA_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def parse_date_safe(value: Any) -> datetime | None:
     """Преобразует дату формата YYYY-MM-DD в datetime или возвращает None."""
     if not value:
@@ -466,6 +504,341 @@ def build_session() -> requests.Session:
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
+
+
+
+def fetch_latest_table_rate(session: requests.Session, url: str) -> float | None:
+    """Возвращает первую ставку из HTML-таблицы ЦБ РФ (верхняя строка = самая свежая)."""
+    response = session.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": DOHOD_USER_AGENT})
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    table = soup.find("table", class_="data")
+    if table is None:
+        return None
+
+    rows = table.find_all("tr")
+    for row in rows[1:]:
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            continue
+        raw_value = cells[1].get_text(" ", strip=True).replace(" ", " ")
+        rate_match = re.search(r"-?\d+[,.]?\d*", raw_value)
+        if not rate_match:
+            continue
+        return float(rate_match.group(0).replace(",", "."))
+    return None
+
+
+def fetch_g_curve_value(session: requests.Session, period_years: float) -> float | None:
+    """Возвращает значение кривой бескупонной доходности ОФЗ для указанного срока в годах."""
+    response = session.get(
+        "https://iss.moex.com/iss/engines/stock/zcyc/securities.json",
+        params={"iss.meta": "off"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    data = response.json()
+    rows = data.get("yearyields", {}).get("data", [])
+    columns = data.get("yearyields", {}).get("columns", [])
+    yields = [dict(zip(columns, row)) for row in rows]
+    if not yields:
+        return None
+
+    exact_value: float | None = None
+    nearest_value: tuple[float, float] | None = None
+    for item in yields:
+        try:
+            period = float(item.get("period"))
+            value = float(item.get("value"))
+        except (TypeError, ValueError):
+            continue
+
+        if abs(period - period_years) < 1e-9:
+            exact_value = value
+            break
+
+        distance = abs(period - period_years)
+        if nearest_value is None or distance < nearest_value[0]:
+            nearest_value = (distance, value)
+
+    if exact_value is not None:
+        return exact_value
+
+    if nearest_value is not None:
+        logging.warning(
+            "G_CURVE_RUS: точный срок %.2f лет не найден, использовано ближайшее значение.",
+            period_years,
+        )
+        return nearest_value[1]
+
+    return None
+
+
+def extract_dohod_section_value(html: str, label: str) -> str:
+    """Извлекает текст значения из блока ДОХОД по заголовку секции."""
+    soup = BeautifulSoup(html, "html.parser")
+    for p_tag in soup.find_all("p"):
+        label_text = re.sub(r"\s+", " ", p_tag.get_text(" ", strip=True))
+        if label not in label_text:
+            continue
+
+        info_block = p_tag.find_parent("div", class_=re.compile("dohod-description-info"))
+        if info_block is None:
+            continue
+
+        data_tag = info_block.find("p", class_=re.compile("dohod-description-info_data"))
+        if data_tag is None:
+            continue
+
+        value = re.sub(r"\s+", " ", data_tag.get_text(" ", strip=True)).strip()
+        if value:
+            return value
+
+    pattern = (
+        rf"<p[^>]*>\s*{re.escape(label)}\s*</p>"
+        r'.*?<p[^>]*class="[^"]*dohod-description-info_data[^"]*"[^>]*>(.*?)</p>'
+    )
+    match = re.search(pattern, html, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    raw_value = match.group(1)
+    text_value = BeautifulSoup(raw_value, "html.parser").get_text(" ", strip=True)
+    return re.sub(r"\s+", " ", text_value).strip()
+
+
+def fetch_dohod_page_html(session: requests.Session, isin: str) -> str:
+    """Возвращает HTML карточки облигации ДОХОД с дополнительными повторами запроса."""
+    last_error: Exception | None = None
+    url = DOHOD_BOND_URL.format(isin=isin)
+
+    for attempt in range(1, DOHOD_REQUEST_RETRIES + 1):
+        try:
+            response = session.get(
+                url,
+                timeout=REQUEST_TIMEOUT,
+                headers={"User-Agent": DOHOD_USER_AGENT},
+            )
+            response.raise_for_status()
+            html = response.text or ""
+            if len(html) < 500:
+                raise ValueError(f"Пустой/слишком короткий HTML (длина={len(html)})")
+            return html
+        except Exception as exc:  # noqa: PERF203
+            last_error = exc
+            logging.warning("ДОХОД: попытка %s/%s для %s не удалась: %s", attempt, DOHOD_REQUEST_RETRIES, isin, exc)
+            time.sleep(0.4 * attempt)
+
+    raise RuntimeError(f"Не удалось загрузить страницу ДОХОД для {isin}: {last_error}")
+
+
+def parse_dohod_formula(session: requests.Session, isin: str) -> tuple[str, str, str, float, float]:
+    """Парсит формулу с analytics.dohod.ru: индекс, сдвиг, описание и срок G-curve (если нужен)."""
+    html = fetch_dohod_page_html(session, isin)
+
+    formula_text = extract_dohod_section_value(html, "Привязка к индексу")
+    description_text = extract_dohod_section_value(html, "Описание формулы изменяемого купона/номинала")
+
+    if not formula_text:
+        fallback = re.search(r"(CBR_RATE|RUONIA|G_CURVE_RUS)\s*[+-]\s*\d+[.,]?\d*", html, flags=re.IGNORECASE)
+        if fallback:
+            formula_text = re.sub(r"\s+", " ", fallback.group(0)).strip()
+
+    formula_match = re.search(r"(CBR_RATE|RUONIA|G_CURVE_RUS)\s*([+-])?\s*(\d+[.,]?\d*)?", formula_text, flags=re.IGNORECASE)
+    if not formula_match:
+        raise ValueError(f"Не удалось распознать формулу ДОХОД для {isin}: '{formula_text}'")
+
+    index_name = formula_match.group(1).upper()
+    operation = formula_match.group(2) or "+"
+    spread = float((formula_match.group(3) or "0").replace(",", "."))
+    if operation == "-":
+        spread *= -1
+
+    g_curve_years = 7.0
+    if index_name == "G_CURVE_RUS":
+        years_match = re.search(r"сроком\s+погашения\s+(\d+[.,]?\d*)\s*(?:лет|года|год)", description_text, flags=re.IGNORECASE)
+        if years_match:
+            g_curve_years = float(years_match.group(1).replace(",", "."))
+
+    return index_name, formula_text, description_text, spread, g_curve_years
+
+
+def fetch_reference_index_values(session: requests.Session) -> dict[str, float]:
+    """Собирает актуальные значения индексов: CBR_RATE, RUONIA, G_CURVE_RUS(7Y)."""
+    index_values: dict[str, float] = {}
+    index_values["CBR_RATE"] = fetch_latest_table_rate(
+        session,
+        "https://www.cbr.ru/hd_base/KeyRate/?UniDbQuery.Posted=True&UniDbQuery.From=01.01.2020&UniDbQuery.To=31.12.2035",
+    ) or 0.0
+    index_values["RUONIA"] = fetch_latest_table_rate(
+        session,
+        "https://www.cbr.ru/hd_base/ruonia/dynamics/?UniDbQuery.Posted=True&UniDbQuery.From=01.01.2020&UniDbQuery.To=31.12.2035",
+    ) or 0.0
+    g_curve_default = fetch_g_curve_value(session, 7.0)
+    index_values["G_CURVE_RUS_7.0"] = g_curve_default or 0.0
+    return index_values
+
+
+def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
+    """Считает COUPONPERCENT через формулу ДОХОД для бумаг с COUPONVALUE=0."""
+    logging.info("Этап 5.25/9: Расчёт COUPONPERCENT через ДОХОД для выпусков с нулевым купоном...")
+    calculated_cells: set[tuple[str, str]] = set()
+    cache = load_coupon_formula_cache()
+    now = datetime.now()
+
+    stale_keys: list[str] = []
+    for isin, cached_entry in cache.items():
+        try:
+            cached_at = datetime.fromisoformat(str(cached_entry.get("updated_at")))
+        except ValueError:
+            stale_keys.append(isin)
+            continue
+        if now - cached_at > timedelta(days=COUPON_FORMULA_CACHE_TTL_DAYS):
+            stale_keys.append(isin)
+    for isin in stale_keys:
+        cache.pop(isin, None)
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            coupon_value = float(str(row.get("COUPONVALUE") or 0).replace(",", "."))
+        except ValueError:
+            coupon_value = 0.0
+        if coupon_value == 0:
+            candidates.append(row)
+
+    if not candidates:
+        logging.info("Нет выпусков с COUPONVALUE=0. Доп. расчёт не требуется.")
+        return rows, calculated_cells
+
+    logging.info("Найдено выпусков с COUPONVALUE=0: %s", len(candidates))
+
+    with build_session() as session:
+        index_values = fetch_reference_index_values(session)
+
+        to_fetch: list[tuple[str, str]] = []
+        for row in candidates:
+            isin = str(row.get("ISIN") or "").strip()
+            secid = str(row.get("SECID") or "").strip()
+            if not isin:
+                continue
+
+            try:
+                moex_coupon = float(str(row.get("COUPONPERCENT") or 0).replace(",", "."))
+            except ValueError:
+                moex_coupon = 0.0
+
+            if moex_coupon > 0:
+                cache.pop(isin, None)
+                continue
+
+            cached_entry = cache.get(isin)
+            if cached_entry is not None:
+                try:
+                    cached_at = datetime.fromisoformat(str(cached_entry.get("updated_at")))
+                except ValueError:
+                    cached_at = now - timedelta(days=COUPON_FORMULA_CACHE_TTL_DAYS + 1)
+                if now - cached_at <= timedelta(days=COUPON_FORMULA_CACHE_TTL_DAYS):
+                    coupon_percent = cached_entry.get("coupon_percent")
+                    if isinstance(coupon_percent, (float, int)):
+                        row["COUPONPERCENT"] = round(float(coupon_percent), 4)
+                        calculated_cells.add((isin, secid))
+                        continue
+
+            to_fetch.append((isin, secid))
+
+        formula_by_isin: dict[str, tuple[str, str, str, float, float]] = {}
+
+        def resolve_formula_job(job: tuple[str, str]) -> tuple[str, str, tuple[str, str, str, float, float] | None, str | None]:
+            isin_job, secid_job = job
+            with build_session() as local_session:
+                try:
+                    parsed = parse_dohod_formula(local_session, isin_job)
+                    return isin_job, secid_job, parsed, None
+                except Exception as exc:
+                    return isin_job, secid_job, None, str(exc)
+
+        if to_fetch:
+            logging.info("ДОХОД: нужно опросить формулы для %s выпусков (многопоточно, потоков=%s).", len(to_fetch), DOHOD_MAX_WORKERS)
+
+            with ThreadPoolExecutor(max_workers=DOHOD_MAX_WORKERS) as executor:
+                futures = [executor.submit(resolve_formula_job, job) for job in to_fetch]
+                for processed, future in enumerate(as_completed(futures), start=1):
+                    isin_job, _secid_job, parsed, error_text = future.result()
+                    if parsed is not None:
+                        formula_by_isin[isin_job] = parsed
+                    else:
+                        logging.warning("ДОХОД: не удалось получить формулу для %s: %s", isin_job, error_text)
+
+                    if processed % 25 == 0 or processed == len(futures):
+                        logging.info("ДОХОД: обработано формул %s/%s", processed, len(futures))
+
+        g_curve_cache: dict[float, float] = {}
+
+        for row in candidates:
+            isin = str(row.get("ISIN") or "").strip()
+            secid = str(row.get("SECID") or "").strip()
+            if not isin:
+                continue
+
+            try:
+                moex_coupon = float(str(row.get("COUPONPERCENT") or 0).replace(",", "."))
+            except ValueError:
+                moex_coupon = 0.0
+            if moex_coupon > 0:
+                continue
+
+            cached_entry = cache.get(isin)
+            if cached_entry is not None:
+                try:
+                    cached_at = datetime.fromisoformat(str(cached_entry.get("updated_at")))
+                except ValueError:
+                    cached_at = now - timedelta(days=COUPON_FORMULA_CACHE_TTL_DAYS + 1)
+                if now - cached_at <= timedelta(days=COUPON_FORMULA_CACHE_TTL_DAYS):
+                    coupon_percent = cached_entry.get("coupon_percent")
+                    if isinstance(coupon_percent, (float, int)):
+                        row["COUPONPERCENT"] = round(float(coupon_percent), 4)
+                        calculated_cells.add((isin, secid))
+                        continue
+
+            parsed = formula_by_isin.get(isin)
+            if parsed is None:
+                continue
+
+            index_name, formula_text, description_text, spread, g_curve_years = parsed
+
+            if index_name == "G_CURVE_RUS":
+                if g_curve_years in g_curve_cache:
+                    base_value = g_curve_cache[g_curve_years]
+                else:
+                    g_curve_value = fetch_g_curve_value(session, g_curve_years)
+                    if g_curve_value is None:
+                        logging.warning("ДОХОД: нет значения G_CURVE_RUS для %s (%.2f лет)", isin, g_curve_years)
+                        continue
+                    base_value = g_curve_value
+                    g_curve_cache[g_curve_years] = g_curve_value
+                    index_values[f"G_CURVE_RUS_{g_curve_years:.2f}"] = g_curve_value
+            else:
+                base_value = index_values.get(index_name, 0.0)
+
+            coupon_percent = round(base_value + spread, 4)
+            row["COUPONPERCENT"] = coupon_percent
+            calculated_cells.add((isin, secid))
+            cache[isin] = {
+                "secid": secid,
+                "coupon_percent": coupon_percent,
+                "index_name": index_name,
+                "index_value": round(base_value, 4),
+                "spread": spread,
+                "formula": formula_text,
+                "description": description_text,
+                "g_curve_years": g_curve_years,
+                "updated_at": now.isoformat(timespec="seconds"),
+            }
+
+    save_coupon_formula_cache(cache)
+    logging.info("COUPONPERCENT рассчитан через ДОХОД для %s выпусков.", len(calculated_cells))
+    return rows, calculated_cells
+
 
 def fetch_page(session: requests.Session, start: int) -> IssPage:
     """Запрашивает одну страницу облигаций с MOEX ISS."""
@@ -1109,6 +1482,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
 
     separator_titles: dict[str, str] = df.attrs.get("group_separator_titles", {})
     separator_columns = {c for c in df.columns if str(c).startswith(GROUP_SEPARATOR_PREFIX)}
+    calculated_coupon_cells: set[tuple[str, str]] = df.attrs.get("calculated_coupon_cells", set())
 
     ws.row_dimensions[1].height = 54
     ws.row_dimensions[2].height = 22
@@ -1161,6 +1535,15 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
             cell.alignment = Alignment(vertical="center")
             if col_name in numeric_columns and isinstance(cell.value, (int, float)):
                 cell.number_format = "#,##0.00"
+
+            if col_name == "COUPONPERCENT":
+                isin_value = str(ws.cell(row=row_idx, column=1).value or "")
+                secid_value = ""
+                if HIDDEN_COLUMN_NAME in df.columns:
+                    secid_col_idx = list(df.columns).index(HIDDEN_COLUMN_NAME) + 1
+                    secid_value = str(ws.cell(row=row_idx, column=secid_col_idx).value or "")
+                if (isin_value, secid_value) in calculated_coupon_cells:
+                    cell.fill = CALCULATED_COUPON_FILL
 
     for idx, col_name in enumerate(df.columns, start=1):
         col_letter = get_column_letter(idx)
@@ -1251,7 +1634,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "COUPONVALUE", "Описание": "Размер купонной выплаты."},
         {"Поле": "ACCRUEDINT", "Описание": "Накопленный купонный доход (НКД) на текущую дату."},
         {"Поле": "COUPONPERIOD", "Описание": "Период выплаты купона в днях."},
-        {"Поле": "COUPONPERCENT", "Описание": "Купонная ставка в процентах."},
+        {"Поле": "COUPONPERCENT", "Описание": "Купонная ставка в процентах. Если ячейка жёлтая, ставка рассчитана по формуле с analytics.dohod.ru (это приближённое значение)."},
         {"Поле": "PRIMARYBOARDID", "Описание": "Основной торговый режим/секция."},
         {"Поле": "PREVLEGALCLOSEPRICE", "Описание": "Предыдущая официальная цена закрытия."},
         {"Поле": "PREVPRICE", "Описание": "Предыдущая рыночная цена."},
@@ -1280,7 +1663,7 @@ def drop_deprecated_output_columns(rows: list[dict[str, Any]]) -> list[dict[str,
     return rows
 
 
-def save_excel(rows: list[dict[str, Any]]) -> None:
+def save_excel(rows: list[dict[str, Any]], calculated_coupon_cells: set[tuple[str, str]] | None = None) -> None:
     """Сохраняет итоговый набор в Excel."""
     logging.info("Этап 7/8: Подготовка итогового Excel...")
     df = pd.DataFrame(rows)
@@ -1348,6 +1731,9 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
         df = df[ordered_columns]
         df.attrs["group_separator_titles"] = separator_titles
 
+    if calculated_coupon_cells is not None:
+        df.attrs["calculated_coupon_cells"] = calculated_coupon_cells
+
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="MOEX_BONDS")
         apply_excel_formatting(writer, df)
@@ -1391,10 +1777,11 @@ def main() -> None:
     rows = enrich_with_issuer_names(rows)
     rows = filter_rows_by_bond_type(rows)
     rows = filter_rows_by_coupon_period(rows)
+    rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
     rows = drop_deprecated_output_columns(rows)
     save_cache(rows)
     save_raw(rows)
-    save_excel(rows)
+    save_excel(rows, calculated_coupon_cells)
 
     elapsed = time.perf_counter() - started_at
     logging.info("Готово. Всего облигаций: %s", len(rows))
