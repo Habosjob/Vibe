@@ -89,6 +89,7 @@ COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 6
 DOHOD_BOND_URL = "https://analytics.dohod.ru/bond/{isin}"
+CORPBONDS_BOND_URL = "https://corpbonds.ru/bond/{isin}"
 DOHOD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -106,6 +107,15 @@ INSTRID_TO_BOND_CLASS = {
     "EIOD": "Муниципальный/субфедеральный",
     "EIYO": "Иностранный",
     "EIUS": "Иностранный",
+}
+
+CORPBONDS_INDEX_ALIASES = {
+    "KC": "CBR_RATE",
+    "КС": "CBR_RATE",
+    "KEYRATE": "CBR_RATE",
+    "CBR_RATE": "CBR_RATE",
+    "RUONIA": "RUONIA",
+    "G_CURVE_RUS": "G_CURVE_RUS",
 }
 
 
@@ -662,6 +672,68 @@ def parse_dohod_formula(session: requests.Session, isin: str) -> tuple[str, str,
     return index_name, formula_text, description_text, spread, g_curve_years
 
 
+def fetch_corpbonds_page_html(session: requests.Session, isin: str) -> str:
+    """Возвращает HTML карточки облигации corpbonds.ru с повторами запроса."""
+    last_error: Exception | None = None
+    url = CORPBONDS_BOND_URL.format(isin=isin)
+
+    for attempt in range(1, DOHOD_REQUEST_RETRIES + 1):
+        try:
+            response = session.get(
+                url,
+                timeout=REQUEST_TIMEOUT,
+                headers={"User-Agent": DOHOD_USER_AGENT},
+            )
+            response.raise_for_status()
+            html = response.text or ""
+            if len(html) < 500:
+                raise ValueError(f"Пустой/слишком короткий HTML (длина={len(html)})")
+            return html
+        except Exception as exc:  # noqa: PERF203
+            last_error = exc
+            logging.warning("CORPBONDS: попытка %s/%s для %s не удалась: %s", attempt, DOHOD_REQUEST_RETRIES, isin, exc)
+            time.sleep(0.4 * attempt)
+
+    raise RuntimeError(f"Не удалось загрузить страницу CORPBONDS для {isin}: {last_error}")
+
+
+def parse_corpbonds_formula(session: requests.Session, isin: str) -> tuple[str, str, str, float, float]:
+    """Парсит формулу купона с corpbonds.ru, если ДОХОД не дал результата."""
+    html = fetch_corpbonds_page_html(session, isin)
+    soup = BeautifulSoup(html, "html.parser")
+
+    text_chunks: list[str] = []
+    for node in soup.find_all(["h1", "h2", "h3", "div", "span", "p", "td", "th", "li"]):
+        text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+        if text:
+            text_chunks.append(text)
+
+    full_text = " | ".join(text_chunks)
+    formula_match = re.search(
+        r"(?:∑|Σ|SUM)?\s*(KC|КС|KEYRATE|CBR_RATE|RUONIA|G_CURVE_RUS)\s*([+-])\s*(\d+[.,]?\d*)\s*%",
+        full_text,
+        flags=re.IGNORECASE,
+    )
+    if formula_match is None:
+        raise ValueError(f"Не удалось распознать формулу CORPBONDS для {isin}")
+
+    source_index = formula_match.group(1).upper()
+    index_name = CORPBONDS_INDEX_ALIASES.get(source_index, source_index)
+    operation = formula_match.group(2)
+    spread = float(formula_match.group(3).replace(",", "."))
+    if operation == "-":
+        spread *= -1
+
+    formula_text = re.sub(r"\s+", " ", formula_match.group(0)).strip()
+    g_curve_years = 7.0
+    if index_name == "G_CURVE_RUS":
+        years_match = re.search(r"(\d+[.,]?\d*)\s*(?:лет|года|год|y|yr)", full_text, flags=re.IGNORECASE)
+        if years_match:
+            g_curve_years = float(years_match.group(1).replace(",", "."))
+
+    return index_name, formula_text, "Источник corpbonds.ru", spread, g_curve_years
+
+
 def fetch_reference_index_values(session: requests.Session) -> dict[str, float]:
     """Собирает актуальные значения индексов: CBR_RATE, RUONIA, G_CURVE_RUS(7Y)."""
     index_values: dict[str, float] = {}
@@ -679,8 +751,8 @@ def fetch_reference_index_values(session: requests.Session) -> dict[str, float]:
 
 
 def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
-    """Считает COUPONPERCENT через формулу ДОХОД для бумаг с COUPONVALUE=0."""
-    logging.info("Этап 5.25/9: Расчёт COUPONPERCENT через ДОХОД для выпусков с нулевым купоном...")
+    """Считает COUPONPERCENT через формулы ДОХОД, затем fallback через corpbonds.ru."""
+    logging.info("Этап 5.25/9: Расчёт COUPONPERCENT через ДОХОД + fallback CORPBONDS для выпусков с нулевым купоном...")
     calculated_cells: set[tuple[str, str]] = set()
     cache = load_coupon_formula_cache()
     now = datetime.now()
@@ -748,29 +820,40 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
 
         formula_by_isin: dict[str, tuple[str, str, str, float, float]] = {}
 
-        def resolve_formula_job(job: tuple[str, str]) -> tuple[str, str, tuple[str, str, str, float, float] | None, str | None]:
+        def resolve_formula_job(job: tuple[str, str]) -> tuple[str, str, tuple[str, str, str, float, float] | None, str | None, str]:
             isin_job, secid_job = job
             with build_session() as local_session:
                 try:
                     parsed = parse_dohod_formula(local_session, isin_job)
-                    return isin_job, secid_job, parsed, None
-                except Exception as exc:
-                    return isin_job, secid_job, None, str(exc)
+                    return isin_job, secid_job, parsed, None, "dohod"
+                except Exception as dohod_exc:
+                    try:
+                        parsed = parse_corpbonds_formula(local_session, isin_job)
+                        return isin_job, secid_job, parsed, None, "corpbonds"
+                    except Exception as corpbonds_exc:
+                        error_text = f"dohod={dohod_exc}; corpbonds={corpbonds_exc}"
+                        return isin_job, secid_job, None, error_text, "none"
 
         if to_fetch:
-            logging.info("ДОХОД: нужно опросить формулы для %s выпусков (многопоточно, потоков=%s).", len(to_fetch), DOHOD_MAX_WORKERS)
+            logging.info(
+                "ДОХОД/CORPBONDS: нужно опросить формулы для %s выпусков (многопоточно, потоков=%s).",
+                len(to_fetch),
+                DOHOD_MAX_WORKERS,
+            )
 
             with ThreadPoolExecutor(max_workers=DOHOD_MAX_WORKERS) as executor:
                 futures = [executor.submit(resolve_formula_job, job) for job in to_fetch]
                 for processed, future in enumerate(as_completed(futures), start=1):
-                    isin_job, _secid_job, parsed, error_text = future.result()
+                    isin_job, _secid_job, parsed, error_text, source_name = future.result()
                     if parsed is not None:
                         formula_by_isin[isin_job] = parsed
+                        if source_name == "corpbonds":
+                            logging.info("CORPBONDS: формула для %s получена через fallback после ДОХОД.", isin_job)
                     else:
-                        logging.warning("ДОХОД: не удалось получить формулу для %s: %s", isin_job, error_text)
+                        logging.warning("ДОХОД/CORPBONDS: не удалось получить формулу для %s: %s", isin_job, error_text)
 
                     if processed % 25 == 0 or processed == len(futures):
-                        logging.info("ДОХОД: обработано формул %s/%s", processed, len(futures))
+                        logging.info("ДОХОД/CORPBONDS: обработано формул %s/%s", processed, len(futures))
 
         g_curve_cache: dict[float, float] = {}
 
@@ -836,7 +919,7 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
             }
 
     save_coupon_formula_cache(cache)
-    logging.info("COUPONPERCENT рассчитан через ДОХОД для %s выпусков.", len(calculated_cells))
+    logging.info("COUPONPERCENT рассчитан через ДОХОД/CORPBONDS для %s выпусков.", len(calculated_cells))
     return rows, calculated_cells
 
 
@@ -1634,7 +1717,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "COUPONVALUE", "Описание": "Размер купонной выплаты."},
         {"Поле": "ACCRUEDINT", "Описание": "Накопленный купонный доход (НКД) на текущую дату."},
         {"Поле": "COUPONPERIOD", "Описание": "Период выплаты купона в днях."},
-        {"Поле": "COUPONPERCENT", "Описание": "Купонная ставка в процентах. Если ячейка жёлтая, ставка рассчитана по формуле с analytics.dohod.ru (это приближённое значение)."},
+        {"Поле": "COUPONPERCENT", "Описание": "Купонная ставка в процентах. Если ячейка жёлтая, ставка рассчитана по формуле (analytics.dohod.ru и, при необходимости, fallback corpbonds.ru). Это приближённое значение."},
         {"Поле": "PRIMARYBOARDID", "Описание": "Основной торговый режим/секция."},
         {"Поле": "PREVLEGALCLOSEPRICE", "Описание": "Предыдущая официальная цена закрытия."},
         {"Поле": "PREVPRICE", "Описание": "Предыдущая рыночная цена."},
