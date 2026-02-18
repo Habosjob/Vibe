@@ -83,6 +83,7 @@ FIRST_COLUMN_NAME = "ISIN"
 GROUP_SEPARATOR_PREFIX = "GROUP_SEPARATOR__"
 QUALIFIED_INVESTOR_COLUMN_NAME = "QUALIFIED_INVESTOR"
 MATURITY_DATE_COLUMN_NAME = "MATDATE"
+TRADE_START_DATE_COLUMN_NAME = "ISSUEDATE"
 AMORTIZATION_FLAG_COLUMN_NAME = "HAS_AMORTIZATION"
 AMORTIZATION_START_DATE_COLUMN_NAME = "AMORTIZATION_START_DATE"
 ACCRUED_INT_COLUMN_NAME = "ACCRUEDINT"
@@ -1141,7 +1142,7 @@ def fetch_page(session: requests.Session, start: int) -> IssPage:
     """Запрашивает одну страницу облигаций с MOEX ISS."""
     params = {
         "iss.meta": "off",
-        "securities.columns": "SECID,SHORTNAME,ISIN,MATDATE,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE,ACCRUEDINT,SECTORID,INSTRID",
+        "securities.columns": "SECID,SHORTNAME,ISIN,ISSUEDATE,MATDATE,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE,ACCRUEDINT,SECTORID,INSTRID",
         "marketdata.columns": f"SECID,{TRADE_VOLUME_COLUMN_NAME},{TRADE_VALUE_COLUMN_NAME},NUMTRADES,{YIELD_COLUMN_NAME}",
         "start": start,
         "limit": PAGE_SIZE,
@@ -2098,6 +2099,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "PUT_CALL_OFFER_DATE", "Описание": "Ближайшая дата оферты (проверка через ДОХОД + Corpbonds, с fallback на MOEX)."},
         {"Поле": "HAS_AMORTIZATION", "Описание": "Есть ли у бумаги амортизация номинала: ✔ — да, ✖ — нет."},
         {"Поле": "AMORTIZATION_START_DATE", "Описание": "Дата начала амортизации (если есть)."},
+        {"Поле": "ISSUEDATE", "Описание": "Дата начала торгов по выпуску на MOEX (поле биржи ISSUEDATE)."},
         {"Поле": "MATDATE", "Описание": "Дата погашения облигации (когда эмитент должен вернуть номинал)."},
         {"Поле": "FACEVALUE", "Описание": "Номинал облигации."},
         {"Поле": "FACEUNIT", "Описание": "Валюта номинала (например, RUB)."},
@@ -2146,7 +2148,7 @@ def save_excel(rows: list[dict[str, Any]], calculated_coupon_cells: set[tuple[st
     if sort_columns:
         df = df.sort_values(by=sort_columns).reset_index(drop=True)
 
-    for date_col in [MATURITY_DATE_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]:
+    for date_col in [TRADE_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]:
         if date_col in df.columns:
             df[date_col] = df[date_col].map(format_date_ddmmyyyy)
 
@@ -2155,7 +2157,10 @@ def save_excel(rows: list[dict[str, Any]], calculated_coupon_cells: set[tuple[st
             ("Эмитент", [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, ISSUER_BOND_CLASS_COLUMN_NAME, "SHORTNAME"]),
             ("Квалификация и тип", [QUALIFIED_INVESTOR_COLUMN_NAME, BOND_TYPE_COLUMN_NAME]),
             ("Оферты", [HAS_PUT_CALL_OFFER_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]),
-            ("Погашение и амортизация", [AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME]),
+            (
+                "Торги, погашение и амортизация",
+                [TRADE_START_DATE_COLUMN_NAME, AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME],
+            ),
             ("Купоны", ["COUPONVALUE", ACCRUED_INT_COLUMN_NAME, "COUPONPERIOD", "COUPONPERCENT"]),
             (
                 "Рынок",
