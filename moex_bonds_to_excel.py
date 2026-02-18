@@ -64,6 +64,7 @@ HIDDEN_COLUMN_NAME = "SECID"
 ISSUER_COLUMN_NAME = "ISSUER_NAME"
 ISSUER_INN_COLUMN_NAME = "ISSUER_INN"
 ISSUER_SECTOR_COLUMN_NAME = "ISSUER_SECTOR"
+ISSUER_BOND_CLASS_COLUMN_NAME = "ISSUER_BOND_CLASS"
 FIRST_COLUMN_NAME = "ISIN"
 GROUP_SEPARATOR_PREFIX = "GROUP_SEPARATOR__"
 QUALIFIED_INVESTOR_COLUMN_NAME = "QUALIFIED_INVESTOR"
@@ -91,6 +92,19 @@ INSTRID_TO_ISSUER_SECTOR = {
     "EIYO": "Иностранный",
     "EIUS": "Иностранный",
 }
+
+ISSUER_SECTOR_KEYWORDS = {
+    "Банки и финансовые институты": ("БАНК", "ЛИЗИНГ", "ФИНАН", "МИКРОФИН", "ИНВЕСТ", "КРЕДИТ", "СТРАХ"),
+    "Нефтегаз и энергетика": ("НЕФТ", "ГАЗ", "ЭНЕРГ", "ГАЗПРОМ", "ЛУКОЙЛ", "РОСНЕФТ", "ТРАНСНЕФТ"),
+    "Металлургия и горнодобыча": ("МЕТАЛ", "ГОРНО", "РУСАЛ", "НОРИЛ", "АЛРОС"),
+    "Транспорт и логистика": ("ТРАНС", "АВИ", "ЖД", "РЖД", "ЛОГИСТ", "ПОРТ"),
+    "Строительство и девелопмент": ("СТРОЙ", "ДЕВЕЛОП", "НЕДВИЖ", "ПИК", "САМОЛЕТ", "ЭТАЛОН"),
+    "Машиностроение и промышленность": ("МАШ", "ЗАВОД", "ПРОМ", "ИНЖИНИР", "ПРИБОРО", "АВТО"),
+    "Связь и IT": ("ТЕЛЕКОМ", "СВЯЗ", "МТС", "МЕГАФОН", "IT", "ИНФОТЕХ", "ТЕХНОЛ"),
+    "Ритейл и потребсектор": ("РИТЕЙЛ", "МАГНИТ", "X5", "ЛЕНТА", "ДИКСИ", "ПРОДУКТ", "ТОРГОВ"),
+    "Государственный сектор": ("МИНИСТЕРСТ", "ФЕДЕРАЛ", "КАЗНА", "СУБЪЕКТ", "ОБЛАСТ", "РЕСПУБЛИК", "ГОРОД"),
+}
+
 
 
 @dataclass
@@ -664,8 +678,8 @@ def validate_rows(rows: list[dict[str, Any]]) -> None:
     )
 
 
-def resolve_issuer_sector(row: dict[str, Any]) -> str:
-    """Возвращает сектор эмитента с приоритетом по `SECTORID`, затем по `INSTRID`."""
+def resolve_issuer_bond_class(row: dict[str, Any]) -> str:
+    """Возвращает тип бумаги/рынка (государственный, корпоративный и т.д.)."""
     sector_id = str(row.get("SECTORID") or "").strip()
     if sector_id:
         return sector_id
@@ -675,6 +689,18 @@ def resolve_issuer_sector(row: dict[str, Any]) -> str:
         return INSTRID_TO_ISSUER_SECTOR.get(instr_id, f"INSTRID:{instr_id}")
 
     return "Не указан"
+
+def resolve_issuer_sector_by_name(issuer_name: str) -> str:
+    """Определяет сектор эмитента по названию компании (простая отраслевая классификация)."""
+    normalized = (issuer_name or "").upper()
+    if not normalized:
+        return "Не указан"
+
+    for sector_name, keywords in ISSUER_SECTOR_KEYWORDS.items():
+        if any(keyword in normalized for keyword in keywords):
+            return sector_name
+
+    return "Прочие отрасли"
 
 
 def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -687,6 +713,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             row[ISSUER_COLUMN_NAME] = ""
             row[ISSUER_INN_COLUMN_NAME] = ""
             row[ISSUER_SECTOR_COLUMN_NAME] = "Не указан"
+            row[ISSUER_BOND_CLASS_COLUMN_NAME] = "Не указан"
             row[QUALIFIED_INVESTOR_COLUMN_NAME] = "✖"
             row[BOND_TYPE_COLUMN_NAME] = "Не указан"
         return rows
@@ -824,7 +851,9 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         emitter_id = secid_to_emitter_id.get(secid)
         row[ISSUER_COLUMN_NAME] = emitter_cache.get(emitter_id) or ""
         row[ISSUER_INN_COLUMN_NAME] = emitter_inn_cache.get(emitter_id) or ""
-        row[ISSUER_SECTOR_COLUMN_NAME] = resolve_issuer_sector(row)
+        issuer_name = emitter_cache.get(emitter_id) or ""
+        row[ISSUER_SECTOR_COLUMN_NAME] = resolve_issuer_sector_by_name(issuer_name)
+        row[ISSUER_BOND_CLASS_COLUMN_NAME] = resolve_issuer_bond_class(row)
         row[QUALIFIED_INVESTOR_COLUMN_NAME] = secid_to_qualified_sign.get(secid, "✖")
         row[BOND_TYPE_COLUMN_NAME] = secid_to_bond_type.get(secid, "Не указан")
         row["EXCLUDE_BY_BOND_TYPE"] = bool(secid_to_is_structural.get(secid, False))
@@ -1231,7 +1260,8 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "SHORTNAME", "Описание": "Краткое название облигации."},
         {"Поле": "ISSUER_NAME", "Описание": "Наименование эмитента облигации (компании или организации, которая выпустила бумагу)."},
         {"Поле": "ISSUER_INN", "Описание": "ИНН эмитента для быстрой сверки компании в ваших внутренних системах и документах."},
-        {"Поле": "ISSUER_SECTOR", "Описание": "Сектор эмитента: сначала используется `SECTORID` (если MOEX его отдаёт), иначе берётся укрупнённая классификация по `INSTRID` (например: государственный, корпоративный, муниципальный, иностранный)."},
+        {"Поле": "ISSUER_SECTOR", "Описание": "Сектор эмитента по названию компании (например: банки и финансовые институты, машиностроение, нефтегаз)."},
+        {"Поле": "ISSUER_BOND_CLASS", "Описание": "Тип бумаги на рынке облигаций (например: государственный, корпоративный, муниципальный, иностранный)."},
         {"Поле": "QUALIFIED_INVESTOR", "Описание": "Показывает, предназначена ли облигация только для квалифицированных инвесторов: ✔ — да, ✖ — нет."},
         {"Поле": "BOND_TYPE", "Описание": "Тип облигации по купону (например: фиксированная, флоатер и т.д.)."},
         {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Есть ли у облигации Put/Call оферта: ✔ — есть, ✖ — нет."},
@@ -1283,7 +1313,7 @@ def save_excel(rows: list[dict[str, Any]]) -> None:
 
     if FIRST_COLUMN_NAME in df.columns:
         group_layout = [
-            ("Эмитент", [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, ISSUER_SECTOR_COLUMN_NAME, "SHORTNAME"]),
+            ("Эмитент", [ISSUER_COLUMN_NAME, ISSUER_INN_COLUMN_NAME, ISSUER_SECTOR_COLUMN_NAME, ISSUER_BOND_CLASS_COLUMN_NAME, "SHORTNAME"]),
             ("Квалификация и тип", [QUALIFIED_INVESTOR_COLUMN_NAME, BOND_TYPE_COLUMN_NAME]),
             ("Оферты", [HAS_PUT_CALL_OFFER_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]),
             ("Погашение и амортизация", [AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME]),
