@@ -32,6 +32,10 @@ BACKOFF_FACTOR = 1.2
 MAX_WORKERS = 10
 DOHOD_MAX_WORKERS = 8
 DOHOD_REQUEST_RETRIES = 3
+OFFER_CHECK_MAX_WORKERS = 24
+OFFER_CHECK_BATCH_SIZE = 120
+OFFER_CHECK_REQUEST_TIMEOUT = 8
+OFFER_CHECK_REQUEST_RETRIES = 2
 SECID_BATCH_SIZE = 50
 EMITTER_BATCH_SIZE = 80
 
@@ -667,6 +671,31 @@ def fetch_dohod_page_html(session: requests.Session, isin: str) -> str:
     raise RuntimeError(f"Не удалось загрузить страницу ДОХОД для {isin}: {last_error}")
 
 
+def fetch_dohod_offer_page_html(session: requests.Session, isin: str) -> str:
+    """Быстрый запрос страницы ДОХОД для проверки оферт (укороченные таймауты/ретраи)."""
+    last_error: Exception | None = None
+    url = DOHOD_BOND_URL.format(isin=isin)
+
+    for attempt in range(1, OFFER_CHECK_REQUEST_RETRIES + 1):
+        try:
+            response = session.get(
+                url,
+                timeout=OFFER_CHECK_REQUEST_TIMEOUT,
+                headers={"User-Agent": DOHOD_USER_AGENT},
+            )
+            response.raise_for_status()
+            html = response.text or ""
+            if len(html) < 500:
+                raise ValueError(f"Пустой/слишком короткий HTML (длина={len(html)})")
+            return html
+        except Exception as exc:  # noqa: PERF203
+            last_error = exc
+            if attempt < OFFER_CHECK_REQUEST_RETRIES:
+                time.sleep(0.25 * attempt)
+
+    raise RuntimeError(f"Не удалось быстро загрузить страницу ДОХОД для {isin}: {last_error}")
+
+
 def parse_dohod_formula(session: requests.Session, isin: str) -> tuple[str, str, str, float, float]:
     """Парсит формулу с analytics.dohod.ru: индекс, сдвиг, описание и срок G-curve (если нужен)."""
     html = fetch_dohod_page_html(session, isin)
@@ -698,10 +727,10 @@ def parse_dohod_formula(session: requests.Session, isin: str) -> tuple[str, str,
     return index_name, formula_text, description_text, spread, g_curve_years
 
 
-def fetch_corpbonds_page_html(session: requests.Session, isin: str) -> str:
+def fetch_corpbonds_page_html(session: requests.Session, identifier: str) -> str:
     """Возвращает HTML карточки облигации corpbonds.ru с повторами запроса."""
     last_error: Exception | None = None
-    url = CORPBONDS_BOND_URL.format(isin=isin)
+    url = CORPBONDS_BOND_URL.format(isin=identifier)
 
     for attempt in range(1, DOHOD_REQUEST_RETRIES + 1):
         try:
@@ -718,12 +747,40 @@ def fetch_corpbonds_page_html(session: requests.Session, isin: str) -> str:
         except Exception as exc:  # noqa: PERF203
             last_error = exc
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            logging.warning("CORPBONDS: попытка %s/%s для %s не удалась: %s", attempt, DOHOD_REQUEST_RETRIES, isin, exc)
+            logging.warning("CORPBONDS: попытка %s/%s для %s не удалась: %s", attempt, DOHOD_REQUEST_RETRIES, identifier, exc)
             if status_code == 404:
                 break
             time.sleep(0.4 * attempt)
 
-    raise RuntimeError(f"Не удалось загрузить страницу CORPBONDS для {isin}: {last_error}")
+    raise RuntimeError(f"Не удалось загрузить страницу CORPBONDS для {identifier}: {last_error}")
+
+
+def fetch_corpbonds_offer_page_html(session: requests.Session, identifier: str) -> str:
+    """Быстрый запрос страницы Corpbonds для проверки оферт."""
+    last_error: Exception | None = None
+    url = CORPBONDS_BOND_URL.format(isin=identifier)
+
+    for attempt in range(1, OFFER_CHECK_REQUEST_RETRIES + 1):
+        try:
+            response = session.get(
+                url,
+                timeout=OFFER_CHECK_REQUEST_TIMEOUT,
+                headers={"User-Agent": DOHOD_USER_AGENT},
+            )
+            response.raise_for_status()
+            html = response.text or ""
+            if len(html) < 500:
+                raise ValueError(f"Пустой/слишком короткий HTML (длина={len(html)})")
+            return html
+        except Exception as exc:  # noqa: PERF203
+            last_error = exc
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code == 404:
+                break
+            if attempt < OFFER_CHECK_REQUEST_RETRIES:
+                time.sleep(0.25 * attempt)
+
+    raise RuntimeError(f"Не удалось быстро загрузить страницу CORPBONDS для {identifier}: {last_error}")
 
 
 def parse_corpbonds_formula(session: requests.Session, isin: str) -> tuple[str, str, str, float, float]:
@@ -791,7 +848,7 @@ def extract_offer_date_from_text(text: str) -> str | None:
 
 def parse_dohod_offer_metrics(session: requests.Session, isin: str) -> tuple[str, str | None]:
     """Парсит тип и дату оферты со страницы ДОХОД."""
-    html = fetch_dohod_page_html(session, isin)
+    html = fetch_dohod_offer_page_html(session, isin)
     soup = BeautifulSoup(html, "html.parser")
     full_text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
 
@@ -819,30 +876,54 @@ def parse_dohod_offer_metrics(session: requests.Session, isin: str) -> tuple[str
     return offer_type, offer_date
 
 
-def parse_corpbonds_offer_metrics(session: requests.Session, isin: str) -> tuple[str, str | None]:
-    """Парсит тип и дату оферты со страницы Corpbonds."""
-    html = fetch_corpbonds_page_html(session, isin)
-    soup = BeautifulSoup(html, "html.parser")
+def parse_corpbonds_offer_metrics(session: requests.Session, isin: str, secid: str | None = None) -> tuple[str, str | None, str]:
+    """Парсит тип и дату оферты со страницы Corpbonds (с fallback: ISIN -> SECID)."""
 
-    full_text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
-    offer_date = None
-    date_match = re.search(r"Дата\s+ближайшей\s+оферты\s*[:\-]?\s*([^|]+)", full_text, flags=re.IGNORECASE)
-    if date_match:
-        offer_date = extract_offer_date_from_text(date_match.group(1))
+    def parse_html(html: str) -> tuple[str, str | None]:
+        soup = BeautifulSoup(html, "html.parser")
+        lines = [re.sub(r"\s+", " ", line).strip() for line in soup.get_text("\n", strip=True).split("\n")]
+        lines = [line for line in lines if line]
+        full_text = " | ".join(lines)
 
-    offer_type = "✖"
-    call_match = re.search(r"Наличие\s+call-опциона\s*[:\-]?\s*([^|]+)", full_text, flags=re.IGNORECASE)
-    if call_match:
-        call_value = call_match.group(1).strip().lower()
-        if "да" in call_value:
-            offer_type = "Call"
+        offer_date = None
+        for idx, line in enumerate(lines):
+            if "дата ближайшей оферты" not in line.lower():
+                continue
+            offer_date = extract_offer_date_from_text(line)
+            if offer_date is None and idx + 1 < len(lines):
+                offer_date = extract_offer_date_from_text(lines[idx + 1])
+            if offer_date:
+                break
 
-    if offer_type == "✖" and re.search(r"\bput\b|право\s+продать", full_text, flags=re.IGNORECASE):
-        offer_type = "PUT"
-    if offer_type == "✖" and offer_date:
-        offer_type = "PUT"
+        offer_type = "✖"
+        for idx, line in enumerate(lines):
+            if "наличие call-опциона" not in line.lower():
+                continue
+            tail = re.split(r"наличие\s+call-опциона", line, flags=re.IGNORECASE, maxsplit=1)
+            call_value = tail[1] if len(tail) > 1 else ""
+            if not call_value and idx + 1 < len(lines):
+                call_value = lines[idx + 1]
+            if re.search(r"\bда\b", call_value.lower()):
+                offer_type = "Call"
+            break
 
-    return offer_type, offer_date
+        if offer_type == "✖" and re.search(r"\bput\b|право\s+продать", full_text, flags=re.IGNORECASE):
+            offer_type = "PUT"
+        if offer_type == "✖" and offer_date:
+            offer_type = "PUT"
+
+        return offer_type, offer_date
+
+    try:
+        return (*parse_html(fetch_corpbonds_offer_page_html(session, isin)), "isin")
+    except Exception as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        is_not_found = status_code == 404 or "404" in str(exc)
+        if not is_not_found or not secid:
+            raise
+
+    logging.info("CORPBONDS: для %s не найдено по ISIN, пробуем SECID=%s.", isin, secid)
+    return (*parse_html(fetch_corpbonds_offer_page_html(session, secid)), "secid")
 
 
 def merge_offer_metrics(dohod_type: str, dohod_date: str | None, corpbonds_type: str, corpbonds_date: str | None) -> tuple[str, str | None]:
@@ -864,7 +945,7 @@ def merge_offer_metrics(dohod_type: str, dohod_date: str | None, corpbonds_type:
     return offer_type, None
 
 
-def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: str) -> tuple[str, str | None, str]:
+def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: str, secid: str | None = None) -> tuple[str, str | None, str]:
     """Проверяет оферту через ДОХОД и Corpbonds и возвращает объединённый результат."""
     dohod_type = "✖"
     dohod_date = None
@@ -873,6 +954,7 @@ def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: s
 
     dohod_error = None
     corpbonds_error = None
+    corpbonds_lookup = "none"
 
     try:
         dohod_type, dohod_date = parse_dohod_offer_metrics(session, isin)
@@ -881,7 +963,7 @@ def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: s
         logging.warning("Не удалось проверить оферту в ДОХОД для %s: %s", isin, exc)
 
     try:
-        corpbonds_type, corpbonds_date = parse_corpbonds_offer_metrics(session, isin)
+        corpbonds_type, corpbonds_date, corpbonds_lookup = parse_corpbonds_offer_metrics(session, isin, secid)
     except Exception as exc:
         corpbonds_error = str(exc)
         logging.warning("Не удалось проверить оферту в Corpbonds для %s: %s", isin, exc)
@@ -892,7 +974,7 @@ def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: s
     if dohod_error is None:
         sources.append("dohod")
     if corpbonds_error is None:
-        sources.append("corpbonds")
+        sources.append(f"corpbonds:{corpbonds_lookup}")
     source_label = "+".join(sources) if sources else "none"
 
     return offer_type, offer_date, source_label
@@ -1560,15 +1642,27 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
         return now - checked_at > timedelta(days=OFFER_VERIFICATION_CACHE_TTL_DAYS)
 
-    isins_for_offer_refresh = sorted({str(row.get("ISIN")) for row in rows if row.get("ISIN") and needs_offer_refresh(str(row.get("ISIN")))})
-    offer_batches = chunked(isins_for_offer_refresh, SECID_BATCH_SIZE)
+    offer_jobs = [
+        (str(row.get("ISIN")), str(row.get("SECID") or ""))
+        for row in rows
+        if row.get("ISIN") and needs_offer_refresh(str(row.get("ISIN")))
+    ]
+    seen_isins: set[str] = set()
+    unique_offer_jobs: list[tuple[str, str]] = []
+    for isin, secid in offer_jobs:
+        if isin in seen_isins:
+            continue
+        seen_isins.add(isin)
+        unique_offer_jobs.append((isin, secid))
 
-    def resolve_offer_batch(batch: list[str]) -> dict[str, dict[str, Any]]:
+    offer_batches = chunked(unique_offer_jobs, OFFER_CHECK_BATCH_SIZE)
+
+    def resolve_offer_batch(batch: list[tuple[str, str]]) -> dict[str, dict[str, Any]]:
         resolved: dict[str, dict[str, Any]] = {}
         with build_session() as local_session:
-            for isin in batch:
+            for isin, secid in batch:
                 try:
-                    offer_type, offer_date, source = fetch_offer_metrics_from_external_sources(local_session, isin)
+                    offer_type, offer_date, source = fetch_offer_metrics_from_external_sources(local_session, isin, secid or None)
                     resolved[isin] = {
                         HAS_PUT_CALL_OFFER_COLUMN_NAME: offer_type,
                         PUT_CALL_OFFER_DATE_COLUMN_NAME: offer_date or "",
@@ -1586,7 +1680,7 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             OFFER_VERIFICATION_CACHE_TTL_DAYS,
         )
 
-    with ThreadPoolExecutor(max_workers=DOHOD_MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=OFFER_CHECK_MAX_WORKERS) as executor:
         futures = [executor.submit(resolve_offer_batch, batch) for batch in offer_batches]
         for processed, future in enumerate(as_completed(futures), start=1):
             offer_cache.update(future.result())
