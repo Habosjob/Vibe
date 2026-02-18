@@ -33,8 +33,9 @@ BACKOFF_FACTOR = 1.2
 MAX_WORKERS = 10
 DOHOD_MAX_WORKERS = 8
 DOHOD_REQUEST_RETRIES = 3
-OFFER_CHECK_MAX_WORKERS = 24
+OFFER_CHECK_MAX_WORKERS = 12
 OFFER_CHECK_BATCH_SIZE = 120
+OFFER_SOURCE_MAX_WORKERS = 6
 OFFER_CHECK_REQUEST_TIMEOUT = 8
 OFFER_CHECK_REQUEST_RETRIES = 2
 OFFER_RECHECK_DAILY_MIN_JOBS = 300
@@ -947,42 +948,6 @@ def merge_offer_metrics(dohod_type: str, dohod_date: str | None, corpbonds_type:
     return offer_type, None
 
 
-def fetch_offer_metrics_from_external_sources(session: requests.Session, isin: str, secid: str | None = None) -> tuple[str, str | None, str]:
-    """Проверяет оферту через ДОХОД и Corpbonds и возвращает объединённый результат."""
-    dohod_type = "✖"
-    dohod_date = None
-    corpbonds_type = "✖"
-    corpbonds_date = None
-
-    dohod_error = None
-    corpbonds_error = None
-    corpbonds_lookup = "none"
-
-    try:
-        dohod_type, dohod_date = parse_dohod_offer_metrics(session, isin)
-    except Exception as exc:
-        dohod_error = str(exc)
-
-    try:
-        corpbonds_type, corpbonds_date, corpbonds_lookup = parse_corpbonds_offer_metrics(session, isin, secid)
-    except Exception as exc:
-        corpbonds_error = str(exc)
-
-    offer_type, offer_date = merge_offer_metrics(dohod_type, dohod_date, corpbonds_type, corpbonds_date)
-
-    sources: list[str] = []
-    if dohod_error is None:
-        sources.append("dohod")
-    if corpbonds_error is None:
-        sources.append(f"corpbonds:{corpbonds_lookup}")
-    source_label = "+".join(sources) if sources else "none"
-
-    if dohod_error is not None and corpbonds_error is not None:
-        raise RuntimeError(f"Не удалось проверить оферту в ДОХОД и Corpbonds для {isin}: dohod={dohod_error}; corpbonds={corpbonds_error}")
-
-    return offer_type, offer_date, source_label
-
-
 def fetch_reference_index_values(session: requests.Session) -> dict[str, float]:
     """Собирает актуальные значения индексов: CBR_RATE, RUONIA, G_CURVE_RUS(7Y)."""
     index_values: dict[str, float] = {}
@@ -1615,8 +1580,12 @@ def select_offer_jobs_for_refresh(rows: list[dict[str, Any]], offer_cache: dict[
     return selected
 
 
-def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Добавляет НКД, амортизацию и проверку Put/Call оферт с кэшированием."""
+def enrich_with_daily_metrics(
+    rows: list[dict[str, Any]],
+    include_daily_metrics: bool = True,
+    include_external_offers: bool = True,
+) -> list[dict[str, Any]]:
+    """Добавляет НКД/амортизацию и при необходимости внешнюю проверку Put/Call оферт с кэшированием."""
     logging.info("Этап 3/8: Обогащение суточными метриками (амортизация, оферты и НКД)...")
     secids = sorted({str(row.get("SECID")) for row in rows if row.get("SECID")})
     if not secids:
@@ -1650,7 +1619,7 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
 
         return now - updated_at > timedelta(hours=SECURITY_DAILY_CACHE_TTL_HOURS)
 
-    missing_secids = [secid for secid in secids if needs_daily_refresh(secid)]
+    missing_secids = [secid for secid in secids if needs_daily_refresh(secid)] if include_daily_metrics else []
     batches = chunked(missing_secids, SECID_BATCH_SIZE)
 
     def resolve_daily_batch(batch: list[str]) -> dict[str, dict[str, Any]]:
@@ -1681,50 +1650,101 @@ def enrich_with_daily_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     if batches:
         logging.info("Суточные метрики: нужно обработать %s пакетов SECID.", len(batches))
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(resolve_daily_batch, batch) for batch in batches]
-        for processed, future in enumerate(as_completed(futures), start=1):
-            daily_cache.update(future.result())
-            if processed % 5 == 0 or processed == len(batches):
-                logging.info("Суточные пакеты: %s/%s.", processed, len(batches))
+    if include_daily_metrics:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [executor.submit(resolve_daily_batch, batch) for batch in batches]
+            for processed, future in enumerate(as_completed(futures), start=1):
+                daily_cache.update(future.result())
+                if processed % 5 == 0 or processed == len(batches):
+                    logging.info("Суточные пакеты: %s/%s.", processed, len(batches))
 
-    save_daily_security_cache(daily_cache)
+        save_daily_security_cache(daily_cache)
 
-    offer_jobs = select_offer_jobs_for_refresh(rows, offer_cache, now)
+    if include_external_offers:
+        offer_jobs = select_offer_jobs_for_refresh(rows, offer_cache, now)
+    else:
+        offer_jobs = []
     offer_batches = chunked(offer_jobs, OFFER_CHECK_BATCH_SIZE)
-
-    def resolve_offer_batch(batch: list[tuple[str, str]]) -> dict[str, dict[str, Any]]:
-        resolved: dict[str, dict[str, Any]] = {}
-        with build_session() as local_session:
-            for isin, secid in batch:
-                try:
-                    offer_type, offer_date, source = fetch_offer_metrics_from_external_sources(local_session, isin, secid or None)
-                    resolved[isin] = {
-                        HAS_PUT_CALL_OFFER_COLUMN_NAME: offer_type,
-                        PUT_CALL_OFFER_DATE_COLUMN_NAME: offer_date or "",
-                        "source": source,
-                        "checked_at": datetime.now().isoformat(timespec="seconds"),
-                    }
-                except Exception as exc:
-                    logging.warning("Не удалось проверить оферту по внешним источникам для %s: %s", isin, exc)
-        return resolved
 
     if offer_batches:
         logging.info(
-            "Проверка оферт через ДОХОД и Corpbonds: нужно обработать %s ISIN (%s пакетов, кэш %s дней).",
+            "Проверка оферт через ДОХОД и Corpbonds: нужно обработать %s ISIN (%s пакетов, кэш %s дней, потоков=%s).",
             len(offer_jobs),
             len(offer_batches),
             OFFER_VERIFICATION_CACHE_TTL_DAYS,
+            OFFER_SOURCE_MAX_WORKERS,
         )
 
-    with ThreadPoolExecutor(max_workers=OFFER_CHECK_MAX_WORKERS) as executor:
-        futures = [executor.submit(resolve_offer_batch, batch) for batch in offer_batches]
-        for processed, future in enumerate(as_completed(futures), start=1):
-            offer_cache.update(future.result())
-            if processed % 5 == 0 or processed == len(offer_batches):
-                logging.info("Пакеты проверки оферт: %s/%s.", processed, len(offer_batches))
+    if offer_jobs:
+        source_results: dict[str, dict[str, dict[str, Any]]] = {"dohod": {}, "corpbonds": {}}
 
-    save_offer_verification_cache(offer_cache)
+        def resolve_offer_source_job(source_name: str, isin: str, secid: str) -> tuple[str, str, dict[str, Any] | None, str | None]:
+            try:
+                with build_session() as local_session:
+                    if source_name == "dohod":
+                        offer_type, offer_date = parse_dohod_offer_metrics(local_session, isin)
+                        return source_name, isin, {
+                            HAS_PUT_CALL_OFFER_COLUMN_NAME: normalize_offer_type(offer_type),
+                            PUT_CALL_OFFER_DATE_COLUMN_NAME: offer_date or "",
+                            "lookup": "isin",
+                        }, None
+
+                    corpbonds_type, corpbonds_date, corpbonds_lookup = parse_corpbonds_offer_metrics(local_session, isin, secid or None)
+                    return source_name, isin, {
+                        HAS_PUT_CALL_OFFER_COLUMN_NAME: normalize_offer_type(corpbonds_type),
+                        PUT_CALL_OFFER_DATE_COLUMN_NAME: corpbonds_date or "",
+                        "lookup": corpbonds_lookup,
+                    }, None
+            except Exception as exc:
+                return source_name, isin, None, str(exc)
+
+        with ThreadPoolExecutor(max_workers=OFFER_SOURCE_MAX_WORKERS) as executor:
+            futures = []
+            for isin, secid in offer_jobs:
+                futures.append(executor.submit(resolve_offer_source_job, "dohod", isin, secid or ""))
+                futures.append(executor.submit(resolve_offer_source_job, "corpbonds", isin, secid or ""))
+
+            for processed, future in enumerate(as_completed(futures), start=1):
+                source_name, isin, payload, error_text = future.result()
+                if payload is not None:
+                    source_results[source_name][isin] = payload
+                elif processed % 30 == 0:
+                    logging.info("Проверка оферт: временная ошибка источника %s по %s: %s", source_name, isin, error_text)
+
+                if processed % 50 == 0 or processed == len(futures):
+                    logging.info("Проверка оферт: обработано задач %s/%s.", processed, len(futures))
+
+        checked_at = datetime.now().isoformat(timespec="seconds")
+        for isin, secid in offer_jobs:
+            dohod_row = source_results["dohod"].get(isin)
+            corpbonds_row = source_results["corpbonds"].get(isin)
+
+            if dohod_row is None and corpbonds_row is None:
+                logging.warning("Не удалось проверить оферту по внешним источникам для %s (оба источника недоступны).", isin)
+                continue
+
+            dohod_type = normalize_offer_type(str((dohod_row or {}).get(HAS_PUT_CALL_OFFER_COLUMN_NAME, "✖")))
+            dohod_date = str((dohod_row or {}).get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "") or None
+            corpbonds_type = normalize_offer_type(str((corpbonds_row or {}).get(HAS_PUT_CALL_OFFER_COLUMN_NAME, "✖")))
+            corpbonds_date = str((corpbonds_row or {}).get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "") or None
+            merged_type, merged_date = merge_offer_metrics(dohod_type, dohod_date, corpbonds_type, corpbonds_date)
+
+            source_parts: list[str] = []
+            if dohod_row is not None:
+                source_parts.append("dohod")
+            if corpbonds_row is not None:
+                lookup = str(corpbonds_row.get("lookup") or "isin")
+                source_parts.append(f"corpbonds:{lookup}")
+
+            offer_cache[isin] = {
+                HAS_PUT_CALL_OFFER_COLUMN_NAME: merged_type,
+                PUT_CALL_OFFER_DATE_COLUMN_NAME: merged_date or "",
+                "source": "+".join(source_parts) if source_parts else "none",
+                "checked_at": checked_at,
+            }
+
+    if include_external_offers:
+        save_offer_verification_cache(offer_cache)
 
     for row in rows:
         secid = str(row.get("SECID", ""))
@@ -2219,15 +2239,23 @@ def main() -> None:
             raise
         logging.warning("Используем резервный кэш из-за недоступности API.")
 
+    # 1) Базовый сбор и первичная фильтрация по данным MOEX
     rows = filter_rows_by_maturity(rows)
-    rows = enrich_with_daily_metrics(rows)
+    rows = enrich_with_daily_metrics(rows, include_daily_metrics=True, include_external_offers=False)
     rows = filter_rows_by_amortization_timing(rows)
     rows = filter_rows_by_offer_date(rows)
-    validate_rows(rows)
+
+    # 2) Обогащение из альтернативных источников (после первичной фильтрации)
+    rows = enrich_with_daily_metrics(rows, include_daily_metrics=False, include_external_offers=True)
     rows = enrich_with_issuer_names(rows)
     rows = filter_rows_by_bond_type(rows)
     rows = filter_rows_by_coupon_period(rows)
     rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
+
+    # 3) Повторная фильтрация после обогащения новыми данными
+    rows = filter_rows_by_offer_date(rows)
+    rows = filter_rows_by_amortization_timing(rows)
+    validate_rows(rows)
     rows = drop_deprecated_output_columns(rows)
     save_cache(rows)
     save_raw(rows)
