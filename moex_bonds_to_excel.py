@@ -59,6 +59,8 @@ REMOVED_COLUMNS = {
     "EXCLUDE_BY_BOND_TYPE",
     "BOND_TYPE_EXCLUDE_REASON",
 }
+
+DEPRECATED_OUTPUT_COLUMNS = {"ISSUER_BOND_CLASS", "ISSUER_SECTOR", "SECTORID", "INSTRID"}
 # SECID нужен для технической работы, но в Excel должен быть скрыт
 HIDDEN_COLUMN_NAME = "SECID"
 ISSUER_COLUMN_NAME = "ISSUER_NAME"
@@ -1266,6 +1268,14 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         info_ws.column_dimensions[col_letter].width = min(max_len + 2, 80)
 
 
+def drop_deprecated_output_columns(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Удаляет устаревшие поля из строк, чтобы старый кэш не возвращал удалённые колонки в Excel."""
+    for row in rows:
+        for old_col in DEPRECATED_OUTPUT_COLUMNS:
+            row.pop(old_col, None)
+    return rows
+
+
 def save_excel(rows: list[dict[str, Any]]) -> None:
     """Сохраняет итоговый набор в Excel."""
     logging.info("Этап 7/8: Подготовка итогового Excel...")
@@ -1376,6 +1386,7 @@ def main() -> None:
     rows = enrich_with_issuer_names(rows)
     rows = filter_rows_by_bond_type(rows)
     rows = filter_rows_by_coupon_period(rows)
+    rows = drop_deprecated_output_columns(rows)
     save_cache(rows)
     save_raw(rows)
     save_excel(rows)
