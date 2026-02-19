@@ -1,5 +1,9 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+import moex_bonds_to_excel as script
 from moex_bonds_to_excel import normalize_coupon_formula_source, normalize_offer_type, parse_offer_metrics, validate_rows
 
 
@@ -53,6 +57,20 @@ class OfferParsingTests(unittest.TestCase):
         self.assertIn("бумаг с офертами=2", summary)
         self.assertIn("с пустой датой оферты=1", summary)
         self.assertIn("оферта совпадает с датой погашения=1", summary)
+
+    def test_load_offer_verification_cache_clears_old_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "offer_verification_cache.json"
+            cache_path.write_text(
+                '{"schema_version": 2, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
+                encoding="utf-8",
+            )
+
+            with patch.object(script, "OFFER_VERIFICATION_CACHE_FILE", cache_path):
+                rows = script.load_offer_verification_cache()
+
+            self.assertEqual(rows, {})
+            self.assertFalse(cache_path.exists())
 
 
 if __name__ == "__main__":
