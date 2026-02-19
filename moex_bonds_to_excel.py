@@ -1836,6 +1836,9 @@ def enrich_with_daily_metrics(
         else:
             put_call_offer_date = ""
 
+        if has_put_call_offer in {"PUT", "Call"} and not put_call_offer_date:
+            has_put_call_offer = "✖"
+
         maturity_date = str(row.get(MATURITY_DATE_COLUMN_NAME) or "")
         has_put_call_offer = "✔" if put_call_offer_date else "✖"
         if has_put_call_offer == "✔" and maturity_date and put_call_offer_date == maturity_date:
