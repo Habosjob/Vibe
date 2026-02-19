@@ -44,6 +44,7 @@
   - `Купоны`: `COUPONVALUE`, `ACCRUEDINT`, `COUPONPERIOD`, `COUPONPERCENT`, `COUPON_FORMULA_SOURCE`.
   - `Рынок`: `FACEVALUE`, `FACEUNIT`, `PRIMARYBOARDID`, `PREVLEGALCLOSEPRICE`, `PREVPRICE`, `VOLTODAY`, `VALTODAY`, `NUMTRADES`, `YIELD`.
 - `COUPON_FORMULA_SOURCE` — источник формулы для расчётного `COUPONPERCENT` (`DOHOD` или `CORPBONDS`).
+- Важная защита от ложных оферт: если дата оферты совпадает с датой погашения (`MATDATE`), такая запись автоматически очищается как не-оферта.
 - Расчётные значения `COUPONPERCENT` подсвечиваются жёлтым.
 - `SECID` скрыт (для технических связок).
 

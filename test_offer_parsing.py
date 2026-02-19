@@ -4,7 +4,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import moex_bonds_to_excel as script
-from moex_bonds_to_excel import normalize_coupon_formula_source, normalize_offer_type, parse_offer_metrics, validate_rows
+from moex_bonds_to_excel import (
+    merge_offer_metrics,
+    normalize_coupon_formula_source,
+    normalize_offer_type,
+    parse_dohod_offer_metrics,
+    parse_offer_metrics,
+    validate_rows,
+)
 
 
 class OfferParsingTests(unittest.TestCase):
@@ -58,11 +65,30 @@ class OfferParsingTests(unittest.TestCase):
         self.assertIn("с пустой датой оферты=1", summary)
         self.assertIn("оферта совпадает с датой погашения=1", summary)
 
+
+    def test_merge_offer_metrics_does_not_convert_date_without_type_to_put(self) -> None:
+        offer_type, offer_date = merge_offer_metrics("✖", "2031-02-24", "✖", None)
+        self.assertEqual(offer_type, "✖")
+        self.assertIsNone(offer_date)
+
+    def test_parse_dohod_offer_metrics_ignores_ytm_date_without_offer_label(self) -> None:
+        html = """
+        <html><body>
+        <div>Событие в ближ. дату: Погашение</div>
+        <div>Дата, к которой рассчитана YTM: 24.02.2031</div>
+        </body></html>
+        """
+        with patch.object(script, "fetch_dohod_offer_page_html", return_value=html):
+            offer_type, offer_date = parse_dohod_offer_metrics(session=None, isin="RU000TEST")
+
+        self.assertEqual(offer_type, "✖")
+        self.assertIsNone(offer_date)
+
     def test_load_offer_verification_cache_clears_old_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "offer_verification_cache.json"
             cache_path.write_text(
-                '{"schema_version": 2, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
+                '{"schema_version": 3, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
                 encoding="utf-8",
             )
 

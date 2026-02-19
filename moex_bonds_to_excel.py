@@ -95,7 +95,7 @@ PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 COUPON_FORMULA_SOURCE_COLUMN_NAME = "COUPON_FORMULA_SOURCE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 OFFER_VERIFICATION_CACHE_TTL_DAYS = 7
-OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 3
+OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 4
 COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
@@ -878,8 +878,6 @@ def parse_dohod_offer_metrics(session: requests.Session, isin: str) -> tuple[str
     offer_date = None
     for label in (
         "Дата ближайшей оферты",
-        "Дата, к которой рассчит. YTM",
-        "Дата, к которой рассчитана YTM",
     ):
         section_match = re.search(rf"{label}\s*[:\-]?\s*([^|]+)", full_text, flags=re.IGNORECASE)
         if not section_match:
@@ -887,9 +885,6 @@ def parse_dohod_offer_metrics(session: requests.Session, isin: str) -> tuple[str
         offer_date = extract_offer_date_from_text(section_match.group(1))
         if offer_date:
             break
-
-    if offer_type == "✖" and offer_date:
-        offer_type = "PUT"
 
     return offer_type, offer_date
 
@@ -927,8 +922,6 @@ def parse_corpbonds_offer_metrics(session: requests.Session, isin: str, secid: s
 
         if offer_type == "✖" and re.search(r"\bput\b|право\s+продать", full_text, flags=re.IGNORECASE):
             offer_type = "PUT"
-        if offer_type == "✖" and offer_date:
-            offer_type = "PUT"
 
         return offer_type, offer_date
 
@@ -953,11 +946,12 @@ def merge_offer_metrics(dohod_type: str, dohod_date: str | None, corpbonds_type:
     elif dohod_type == "Call" or corpbonds_type == "Call":
         offer_type = "Call"
 
+    if offer_type == "✖":
+        return "✖", None
+
     candidate_dates = [date for date in [dohod_date, corpbonds_date] if parse_date_safe(date)]
     if candidate_dates:
         nearest = min(candidate_dates, key=lambda value: parse_date_safe(value) or datetime.max)
-        if offer_type == "✖":
-            offer_type = "PUT"
         return offer_type, nearest
 
     return offer_type, None
@@ -1830,6 +1824,10 @@ def enrich_with_daily_metrics(
             put_call_offer_date = moex_offer_date
 
         maturity_date = str(row.get(MATURITY_DATE_COLUMN_NAME) or "")
+        if has_put_call_offer in {"PUT", "Call"} and put_call_offer_date and maturity_date and put_call_offer_date == maturity_date:
+            has_put_call_offer = "✖"
+            put_call_offer_date = ""
+
         if has_amortization == "✔" and maturity_date and amortization_start_date == maturity_date:
             has_amortization = "✖"
             amortization_start_date = ""
