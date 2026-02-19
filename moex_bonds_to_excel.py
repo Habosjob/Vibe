@@ -31,8 +31,6 @@ CACHE_TTL_HOURS = 6
 MAX_RETRIES = 4
 BACKOFF_FACTOR = 1.2
 MAX_WORKERS = 10
-TRADE_START_MAX_WORKERS = 10
-TRADE_START_PROGRESS_SAVE_EVERY = 25
 DOHOD_MAX_WORKERS = 10
 DOHOD_REQUEST_RETRIES = 3
 OFFER_CHECK_MAX_WORKERS = 10
@@ -58,8 +56,6 @@ ISSUER_CHECKPOINT_FILE = CACHE_DIR / "issuer_enrichment_checkpoint.json"
 DAILY_CACHE_FILE = CACHE_DIR / "daily_security_metrics_cache.json"
 OFFER_VERIFICATION_CACHE_FILE = CACHE_DIR / "offer_verification_cache.json"
 COUPON_FORMULA_CACHE_FILE = CACHE_DIR / "coupon_formula_cache.json"
-TRADE_START_DATE_CACHE_FILE = CACHE_DIR / "trade_start_date_cache.json"
-TRADE_START_DATE_CHECKPOINT_FILE = CACHE_DIR / "trade_start_date_checkpoint.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
 # Колонки, которые пользователь попросил убрать из итогового файла
@@ -87,7 +83,6 @@ FIRST_COLUMN_NAME = "ISIN"
 GROUP_SEPARATOR_PREFIX = "GROUP_SEPARATOR__"
 QUALIFIED_INVESTOR_COLUMN_NAME = "QUALIFIED_INVESTOR"
 MATURITY_DATE_COLUMN_NAME = "MATDATE"
-TRADE_START_DATE_COLUMN_NAME = "ISSUEDATE"
 AMORTIZATION_FLAG_COLUMN_NAME = "HAS_AMORTIZATION"
 AMORTIZATION_START_DATE_COLUMN_NAME = "AMORTIZATION_START_DATE"
 ACCRUED_INT_COLUMN_NAME = "ACCRUEDINT"
@@ -97,6 +92,7 @@ YIELD_COLUMN_NAME = "YIELD"
 BOND_TYPE_COLUMN_NAME = "BOND_TYPE"
 HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
 PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
+COUPON_FORMULA_SOURCE_COLUMN_NAME = "COUPON_FORMULA_SOURCE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 OFFER_VERIFICATION_CACHE_TTL_DAYS = 7
 OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 2
@@ -467,62 +463,6 @@ def save_coupon_formula_cache(rows: dict[str, dict[str, Any]]) -> None:
         "rows": rows,
     }
     COUPON_FORMULA_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def load_trade_start_date_cache() -> dict[str, str]:
-    """Читает пожизненный кэш дат начала торгов (ISSUEDATE) по SECID."""
-    if not TRADE_START_DATE_CACHE_FILE.exists():
-        return {}
-
-    try:
-        payload = json.loads(TRADE_START_DATE_CACHE_FILE.read_text(encoding="utf-8"))
-        rows = payload.get("rows", {})
-        if not isinstance(rows, dict):
-            return {}
-        return {str(secid): str(value) for secid, value in rows.items() if str(value).strip()}
-    except Exception as exc:
-        logging.warning("Не удалось прочитать кэш дат начала торгов: %s", exc)
-        return {}
-
-
-def save_trade_start_date_cache(rows: dict[str, str]) -> None:
-    """Сохраняет пожизненный кэш дат начала торгов (ISSUEDATE) по SECID."""
-    payload = {
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
-        "rows": rows,
-    }
-    TRADE_START_DATE_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def load_trade_start_date_checkpoint() -> dict[str, str]:
-    """Читает checkpoint по этапу ISSUEDATE, чтобы продолжать после обрыва связи."""
-    if not TRADE_START_DATE_CHECKPOINT_FILE.exists():
-        return {}
-
-    try:
-        payload = json.loads(TRADE_START_DATE_CHECKPOINT_FILE.read_text(encoding="utf-8"))
-        rows = payload.get("rows", {})
-        if not isinstance(rows, dict):
-            return {}
-        return {str(secid): str(value) for secid, value in rows.items() if str(value).strip()}
-    except Exception as exc:
-        logging.warning("Не удалось прочитать checkpoint ISSUEDATE: %s", exc)
-        return {}
-
-
-def save_trade_start_date_checkpoint(rows: dict[str, str]) -> None:
-    """Сохраняет checkpoint этапа ISSUEDATE во время выполнения."""
-    payload = {
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
-        "rows": rows,
-    }
-    TRADE_START_DATE_CHECKPOINT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def clear_trade_start_date_checkpoint() -> None:
-    """Удаляет checkpoint ISSUEDATE после успешного завершения этапа."""
-    if TRADE_START_DATE_CHECKPOINT_FILE.exists():
-        TRADE_START_DATE_CHECKPOINT_FILE.unlink()
 
 
 def parse_date_safe(value: Any) -> datetime | None:
@@ -1039,10 +979,23 @@ def fetch_reference_index_values(session: requests.Session) -> dict[str, float]:
     return index_values
 
 
+def normalize_coupon_formula_source(source_name: str | None) -> str:
+    """Преобразует технический код источника формулы в понятную подпись для Excel."""
+    source = str(source_name or "").strip().lower()
+    if source == "dohod":
+        return "DOHOD"
+    if source == "corpbonds":
+        return "CORPBONDS"
+    return ""
+
+
 def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
     """Считает COUPONPERCENT через формулы ДОХОД, затем fallback через corpbonds.ru."""
     logging.info("Этап 5.6/8: Расчёт COUPONPERCENT через ДОХОД + fallback CORPBONDS для выпусков с нулевым купоном...")
     calculated_cells: set[tuple[str, str]] = set()
+    for row in rows:
+        row[COUPON_FORMULA_SOURCE_COLUMN_NAME] = ""
+
     cache = load_coupon_formula_cache()
     now = datetime.now()
 
@@ -1102,12 +1055,13 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
                     coupon_percent = cached_entry.get("coupon_percent")
                     if isinstance(coupon_percent, (float, int)):
                         row["COUPONPERCENT"] = round(float(coupon_percent), 4)
+                        row[COUPON_FORMULA_SOURCE_COLUMN_NAME] = normalize_coupon_formula_source(cached_entry.get("source"))
                         calculated_cells.add((isin, secid))
                         continue
 
             to_fetch.append((isin, secid))
 
-        formula_by_isin: dict[str, tuple[str, str, str, float, float]] = {}
+        formula_by_isin: dict[str, tuple[str, str, str, float, float, str]] = {}
 
         def resolve_formula_job(job: tuple[str, str]) -> tuple[str, str, tuple[str, str, str, float, float] | None, str | None, str]:
             isin_job, secid_job = job
@@ -1135,7 +1089,7 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
                 for processed, future in enumerate(as_completed(futures), start=1):
                     isin_job, _secid_job, parsed, error_text, source_name = future.result()
                     if parsed is not None:
-                        formula_by_isin[isin_job] = parsed
+                        formula_by_isin[isin_job] = (*parsed, source_name)
                         if source_name == "corpbonds":
                             logging.info("CORPBONDS: формула для %s получена через fallback после ДОХОД.", isin_job)
                     else:
@@ -1169,6 +1123,7 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
                     coupon_percent = cached_entry.get("coupon_percent")
                     if isinstance(coupon_percent, (float, int)):
                         row["COUPONPERCENT"] = round(float(coupon_percent), 4)
+                        row[COUPON_FORMULA_SOURCE_COLUMN_NAME] = normalize_coupon_formula_source(cached_entry.get("source"))
                         calculated_cells.add((isin, secid))
                         continue
 
@@ -1176,7 +1131,7 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
             if parsed is None:
                 continue
 
-            index_name, formula_text, description_text, spread, g_curve_years = parsed
+            index_name, formula_text, description_text, spread, g_curve_years, source_name = parsed
 
             if index_name == "G_CURVE_RUS":
                 if g_curve_years in g_curve_cache:
@@ -1194,6 +1149,7 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
 
             coupon_percent = round(base_value + spread, 4)
             row["COUPONPERCENT"] = coupon_percent
+            row[COUPON_FORMULA_SOURCE_COLUMN_NAME] = normalize_coupon_formula_source(source_name)
             calculated_cells.add((isin, secid))
             cache[isin] = {
                 "secid": secid,
@@ -1204,6 +1160,7 @@ def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[d
                 "formula": formula_text,
                 "description": description_text,
                 "g_curve_years": g_curve_years,
+                "source": source_name,
                 "updated_at": now.isoformat(timespec="seconds"),
             }
 
@@ -1216,7 +1173,7 @@ def fetch_page(session: requests.Session, start: int) -> IssPage:
     """Запрашивает одну страницу облигаций с MOEX ISS."""
     params = {
         "iss.meta": "off",
-        "securities.columns": "SECID,SHORTNAME,ISIN,ISSUEDATE,MATDATE,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE,ACCRUEDINT,SECTORID,INSTRID",
+        "securities.columns": "SECID,SHORTNAME,ISIN,MATDATE,FACEVALUE,FACEUNIT,COUPONVALUE,COUPONPERIOD,COUPONPERCENT,PRIMARYBOARDID,PREVLEGALCLOSEPRICE,PREVPRICE,ACCRUEDINT,SECTORID,INSTRID",
         "marketdata.columns": f"SECID,{TRADE_VOLUME_COLUMN_NAME},{TRADE_VALUE_COLUMN_NAME},NUMTRADES,{YIELD_COLUMN_NAME}",
         "start": start,
         "limit": PAGE_SIZE,
@@ -1274,82 +1231,6 @@ def fetch_all_bonds() -> list[dict[str, Any]]:
         rows = list(unique.values())
         logging.info("Получено записей (все страницы): %s", len(rows))
         return rows
-
-
-def fetch_trade_start_date_for_security(session: requests.Session, secid: str) -> str:
-    """Возвращает дату начала торгов по SECID через карточку бумаги ISS."""
-    params = {
-        "iss.meta": "off",
-        "iss.only": "description",
-        "description.columns": "name,value",
-    }
-    response = session.get(f"https://iss.moex.com/iss/securities/{secid}.json", params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    data = response.json()
-    rows = data.get("description", {}).get("data", [])
-
-    issue_date = ""
-    start_date_moex = ""
-    for name, value in rows:
-        if name == "ISSUEDATE" and value:
-            issue_date = str(value)
-        elif name == "STARTDATEMOEX" and value:
-            start_date_moex = str(value)
-
-    return issue_date or start_date_moex or ""
-
-
-def enrich_trade_start_dates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Добавляет колонку ISSUEDATE (дата начала торгов) через карточку бумаги MOEX и кэш."""
-    logging.info("Этап 5.5/8: Обогащение датой начала торгов (ISSUEDATE)...")
-    secids = sorted({str(row.get("SECID") or "").strip() for row in rows if row.get("SECID")})
-    if not secids:
-        for row in rows:
-            row[TRADE_START_DATE_COLUMN_NAME] = ""
-        return rows
-
-    cache = load_trade_start_date_cache()
-    checkpoint_cache = load_trade_start_date_checkpoint()
-    cache.update(checkpoint_cache)
-    missing_secids = [secid for secid in secids if not str(cache.get(secid) or "").strip()]
-
-    if missing_secids:
-        logging.info("ISSUEDATE: требуется запросить %s SECID (из %s).", len(missing_secids), len(secids))
-
-        def fetch_one(secid: str) -> tuple[str, str]:
-            with build_session() as local_session:
-                try:
-                    return secid, fetch_trade_start_date_for_security(local_session, secid)
-                except Exception as exc:
-                    logging.warning("ISSUEDATE: не удалось получить дату для %s: %s", secid, exc)
-                    return secid, ""
-
-        fetched_count = 0
-        with ThreadPoolExecutor(max_workers=TRADE_START_MAX_WORKERS) as executor:
-            futures = {executor.submit(fetch_one, secid): secid for secid in missing_secids}
-            for future in as_completed(futures):
-                secid, trade_start_date = future.result()
-                if trade_start_date:
-                    cache[secid] = trade_start_date
-                fetched_count += 1
-                if fetched_count % TRADE_START_PROGRESS_SAVE_EVERY == 0 or fetched_count == len(missing_secids):
-                    save_trade_start_date_checkpoint(cache)
-                    save_trade_start_date_cache(cache)
-                    logging.info("ISSUEDATE: обработано %s/%s SECID.", fetched_count, len(missing_secids))
-
-        save_trade_start_date_cache(cache)
-        clear_trade_start_date_checkpoint()
-    else:
-        logging.info("ISSUEDATE: все даты взяты из кэша (%s SECID).", len(secids))
-        clear_trade_start_date_checkpoint()
-
-    for row in rows:
-        secid = str(row.get("SECID") or "").strip()
-        row[TRADE_START_DATE_COLUMN_NAME] = str(cache.get(secid) or "") if secid else ""
-
-    non_empty_count = sum(1 for row in rows if str(row.get(TRADE_START_DATE_COLUMN_NAME) or "").strip())
-    logging.info("ISSUEDATE: заполнено %s из %s бумаг.", non_empty_count, len(rows))
-    return rows
 
 
 def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tuple[int | None, str, str, int, bool]:
@@ -1481,14 +1362,12 @@ def validate_rows(rows: list[dict[str, Any]]) -> None:
     empty_isin_count = sum(1 for row in rows if not row.get("ISIN"))
     duplicate_keys = len(rows) - len({(row.get("SECID"), row.get("ISIN")) for row in rows})
     invalid_coupon_count = sum(1 for row in rows if isinstance(row.get("COUPONPERCENT"), (int, float)) and row.get("COUPONPERCENT") < 0)
-    empty_trade_start_date_count = sum(1 for row in rows if not str(row.get(TRADE_START_DATE_COLUMN_NAME) or "").strip())
 
     logging.info(
-        "Проверка качества завершена: пустых ISIN=%s, дубликатов ключа (SECID+ISIN)=%s, отрицательных COUPONPERCENT=%s, пустых ISSUEDATE=%s.",
+        "Проверка качества завершена: пустых ISIN=%s, дубликатов ключа (SECID+ISIN)=%s, отрицательных COUPONPERCENT=%s.",
         empty_isin_count,
         duplicate_keys,
         invalid_coupon_count,
-        empty_trade_start_date_count,
     )
 
 
@@ -2254,14 +2133,14 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "PUT_CALL_OFFER_DATE", "Описание": "Ближайшая дата оферты (проверка через ДОХОД + Corpbonds, с fallback на MOEX)."},
         {"Поле": "HAS_AMORTIZATION", "Описание": "Есть ли у бумаги амортизация номинала: ✔ — да, ✖ — нет."},
         {"Поле": "AMORTIZATION_START_DATE", "Описание": "Дата начала амортизации (если есть)."},
-        {"Поле": "ISSUEDATE", "Описание": "Дата начала торгов по выпуску на MOEX (поле биржи ISSUEDATE)."},
-        {"Поле": "MATDATE", "Описание": "Дата погашения облигации (когда эмитент должен вернуть номинал)."},
+                {"Поле": "MATDATE", "Описание": "Дата погашения облигации (когда эмитент должен вернуть номинал)."},
         {"Поле": "FACEVALUE", "Описание": "Номинал облигации."},
         {"Поле": "FACEUNIT", "Описание": "Валюта номинала (например, RUB)."},
         {"Поле": "COUPONVALUE", "Описание": "Размер купонной выплаты."},
         {"Поле": "ACCRUEDINT", "Описание": "Накопленный купонный доход (НКД) на текущую дату."},
         {"Поле": "COUPONPERIOD", "Описание": "Период выплаты купона в днях."},
         {"Поле": "COUPONPERCENT", "Описание": "Купонная ставка в процентах. Если ячейка жёлтая, ставка рассчитана по формуле (analytics.dohod.ru и, при необходимости, fallback corpbonds.ru). Это приближённое значение."},
+        {"Поле": "COUPON_FORMULA_SOURCE", "Описание": "Источник формулы для расчётного COUPONPERCENT: DOHOD или CORPBONDS. Для обычных бумаг поле пустое."},
         {"Поле": "PRIMARYBOARDID", "Описание": "Основной торговый режим/секция."},
         {"Поле": "PREVLEGALCLOSEPRICE", "Описание": "Предыдущая официальная цена закрытия."},
         {"Поле": "PREVPRICE", "Описание": "Предыдущая рыночная цена."},
@@ -2303,7 +2182,7 @@ def save_excel(rows: list[dict[str, Any]], calculated_coupon_cells: set[tuple[st
     if sort_columns:
         df = df.sort_values(by=sort_columns).reset_index(drop=True)
 
-    for date_col in [TRADE_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]:
+    for date_col in [MATURITY_DATE_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]:
         if date_col in df.columns:
             df[date_col] = df[date_col].map(format_date_ddmmyyyy)
 
@@ -2314,9 +2193,9 @@ def save_excel(rows: list[dict[str, Any]], calculated_coupon_cells: set[tuple[st
             ("Оферты", [HAS_PUT_CALL_OFFER_COLUMN_NAME, PUT_CALL_OFFER_DATE_COLUMN_NAME]),
             (
                 "Торги, погашение и амортизация",
-                [TRADE_START_DATE_COLUMN_NAME, AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME],
+                [AMORTIZATION_FLAG_COLUMN_NAME, AMORTIZATION_START_DATE_COLUMN_NAME, MATURITY_DATE_COLUMN_NAME],
             ),
-            ("Купоны", ["COUPONVALUE", ACCRUED_INT_COLUMN_NAME, "COUPONPERIOD", "COUPONPERCENT"]),
+            ("Купоны", ["COUPONVALUE", ACCRUED_INT_COLUMN_NAME, "COUPONPERIOD", "COUPONPERCENT", COUPON_FORMULA_SOURCE_COLUMN_NAME]),
             (
                 "Рынок",
                 [
@@ -2413,7 +2292,6 @@ def main() -> None:
     rows = enrich_with_issuer_names(rows)
     rows = filter_rows_by_bond_type(rows)
     rows = filter_rows_by_coupon_period(rows)
-    rows = enrich_trade_start_dates(rows)
     rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
 
     # 3) Повторная фильтрация после обогащения новыми данными
