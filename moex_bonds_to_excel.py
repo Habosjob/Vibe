@@ -82,6 +82,7 @@ ISSUER_INN_COLUMN_NAME = "ISSUER_INN"
 ISSUER_BOND_CLASS_COLUMN_NAME = "ISSUER_BOND_CLASS"
 ISSUER_RATING_COLUMN_NAME = "ISSUER_RATING"
 DEFAULT_ISSUER_RATING = "Нет данных на MOEX"
+ISSUER_RATING_CACHE_SCHEMA_VERSION = 2
 FIRST_COLUMN_NAME = "ISIN"
 GROUP_SEPARATOR_PREFIX = "GROUP_SEPARATOR__"
 QUALIFIED_INVESTOR_COLUMN_NAME = "QUALIFIED_INVESTOR"
@@ -206,6 +207,7 @@ def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str]
 
     try:
         payload = json.loads(ISSUER_CACHE_FILE.read_text(encoding="utf-8"))
+        rating_schema_version = int(payload.get("issuer_rating_schema_version", 1) or 1)
         secid_to_emitter_id: dict[str, int | None] = {}
         emitter_id_to_name: dict[int, str] = {}
         emitter_id_to_inn: dict[int, str] = {}
@@ -257,9 +259,12 @@ def load_issuer_directory_cache() -> tuple[dict[str, int | None], dict[int, str]
         for secid, is_structural in payload.get("secid_to_is_structural", {}).items():
             secid_to_is_structural[str(secid)] = bool(is_structural)
 
-        for secid, issuer_rating in payload.get("secid_to_issuer_rating", {}).items():
-            if issuer_rating:
-                secid_to_issuer_rating[str(secid)] = str(issuer_rating)
+        if rating_schema_version >= ISSUER_RATING_CACHE_SCHEMA_VERSION:
+            for secid, issuer_rating in payload.get("secid_to_issuer_rating", {}).items():
+                if issuer_rating:
+                    secid_to_issuer_rating[str(secid)] = str(issuer_rating)
+        else:
+            logging.info("Кэш рейтингов эмитентов устарел по версии схемы. Рейтинги будут переобогащены заново.")
 
         logging.info(
             "Загружен пожизненный справочник эмитентов: SECID=%s, EMITTER_ID=%s.",
@@ -285,6 +290,7 @@ def save_issuer_directory_cache(
     """Сохраняет пожизненный справочник эмитентов."""
     payload = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "issuer_rating_schema_version": ISSUER_RATING_CACHE_SCHEMA_VERSION,
         "secid_to_emitter_id": secid_to_emitter_id,
         "secid_to_qualified_sign": secid_to_qualified_sign,
         "secid_to_bond_type": secid_to_bond_type,
@@ -304,6 +310,7 @@ def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str], dic
 
     try:
         payload = json.loads(ISSUER_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+        rating_schema_version = int(payload.get("issuer_rating_schema_version", 1) or 1)
         secid_to_emitter_id: dict[str, int | None] = {}
         emitter_id_to_name: dict[int, str] = {}
         emitter_id_to_inn: dict[int, str] = {}
@@ -354,9 +361,12 @@ def load_issuer_checkpoint() -> tuple[dict[str, int | None], dict[int, str], dic
         for secid, is_structural in payload.get("secid_to_is_structural", {}).items():
             secid_to_is_structural[str(secid)] = bool(is_structural)
 
-        for secid, issuer_rating in payload.get("secid_to_issuer_rating", {}).items():
-            if issuer_rating:
-                secid_to_issuer_rating[str(secid)] = str(issuer_rating)
+        if rating_schema_version >= ISSUER_RATING_CACHE_SCHEMA_VERSION:
+            for secid, issuer_rating in payload.get("secid_to_issuer_rating", {}).items():
+                if issuer_rating:
+                    secid_to_issuer_rating[str(secid)] = str(issuer_rating)
+        else:
+            logging.info("Checkpoint рейтингов эмитентов устарел по версии схемы. Рейтинги будут получены заново.")
 
         logging.info(
             "Найден checkpoint обогащения: SECID=%s, EMITTER_ID=%s.",
@@ -382,6 +392,7 @@ def save_issuer_checkpoint(
     """Сохраняет checkpoint обогащения эмитентов после каждого пакета."""
     payload = {
         "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "issuer_rating_schema_version": ISSUER_RATING_CACHE_SCHEMA_VERSION,
         "secid_to_emitter_id": secid_to_emitter_id,
         "secid_to_qualified_sign": secid_to_qualified_sign,
         "secid_to_bond_type": secid_to_bond_type,
@@ -1396,7 +1407,63 @@ def normalize_issuer_rating(raw_rating: str) -> str:
     return cleaned if cleaned else DEFAULT_ISSUER_RATING
 
 
-def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tuple[int | None, str, str, int, bool, str]:
+def format_issuer_rating_from_cci_rows(rating_rows: list[dict[str, Any]]) -> str:
+    """Собирает строку рейтинга эмитента из CCI-списка MOEX (например: 'АКРА: AAA(RU); Эксперт РА: ruAAA')."""
+    if not rating_rows:
+        return ""
+
+    by_agency: dict[str, tuple[datetime, str]] = {}
+    for row in rating_rows:
+        agency = str(row.get("agency_name_short_ru") or "").strip()
+        value = str(row.get("rating_level_name_short_ru") or "").strip()
+        if not agency or not value:
+            continue
+
+        raw_date = row.get("rating_date") or row.get("rating_publicate_date")
+        parsed_date = parse_date_safe(raw_date)
+        if parsed_date is None:
+            parsed_date = datetime.min
+
+        prev = by_agency.get(agency)
+        if prev is None or parsed_date >= prev[0]:
+            by_agency[agency] = (parsed_date, value)
+
+    if not by_agency:
+        return ""
+
+    parts = [f"{agency}: {value}" for agency, (_, value) in sorted(by_agency.items(), key=lambda item: item[0].lower())]
+    return "; ".join(parts)
+
+
+def fetch_issuer_rating_from_moex_cci(session: requests.Session, emitter_id: int, isin: str | None) -> str:
+    """Пробует получить рейтинг эмитента из CCI API MOEX через EMITTER_ID и ISIN выпуска."""
+    base_url = f"https://iss.moex.com/iss/cci/rating/companies/ecbd_{emitter_id}"
+    params = {"iss.meta": "off", "iss.json": "extended"}
+
+    rows: list[dict[str, Any]] = []
+    isin_clean = str(isin or "").strip()
+
+    if isin_clean:
+        try:
+            sec_resp = session.get(f"{base_url}/securities/isin_{isin_clean}.json", params=params, timeout=REQUEST_TIMEOUT)
+            sec_resp.raise_for_status()
+            sec_payload = sec_resp.json()
+            if isinstance(sec_payload, list) and len(sec_payload) > 1:
+                rows = list((sec_payload[1] or {}).get("cci_rating_securities", []) or [])
+        except Exception as exc:
+            logging.debug("Не удалось получить рейтинг выпуска по ISIN=%s (EMITTER_ID=%s): %s", isin_clean, emitter_id, exc)
+
+    if not rows:
+        comp_resp = session.get(f"{base_url}.json", params=params, timeout=REQUEST_TIMEOUT)
+        comp_resp.raise_for_status()
+        comp_payload = comp_resp.json()
+        if isinstance(comp_payload, list) and len(comp_payload) > 1:
+            rows = list((comp_payload[1] or {}).get("cci_rating_companies", []) or [])
+
+    return format_issuer_rating_from_cci_rows(rows)
+
+
+def fetch_emitter_info_for_security(session: requests.Session, secid: str, isin: str | None = None) -> tuple[int | None, str, str, int, bool, str]:
     """Возвращает ID эмитента, квалификацию, тип облигации и период купона по SECID."""
     params = {
         "iss.meta": "off",
@@ -1427,6 +1494,12 @@ def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tu
             bond_type = normalize_bond_type(str(value or ""))
         if name == "COUPONFREQUENCY":
             coupon_period = coupon_period_from_frequency(value)
+
+    if not issuer_rating and emitter_id is not None:
+        try:
+            issuer_rating = fetch_issuer_rating_from_moex_cci(session, emitter_id, isin)
+        except Exception as exc:
+            logging.debug("Не удалось получить рейтинг из CCI API для %s/%s: %s", secid, emitter_id, exc)
 
     return emitter_id, qualified_investor_sign, bond_type, coupon_period, is_structural, issuer_rating
 
@@ -1577,6 +1650,12 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     """Добавляет в каждую строку имя/ИНН эмитента, квалификацию, тип и корректный COUPONPERIOD."""
     logging.info("Этап 5.1/8: Обогащение данных наименованиями эмитентов...")
     secids = sorted({str(row.get("SECID")) for row in rows if row.get("SECID")})
+    secid_to_isin: dict[str, str] = {}
+    for row in rows:
+        secid = str(row.get("SECID") or "").strip()
+        isin = str(row.get("ISIN") or "").strip()
+        if secid and isin and secid not in secid_to_isin:
+            secid_to_isin[secid] = isin
 
     if not secids:
         for row in rows:
@@ -1634,7 +1713,8 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         with build_session() as local_session:
             for secid in batch:
                 try:
-                    emitter_id, qualified_sign, bond_type, coupon_period, is_structural, issuer_rating = fetch_emitter_info_for_security(local_session, secid)
+                    isin = secid_to_isin.get(secid)
+                    emitter_id, qualified_sign, bond_type, coupon_period, is_structural, issuer_rating = fetch_emitter_info_for_security(local_session, secid, isin=isin)
                     resolved[secid] = emitter_id
                     resolved_qualified[secid] = qualified_sign
                     resolved_bond_types[secid] = bond_type
@@ -2335,7 +2415,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "ISSUER_NAME", "Описание": "Наименование эмитента облигации (компании или организации, которая выпустила бумагу)."},
         {"Поле": "ISSUER_INN", "Описание": "ИНН эмитента для быстрой сверки компании в ваших внутренних системах и документах."},
         {"Поле": "ISSUER_BOND_CLASS", "Описание": "Тип бумаги на рынке облигаций (например: государственный, корпоративный, муниципальный, иностранный)."},
-        {"Поле": "ISSUER_RATING", "Описание": "Рейтинг эмитента по данным карточки бумаги на MOEX. Если биржа не передала рейтинг, ставится значение 'Нет данных на MOEX'."},
+        {"Поле": "ISSUER_RATING", "Описание": "Рейтинг эмитента с MOEX: сначала из карточки бумаги, затем fallback через CCI API по эмитенту/ISIN. Если данных нет, ставится 'Нет данных на MOEX'."},
         {"Поле": "QUALIFIED_INVESTOR", "Описание": "Показывает, предназначена ли облигация только для квалифицированных инвесторов: ✔ — да, ✖ — нет."},
         {"Поле": "BOND_TYPE", "Описание": "Тип облигации по купону (например: фиксированная, флоатер и т.д.)."},
         {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Есть ли оферта: ✔ (есть) или ✖ (нет)."},
