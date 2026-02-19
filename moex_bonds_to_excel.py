@@ -1835,6 +1835,11 @@ def enrich_with_daily_metrics(
             put_call_offer_date = external_offer_date
         elif moex_has_offer:
             put_call_offer_date = moex_offer_date
+        else:
+            put_call_offer_date = ""
+
+        if has_put_call_offer in {"PUT", "Call"} and not put_call_offer_date:
+            has_put_call_offer = "✖"
 
         maturity_date = str(row.get(MATURITY_DATE_COLUMN_NAME) or "")
         has_put_call_offer = "✔" if put_call_offer_date else "✖"
