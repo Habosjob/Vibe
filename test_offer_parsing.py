@@ -8,11 +8,15 @@ from moex_bonds_to_excel import (
     calculate_coupon_value,
     enrich_coupon_value_from_percent,
     enrich_with_daily_metrics,
+    fetch_emitter_info_for_security,
+    format_issuer_rating_from_cci_rows,
     merge_offer_metrics,
+    normalize_issuer_rating,
     normalize_coupon_formula_source,
     normalize_offer_type,
     parse_corpbonds_offer_metrics,
     parse_dohod_offer_metrics,
+    extract_issuer_rating_from_description,
     parse_offer_metrics,
     select_offer_jobs_for_refresh,
     validate_rows,
@@ -54,6 +58,80 @@ class OfferParsingTests(unittest.TestCase):
 
         self.assertEqual(offer_type, "Call")
         self.assertEqual(offer_date, "2099-07-15")
+
+    def test_extract_issuer_rating_from_description_by_title(self) -> None:
+        description_rows = [
+            ["SECID", "Код бумаги", "RU000A"],
+            ["ISSUER_RATING", "Кредитный рейтинг эмитента", "AA(RU)"],
+        ]
+
+        rating = extract_issuer_rating_from_description(description_rows)
+
+        self.assertEqual(rating, "AA(RU)")
+
+    def test_extract_issuer_rating_from_description_returns_empty_when_no_rating(self) -> None:
+        description_rows = [
+            ["SECID", "Код бумаги", "RU000A"],
+            ["SHORTNAME", "Краткое название", "Тест БО"],
+        ]
+
+        rating = extract_issuer_rating_from_description(description_rows)
+
+        self.assertEqual(rating, "")
+
+    def test_normalize_issuer_rating_sets_fallback_when_empty(self) -> None:
+        self.assertEqual(normalize_issuer_rating(""), "Нет данных на MOEX")
+        self.assertEqual(normalize_issuer_rating("  A+(RU)  "), "A+(RU)")
+
+    def test_format_issuer_rating_from_cci_rows_collects_latest_per_agency(self) -> None:
+        rows = [
+            {"agency_name_short_ru": "АКРА", "rating_level_name_short_ru": "AA(RU)", "rating_date": "2024-01-01 00:00:00"},
+            {"agency_name_short_ru": "АКРА", "rating_level_name_short_ru": "AAA(RU)", "rating_date": "2025-01-01 00:00:00"},
+            {"agency_name_short_ru": "Эксперт РА", "rating_level_name_short_ru": "ruAAA", "rating_date": "2025-02-01 00:00:00"},
+        ]
+
+        rating = format_issuer_rating_from_cci_rows(rows)
+
+        self.assertEqual(rating, "АКРА: AAA(RU); Эксперт РА: ruAAA")
+
+    def test_fetch_emitter_info_for_security_uses_cci_fallback(self) -> None:
+        description_payload = {
+            "description": {
+                "data": [
+                    ["EMITTER_ID", "ID эмитента", 712],
+                    ["ISQUALIFIEDINVESTORS", "Только для квалов", 0],
+                    ["BOND_TYPE", "Тип облигации", "Биржевая"],
+                    ["COUPONFREQUENCY", "Частота купона", 4],
+                ]
+            }
+        }
+
+        class DummyResponse:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class DummySession:
+            def get(self, *args, **kwargs):
+                return DummyResponse(description_payload)
+
+        with patch.object(script, "fetch_issuer_rating_from_moex_cci", return_value="АКРА: AAA(RU)"):
+            emitter_id, qualified, bond_type, coupon_period, is_structural, rating = fetch_emitter_info_for_security(
+                DummySession(),
+                "RU000A0JTU85",
+                isin="RU000A0JTU85",
+            )
+
+        self.assertEqual(emitter_id, 712)
+        self.assertEqual(qualified, "✖")
+        self.assertEqual(coupon_period, 91)
+        self.assertFalse(is_structural)
+        self.assertEqual(rating, "АКРА: AAA(RU)")
 
     def test_validate_rows_logs_offer_quality_counters(self) -> None:
         rows = [
