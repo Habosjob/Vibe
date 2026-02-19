@@ -10,6 +10,8 @@ from moex_bonds_to_excel import (
     enrich_total_price,
     has_non_zero_value,
     enrich_coupon_value_from_percent,
+    calculate_cashflow_yield,
+    enrich_calculated_yield,
     enrich_with_daily_metrics,
     fetch_emitter_info_for_security,
     format_issuer_rating_from_cci_rows,
@@ -484,6 +486,43 @@ class OfferParsingTests(unittest.TestCase):
         saved_payload = save_cache_mock.call_args.args[0]
         self.assertEqual(saved_payload["RU000A"]["coupon_percent"], 12.0)
 
+
+
+    def test_calculate_cashflow_yield_uses_cashflows_without_reinvestment(self) -> None:
+        today = script.datetime.now()
+        cashflows = [
+            (today + script.timedelta(days=365), 60.0),
+            (today + script.timedelta(days=730), 1060.0),
+        ]
+
+        ytm = calculate_cashflow_yield(total_price=950.0, cashflows=cashflows)
+
+        self.assertIsNotNone(ytm)
+        self.assertGreater(ytm, 8.0)
+        self.assertLess(ytm, 9.0)
+
+    def test_enrich_calculated_yield_uses_offer_date_and_total_price(self) -> None:
+        rows = [
+            {
+                "SECID": "S1",
+                "ISIN": "RU000A",
+                "TOTAL_PRICE": 950.0,
+                "FACEVALUE": 1000.0,
+                "MATDATE": "2030-01-01",
+                "PUT_CALL_OFFER_DATE": "2027-01-01",
+            }
+        ]
+
+        offer_date = script.parse_date_safe("2027-01-01")
+        assert offer_date is not None
+
+        with patch.object(script, "fetch_bond_cashflows_until_date", return_value=([(offer_date, 80.0)], [])), \
+             patch.object(script, "build_session") as build_session_mock:
+            build_session_mock.return_value.close = lambda: None
+            result = enrich_calculated_yield(rows)
+
+        self.assertIn("YIELD", result[0])
+        self.assertGreater(result[0]["YIELD"], 0)
 
 
 if __name__ == "__main__":
