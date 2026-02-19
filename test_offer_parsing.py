@@ -9,10 +9,12 @@ from moex_bonds_to_excel import (
     enrich_coupon_value_from_percent,
     enrich_with_daily_metrics,
     merge_offer_metrics,
+    normalize_issuer_rating,
     normalize_coupon_formula_source,
     normalize_offer_type,
     parse_corpbonds_offer_metrics,
     parse_dohod_offer_metrics,
+    extract_issuer_rating_from_description,
     parse_offer_metrics,
     select_offer_jobs_for_refresh,
     validate_rows,
@@ -54,6 +56,30 @@ class OfferParsingTests(unittest.TestCase):
 
         self.assertEqual(offer_type, "Call")
         self.assertEqual(offer_date, "2099-07-15")
+
+    def test_extract_issuer_rating_from_description_by_title(self) -> None:
+        description_rows = [
+            ["SECID", "Код бумаги", "RU000A"],
+            ["ISSUER_RATING", "Кредитный рейтинг эмитента", "AA(RU)"],
+        ]
+
+        rating = extract_issuer_rating_from_description(description_rows)
+
+        self.assertEqual(rating, "AA(RU)")
+
+    def test_extract_issuer_rating_from_description_returns_empty_when_no_rating(self) -> None:
+        description_rows = [
+            ["SECID", "Код бумаги", "RU000A"],
+            ["SHORTNAME", "Краткое название", "Тест БО"],
+        ]
+
+        rating = extract_issuer_rating_from_description(description_rows)
+
+        self.assertEqual(rating, "")
+
+    def test_normalize_issuer_rating_sets_fallback_when_empty(self) -> None:
+        self.assertEqual(normalize_issuer_rating(""), "Нет данных на MOEX")
+        self.assertEqual(normalize_issuer_rating("  A+(RU)  "), "A+(RU)")
 
     def test_validate_rows_logs_offer_quality_counters(self) -> None:
         rows = [
