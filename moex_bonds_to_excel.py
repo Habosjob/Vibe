@@ -57,6 +57,7 @@ DAILY_CACHE_FILE = CACHE_DIR / "daily_security_metrics_cache.json"
 OFFER_VERIFICATION_CACHE_FILE = CACHE_DIR / "offer_verification_cache.json"
 COUPON_FORMULA_CACHE_FILE = CACHE_DIR / "coupon_formula_cache.json"
 COUPON_VALUE_CACHE_FILE = CACHE_DIR / "coupon_value_cache.json"
+TOTAL_PRICE_CACHE_FILE = CACHE_DIR / "total_price_cache.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
 # Колонки, которые пользователь попросил убрать из итогового файла
@@ -93,6 +94,7 @@ ACCRUED_INT_COLUMN_NAME = "ACCRUEDINT"
 TRADE_VOLUME_COLUMN_NAME = "VOLTODAY"
 TRADE_VALUE_COLUMN_NAME = "VALTODAY"
 YIELD_COLUMN_NAME = "YIELD"
+TOTAL_PRICE_COLUMN_NAME = "TOTAL_PRICE"
 BOND_TYPE_COLUMN_NAME = "BOND_TYPE"
 HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
 PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
@@ -103,6 +105,7 @@ OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 8
 COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
+TOTAL_PRICE_CACHE_SCHEMA_VERSION = 3
 DOHOD_BOND_URL = "https://analytics.dohod.ru/bond/{isin}"
 CORPBONDS_BOND_URL = "https://corpbonds.ru/bond/{isin}"
 DOHOD_USER_AGENT = (
@@ -518,9 +521,146 @@ def save_coupon_value_cache(rows: dict[str, dict[str, Any]]) -> None:
     COUPON_VALUE_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_total_price_cache() -> dict[str, dict[str, Any]]:
+    """Читает кэш расчётов TOTAL_PRICE по ISIN."""
+    if not TOTAL_PRICE_CACHE_FILE.exists():
+        return {}
+
+    try:
+        payload = json.loads(TOTAL_PRICE_CACHE_FILE.read_text(encoding="utf-8"))
+        schema_version = int(payload.get("schema_version", 1) or 1)
+        if schema_version != TOTAL_PRICE_CACHE_SCHEMA_VERSION:
+            logging.info(
+                "Обнаружен старый формат кэша TOTAL_PRICE (v%s). Кэш будет очищен и собран заново.",
+                schema_version,
+            )
+            TOTAL_PRICE_CACHE_FILE.unlink(missing_ok=True)
+            return {}
+
+        rows = payload.get("rows", {})
+        if isinstance(rows, dict):
+            return {str(k): v for k, v in rows.items() if isinstance(v, dict)}
+    except Exception as exc:
+        logging.warning("Не удалось прочитать кэш TOTAL_PRICE: %s", exc)
+    return {}
+
+
+def save_total_price_cache(rows: dict[str, dict[str, Any]]) -> None:
+    """Сохраняет кэш расчётных значений TOTAL_PRICE."""
+    CACHE_DIR.mkdir(exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "schema_version": TOTAL_PRICE_CACHE_SCHEMA_VERSION,
+        "rows": rows,
+    }
+    TOTAL_PRICE_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def calculate_coupon_value(face_value: float, coupon_percent: float, coupon_period: int) -> float:
     """Считает COUPONVALUE по формуле пользователя: FACEVALUE*COUPONPERCENT/100/365*COUPONPERIOD."""
     return (face_value * coupon_percent / 100 / 365) * coupon_period
+
+
+def parse_float_safe(value: Any) -> float:
+    """Безопасно переводит значение в число с плавающей точкой; при ошибке возвращает 0.0."""
+    normalized = str(value or "").strip().replace(" ", "").replace(",", ".")
+    if not normalized:
+        return 0.0
+    try:
+        return float(normalized)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def has_non_zero_value(value: Any) -> bool:
+    """Проверяет, что значение непустое и не равно нулю."""
+    return parse_float_safe(value) != 0.0
+
+
+def calculate_total_price(face_value: float, prev_price: float, accrued_int: float) -> float:
+    """Считает итоговую цену: рыночная цена + НКД + комиссия 0.05% от (рыночная цена + НКД)."""
+    market_price = face_value * prev_price / 100
+    base_with_accrued = market_price + accrued_int
+    commission = base_with_accrued * 0.0005
+    return market_price + accrued_int + commission
+
+
+def enrich_total_price(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Добавляет TOTAL_PRICE только для бумаг в SUR, ликвидных и с валидной ценой закрытия/рыночной ценой."""
+    logging.info("Этап 5.8/8: Расчёт итоговой цены TOTAL_PRICE...")
+    cache = load_total_price_cache()
+    calculated_count = 0
+
+    for row in rows:
+        isin = str(row.get("ISIN") or "").strip()
+        secid = str(row.get("SECID") or "").strip()
+
+        faceunit = str(row.get("FACEUNIT") or "").strip().upper()
+        if faceunit != "SUR":
+            row[TOTAL_PRICE_COLUMN_NAME] = ""
+            if isin:
+                cache.pop(isin, None)
+            continue
+
+        if parse_float_safe(row.get(TRADE_VOLUME_COLUMN_NAME)) <= 0:
+            row[TOTAL_PRICE_COLUMN_NAME] = ""
+            if isin:
+                cache.pop(isin, None)
+            continue
+
+        if not has_non_zero_value(row.get("PREVLEGALCLOSEPRICE")) or not has_non_zero_value(row.get("PREVPRICE")):
+            row[TOTAL_PRICE_COLUMN_NAME] = ""
+            if isin:
+                cache.pop(isin, None)
+            continue
+
+        face_value = parse_float_safe(row.get("FACEVALUE"))
+        prev_price = parse_float_safe(row.get("PREVPRICE"))
+        accrued_int = parse_float_safe(row.get(ACCRUED_INT_COLUMN_NAME))
+        prev_legal_close_price = parse_float_safe(row.get("PREVLEGALCLOSEPRICE"))
+        volume = parse_float_safe(row.get(TRADE_VOLUME_COLUMN_NAME))
+
+        cache_entry = cache.get(isin) if isin else None
+        if cache_entry is not None:
+            if (
+                str(cache_entry.get("secid") or "") == secid
+                and str(cache_entry.get("faceunit") or "").strip().upper() == faceunit
+                and isinstance(cache_entry.get("face_value"), (int, float))
+                and isinstance(cache_entry.get("prev_price"), (int, float))
+                and isinstance(cache_entry.get("accrued_int"), (int, float))
+                and isinstance(cache_entry.get("prev_legal_close_price"), (int, float))
+                and isinstance(cache_entry.get("volume"), (int, float))
+                and isinstance(cache_entry.get("total_price"), (int, float))
+                and math.isclose(float(cache_entry["face_value"]), face_value, rel_tol=0, abs_tol=1e-10)
+                and math.isclose(float(cache_entry["prev_price"]), prev_price, rel_tol=0, abs_tol=1e-10)
+                and math.isclose(float(cache_entry["accrued_int"]), accrued_int, rel_tol=0, abs_tol=1e-10)
+                and math.isclose(float(cache_entry["prev_legal_close_price"]), prev_legal_close_price, rel_tol=0, abs_tol=1e-10)
+                and math.isclose(float(cache_entry["volume"]), volume, rel_tol=0, abs_tol=1e-10)
+            ):
+                row[TOTAL_PRICE_COLUMN_NAME] = round(float(cache_entry["total_price"]), 6)
+                calculated_count += 1
+                continue
+
+        total_price = round(calculate_total_price(face_value, prev_price, accrued_int), 6)
+        row[TOTAL_PRICE_COLUMN_NAME] = total_price
+        calculated_count += 1
+
+        if isin:
+            cache[isin] = {
+                "secid": secid,
+                "faceunit": faceunit,
+                "face_value": face_value,
+                "prev_price": prev_price,
+                "accrued_int": accrued_int,
+                "prev_legal_close_price": prev_legal_close_price,
+                "volume": volume,
+                "total_price": total_price,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+
+    save_total_price_cache(cache)
+    logging.info("TOTAL_PRICE рассчитан для %s выпусков.", calculated_count)
+    return rows
 
 
 def enrich_coupon_value_from_percent(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
@@ -2303,6 +2443,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         TRADE_VALUE_COLUMN_NAME,
         "NUMTRADES",
         YIELD_COLUMN_NAME,
+        TOTAL_PRICE_COLUMN_NAME,
     }
 
     for row_idx in range(3, ws.max_row + 1):
@@ -2433,6 +2574,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "PRIMARYBOARDID", "Описание": "Основной торговый режим/секция."},
         {"Поле": "PREVLEGALCLOSEPRICE", "Описание": "Предыдущая официальная цена закрытия."},
         {"Поле": "PREVPRICE", "Описание": "Предыдущая рыночная цена."},
+        {"Поле": "TOTAL_PRICE", "Описание": "Итоговая цена (только если FACEUNIT = SUR, VOLTODAY > 0 и ненулевые PREVLEGALCLOSEPRICE/PREVPRICE): рыночная цена FACEVALUE*PREVPRICE/100 + НКД (ACCRUEDINT) + комиссия 0.05% от суммы (рыночная цена + НКД)."},
         {"Поле": "VOLTODAY", "Описание": "Объём торгов за текущий день (в штуках/бумагах)."},
         {"Поле": "VALTODAY", "Описание": "Денежный оборот торгов за текущий день."},
         {"Поле": "NUMTRADES", "Описание": "Количество сделок за текущий день."},
@@ -2497,6 +2639,7 @@ def save_excel(
                     "PRIMARYBOARDID",
                     "PREVLEGALCLOSEPRICE",
                     "PREVPRICE",
+                    TOTAL_PRICE_COLUMN_NAME,
                     TRADE_VOLUME_COLUMN_NAME,
                     TRADE_VALUE_COLUMN_NAME,
                     "NUMTRADES",
@@ -2589,6 +2732,7 @@ def main() -> None:
     rows = filter_rows_by_coupon_period(rows)
     rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
     rows, calculated_coupon_value_cells = enrich_coupon_value_from_percent(rows)
+    rows = enrich_total_price(rows)
 
     # 3) Повторная фильтрация после обогащения новыми данными
     rows = filter_rows_by_offer_date(rows)

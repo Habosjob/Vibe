@@ -6,6 +6,9 @@ from unittest.mock import patch
 import moex_bonds_to_excel as script
 from moex_bonds_to_excel import (
     calculate_coupon_value,
+    calculate_total_price,
+    enrich_total_price,
+    has_non_zero_value,
     enrich_coupon_value_from_percent,
     enrich_with_daily_metrics,
     fetch_emitter_info_for_security,
@@ -31,6 +34,71 @@ class OfferParsingTests(unittest.TestCase):
         self.assertEqual(normalize_offer_type("Call-опцион"), "Call")
         self.assertEqual(normalize_offer_type("Оферта"), "PUT")
         self.assertEqual(normalize_offer_type("Погашение"), "✖")
+
+    def test_calculate_total_price(self) -> None:
+        result = calculate_total_price(face_value=1000, prev_price=97.5, accrued_int=12.34)
+        self.assertAlmostEqual(result, 987.83367, places=6)
+
+    def test_has_non_zero_value(self) -> None:
+        self.assertTrue(has_non_zero_value("101.25"))
+        self.assertTrue(has_non_zero_value(" 0,10 "))
+        self.assertFalse(has_non_zero_value(""))
+        self.assertFalse(has_non_zero_value("0"))
+
+    def test_enrich_total_price_adds_column_only_when_conditions_met(self) -> None:
+        rows = [
+            {
+                "ISIN": "RU000A",
+                "SECID": "S1",
+                "FACEVALUE": "1000",
+                "PREVPRICE": "95.4",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "SUR",
+                "VOLTODAY": "250",
+            },
+            {
+                "ISIN": "RU000B",
+                "SECID": "S2",
+                "FACEVALUE": "1000",
+                "PREVPRICE": "95.4",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "SUR",
+                "VOLTODAY": "0",
+            },
+            {
+                "ISIN": "RU000C",
+                "SECID": "S3",
+                "FACEVALUE": "1000",
+                "PREVPRICE": "0",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "SUR",
+                "VOLTODAY": "250",
+            },
+            {
+                "ISIN": "RU000D",
+                "SECID": "S4",
+                "FACEVALUE": "1000",
+                "PREVPRICE": "95.4",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "USD",
+                "VOLTODAY": "250",
+            },
+        ]
+        with patch.object(script, "load_total_price_cache", return_value={}),              patch.object(script, "save_total_price_cache") as save_cache_mock:
+            result = enrich_total_price(rows)
+
+        self.assertAlmostEqual(result[0]["TOTAL_PRICE"], 965.732625, places=6)
+        self.assertEqual(result[1]["TOTAL_PRICE"], "")
+        self.assertEqual(result[2]["TOTAL_PRICE"], "")
+        self.assertEqual(result[3]["TOTAL_PRICE"], "")
+        saved_payload = save_cache_mock.call_args.args[0]
+        self.assertIn("RU000A", saved_payload)
+        self.assertNotIn("RU000B", saved_payload)
+        self.assertNotIn("RU000D", saved_payload)
 
     def test_parse_offer_metrics_ignores_redemption_rows(self) -> None:
         columns = ["offertype", "offerdate", "offerdatestart", "offerdateend"]
@@ -273,6 +341,88 @@ class OfferParsingTests(unittest.TestCase):
     def test_calculate_coupon_value_formula(self) -> None:
         result = calculate_coupon_value(face_value=1000, coupon_percent=12.5, coupon_period=91)
         self.assertAlmostEqual(result, (1000 * 12.5 / 100 / 365) * 91, places=10)
+
+
+    def test_enrich_total_price_uses_cache_for_same_inputs(self) -> None:
+        rows = [
+            {
+                "ISIN": "RU000A",
+                "SECID": "S1",
+                "FACEVALUE": "1000",
+                "PREVPRICE": "95.4",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "SUR",
+                "VOLTODAY": "250",
+            }
+        ]
+        cached_rows = {
+            "RU000A": {
+                "secid": "S1",
+                "faceunit": "SUR",
+                "face_value": 1000.0,
+                "prev_price": 95.4,
+                "accrued_int": 11.25,
+                "prev_legal_close_price": 95.5,
+                "volume": 250.0,
+                "total_price": 777.123456,
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        }
+
+        with patch.object(script, "load_total_price_cache", return_value=cached_rows),              patch.object(script, "save_total_price_cache"):
+            result = enrich_total_price(rows)
+
+        self.assertAlmostEqual(result[0]["TOTAL_PRICE"], 777.123456, places=6)
+
+
+    def test_enrich_total_price_drops_cache_when_faceunit_not_sur(self) -> None:
+        rows = [
+            {
+                "ISIN": "RU000A",
+                "SECID": "S1",
+                "FACEVALUE": "1000",
+                "PREVPRICE": "95.4",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "USD",
+                "VOLTODAY": "250",
+            }
+        ]
+        cached_rows = {
+            "RU000A": {
+                "secid": "S1",
+                "faceunit": "SUR",
+                "face_value": 1000.0,
+                "prev_price": 95.4,
+                "accrued_int": 11.25,
+                "prev_legal_close_price": 95.5,
+                "volume": 250.0,
+                "total_price": 777.123456,
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        }
+
+        with patch.object(script, "load_total_price_cache", return_value=cached_rows),              patch.object(script, "save_total_price_cache") as save_cache_mock:
+            result = enrich_total_price(rows)
+
+        self.assertEqual(result[0]["TOTAL_PRICE"], "")
+        saved_payload = save_cache_mock.call_args.args[0]
+        self.assertNotIn("RU000A", saved_payload)
+
+    def test_load_total_price_cache_clears_old_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "total_price_cache.json"
+            cache_path.write_text(
+                '{"schema_version": 1, "rows": {"RU000A": {"total_price": 1}}}',
+                encoding="utf-8",
+            )
+
+            with patch.object(script, "TOTAL_PRICE_CACHE_FILE", cache_path):
+                rows = script.load_total_price_cache()
+
+            self.assertEqual(rows, {})
+            self.assertFalse(cache_path.exists())
 
     def test_enrich_coupon_value_from_percent_uses_cache_when_inputs_same(self) -> None:
         rows = [
