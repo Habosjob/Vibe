@@ -24,7 +24,7 @@
 13. Для расчётного купона в поле `COUPON_FORMULA_SOURCE` указывается источник: `DOHOD` или `CORPBONDS`.
 14. Если `COUPONVALUE = 0`, но есть `COUPONPERCENT`, `FACEVALUE` и `COUPONPERIOD`, скрипт рассчитывает `COUPONVALUE` по формуле: `FACEVALUE * COUPONPERCENT / 100 / 365 * COUPONPERIOD`.
 15. Расчётный `COUPONVALUE` берётся из кэша `cache/coupon_value_cache.json`, пока MOEX не изменит исходные данные или пока не изменится `COUPONPERCENT`.
-16. Для ликвидных бумаг (`VOLTODAY > 0`) при ненулевых `PREVLEGALCLOSEPRICE` и `PREVPRICE` считается колонка `TOTAL_PRICE`: рыночная цена `FACEVALUE * PREVPRICE / 100`, затем прибавляется НКД (`ACCRUEDINT`) и комиссия 0.05% от суммы (рыночная цена + НКД).
+16. Для ликвидных бумаг в валюте `SUR` (`FACEUNIT = SUR`) при `VOLTODAY > 0` и ненулевых `PREVLEGALCLOSEPRICE` и `PREVPRICE` считается колонка `TOTAL_PRICE`: рыночная цена `FACEVALUE * PREVPRICE / 100`, затем прибавляется НКД (`ACCRUEDINT`) и комиссия 0.05% от суммы (рыночная цена + НКД).
 17. Расчётный `TOTAL_PRICE` сохраняется в отдельный кэш `cache/total_price_cache.json` и повторно используется, если входные рыночные поля не изменились.
 18. Для оферт используется отдельный 7-дневный кэш `cache/offer_verification_cache.json`; при изменении версии формата старый кэш автоматически удаляется и собирается заново. Источник внешней проверки оферт: Corpbonds.
 19. Для расчёта купона используется отдельный 7-дневный кэш `cache/coupon_formula_cache.json`.
@@ -50,7 +50,7 @@
   - `Купоны`: `COUPONVALUE`, `ACCRUEDINT`, `COUPONPERIOD`, `COUPONPERCENT`, `COUPON_FORMULA_SOURCE`.
   - `Рынок`: `FACEVALUE`, `FACEUNIT`, `PRIMARYBOARDID`, `PREVLEGALCLOSEPRICE`, `PREVPRICE`, `TOTAL_PRICE`, `VOLTODAY`, `VALTODAY`, `NUMTRADES`, `YIELD`.
 - `COUPON_FORMULA_SOURCE` — источник формулы для расчётного `COUPONPERCENT` (`DOHOD` или `CORPBONDS`).
-- `TOTAL_PRICE` — итоговая цена в рублях только для строк с валидными рыночными данными: рыночная цена + НКД + комиссия 0.05% от (рыночная цена + НКД). Если условий для расчёта нет (`VOLTODAY <= 0` или нулевые/пустые `PREVLEGALCLOSEPRICE`/`PREVPRICE`), поле остаётся пустым.
+- `TOTAL_PRICE` — итоговая цена в рублях только для строк с валидными рыночными данными в `SUR`: `FACEUNIT = SUR`, `VOLTODAY > 0`, ненулевые `PREVLEGALCLOSEPRICE` и `PREVPRICE`. Формула: рыночная цена + НКД + комиссия 0.05% от (рыночная цена + НКД). Если условий нет, поле остаётся пустым.
 - Важная защита от ложных оферт: если дата оферты совпадает с датой погашения (`MATDATE`), такая запись автоматически очищается как не-оферта.
 - Дополнительная защита: если у бумаги нет даты оферты, поле `HAS_PUT_CALL_OFFER` автоматически приводится к `✖`.
 - Расчётные значения `COUPONPERCENT` подсвечиваются жёлтым.

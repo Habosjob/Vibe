@@ -54,6 +54,7 @@ class OfferParsingTests(unittest.TestCase):
                 "PREVPRICE": "95.4",
                 "ACCRUEDINT": "11.25",
                 "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "SUR",
                 "VOLTODAY": "250",
             },
             {
@@ -63,6 +64,7 @@ class OfferParsingTests(unittest.TestCase):
                 "PREVPRICE": "95.4",
                 "ACCRUEDINT": "11.25",
                 "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "SUR",
                 "VOLTODAY": "0",
             },
             {
@@ -72,6 +74,17 @@ class OfferParsingTests(unittest.TestCase):
                 "PREVPRICE": "0",
                 "ACCRUEDINT": "11.25",
                 "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "SUR",
+                "VOLTODAY": "250",
+            },
+            {
+                "ISIN": "RU000D",
+                "SECID": "S4",
+                "FACEVALUE": "1000",
+                "PREVPRICE": "95.4",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "USD",
                 "VOLTODAY": "250",
             },
         ]
@@ -81,9 +94,11 @@ class OfferParsingTests(unittest.TestCase):
         self.assertAlmostEqual(result[0]["TOTAL_PRICE"], 965.732625, places=6)
         self.assertEqual(result[1]["TOTAL_PRICE"], "")
         self.assertEqual(result[2]["TOTAL_PRICE"], "")
+        self.assertEqual(result[3]["TOTAL_PRICE"], "")
         saved_payload = save_cache_mock.call_args.args[0]
         self.assertIn("RU000A", saved_payload)
         self.assertNotIn("RU000B", saved_payload)
+        self.assertNotIn("RU000D", saved_payload)
 
     def test_parse_offer_metrics_ignores_redemption_rows(self) -> None:
         columns = ["offertype", "offerdate", "offerdatestart", "offerdateend"]
@@ -337,12 +352,14 @@ class OfferParsingTests(unittest.TestCase):
                 "PREVPRICE": "95.4",
                 "ACCRUEDINT": "11.25",
                 "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "SUR",
                 "VOLTODAY": "250",
             }
         ]
         cached_rows = {
             "RU000A": {
                 "secid": "S1",
+                "faceunit": "SUR",
                 "face_value": 1000.0,
                 "prev_price": 95.4,
                 "accrued_int": 11.25,
@@ -357,6 +374,41 @@ class OfferParsingTests(unittest.TestCase):
             result = enrich_total_price(rows)
 
         self.assertAlmostEqual(result[0]["TOTAL_PRICE"], 777.123456, places=6)
+
+
+    def test_enrich_total_price_drops_cache_when_faceunit_not_sur(self) -> None:
+        rows = [
+            {
+                "ISIN": "RU000A",
+                "SECID": "S1",
+                "FACEVALUE": "1000",
+                "PREVPRICE": "95.4",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "FACEUNIT": "USD",
+                "VOLTODAY": "250",
+            }
+        ]
+        cached_rows = {
+            "RU000A": {
+                "secid": "S1",
+                "faceunit": "SUR",
+                "face_value": 1000.0,
+                "prev_price": 95.4,
+                "accrued_int": 11.25,
+                "prev_legal_close_price": 95.5,
+                "volume": 250.0,
+                "total_price": 777.123456,
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        }
+
+        with patch.object(script, "load_total_price_cache", return_value=cached_rows),              patch.object(script, "save_total_price_cache") as save_cache_mock:
+            result = enrich_total_price(rows)
+
+        self.assertEqual(result[0]["TOTAL_PRICE"], "")
+        saved_payload = save_cache_mock.call_args.args[0]
+        self.assertNotIn("RU000A", saved_payload)
 
     def test_load_total_price_cache_clears_old_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

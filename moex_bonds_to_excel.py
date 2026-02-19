@@ -105,7 +105,7 @@ OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 8
 COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
-TOTAL_PRICE_CACHE_SCHEMA_VERSION = 2
+TOTAL_PRICE_CACHE_SCHEMA_VERSION = 3
 DOHOD_BOND_URL = "https://analytics.dohod.ru/bond/{isin}"
 CORPBONDS_BOND_URL = "https://corpbonds.ru/bond/{isin}"
 DOHOD_USER_AGENT = (
@@ -586,7 +586,7 @@ def calculate_total_price(face_value: float, prev_price: float, accrued_int: flo
 
 
 def enrich_total_price(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Добавляет TOTAL_PRICE только для ликвидных бумаг с валидной ценой закрытия и рыночной ценой."""
+    """Добавляет TOTAL_PRICE только для бумаг в SUR, ликвидных и с валидной ценой закрытия/рыночной ценой."""
     logging.info("Этап 5.8/8: Расчёт итоговой цены TOTAL_PRICE...")
     cache = load_total_price_cache()
     calculated_count = 0
@@ -594,6 +594,13 @@ def enrich_total_price(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         isin = str(row.get("ISIN") or "").strip()
         secid = str(row.get("SECID") or "").strip()
+
+        faceunit = str(row.get("FACEUNIT") or "").strip().upper()
+        if faceunit != "SUR":
+            row[TOTAL_PRICE_COLUMN_NAME] = ""
+            if isin:
+                cache.pop(isin, None)
+            continue
 
         if parse_float_safe(row.get(TRADE_VOLUME_COLUMN_NAME)) <= 0:
             row[TOTAL_PRICE_COLUMN_NAME] = ""
@@ -617,6 +624,7 @@ def enrich_total_price(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if cache_entry is not None:
             if (
                 str(cache_entry.get("secid") or "") == secid
+                and str(cache_entry.get("faceunit") or "").strip().upper() == faceunit
                 and isinstance(cache_entry.get("face_value"), (int, float))
                 and isinstance(cache_entry.get("prev_price"), (int, float))
                 and isinstance(cache_entry.get("accrued_int"), (int, float))
@@ -640,6 +648,7 @@ def enrich_total_price(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if isin:
             cache[isin] = {
                 "secid": secid,
+                "faceunit": faceunit,
                 "face_value": face_value,
                 "prev_price": prev_price,
                 "accrued_int": accrued_int,
@@ -2565,7 +2574,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "PRIMARYBOARDID", "Описание": "Основной торговый режим/секция."},
         {"Поле": "PREVLEGALCLOSEPRICE", "Описание": "Предыдущая официальная цена закрытия."},
         {"Поле": "PREVPRICE", "Описание": "Предыдущая рыночная цена."},
-        {"Поле": "TOTAL_PRICE", "Описание": "Итоговая цена (только при VOLTODAY > 0 и ненулевых PREVLEGALCLOSEPRICE/PREVPRICE): рыночная цена FACEVALUE*PREVPRICE/100 + НКД (ACCRUEDINT) + комиссия 0.05% от суммы (рыночная цена + НКД)."},
+        {"Поле": "TOTAL_PRICE", "Описание": "Итоговая цена (только если FACEUNIT = SUR, VOLTODAY > 0 и ненулевые PREVLEGALCLOSEPRICE/PREVPRICE): рыночная цена FACEVALUE*PREVPRICE/100 + НКД (ACCRUEDINT) + комиссия 0.05% от суммы (рыночная цена + НКД)."},
         {"Поле": "VOLTODAY", "Описание": "Объём торгов за текущий день (в штуках/бумагах)."},
         {"Поле": "VALTODAY", "Описание": "Денежный оборот торгов за текущий день."},
         {"Поле": "NUMTRADES", "Описание": "Количество сделок за текущий день."},
