@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import moex_bonds_to_excel as script
 from moex_bonds_to_excel import (
+    enrich_with_daily_metrics,
     merge_offer_metrics,
     normalize_coupon_formula_source,
     normalize_offer_type,
@@ -110,7 +111,7 @@ class OfferParsingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "offer_verification_cache.json"
             cache_path.write_text(
-                '{"schema_version": 5, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
+                '{"schema_version": 6, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
                 encoding="utf-8",
             )
 
@@ -119,6 +120,26 @@ class OfferParsingTests(unittest.TestCase):
 
             self.assertEqual(rows, {})
             self.assertFalse(cache_path.exists())
+
+
+    def test_enrich_with_daily_metrics_no_external_offer_does_not_fail(self) -> None:
+        rows = [{"SECID": "S1", "ISIN": "I1", "MATDATE": "2032-01-01"}]
+        daily_cache = {
+            "S1": {
+                "MOEX_HAS_PUT_CALL_OFFER": "PUT",
+                "MOEX_PUT_CALL_OFFER_DATE": "2031-06-01",
+                "HAS_AMORTIZATION": "✖",
+                "AMORTIZATION_START_DATE": "",
+            }
+        }
+
+        with patch.object(script, "load_daily_security_cache", return_value=(script.DAILY_METRICS_CACHE_SCHEMA_VERSION, daily_cache)), \
+             patch.object(script, "load_offer_verification_cache", return_value={}), \
+             patch.object(script, "save_daily_security_cache"):
+            result = enrich_with_daily_metrics(rows, include_daily_metrics=False, include_external_offers=False)
+
+        self.assertEqual(result[0]["HAS_PUT_CALL_OFFER"], "✔")
+        self.assertEqual(result[0]["PUT_CALL_OFFER_DATE"], "2031-06-01")
 
     def test_select_offer_jobs_for_refresh_checks_only_moex_without_offer(self) -> None:
         rows = [

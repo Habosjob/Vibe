@@ -95,7 +95,7 @@ PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 COUPON_FORMULA_SOURCE_COLUMN_NAME = "COUPON_FORMULA_SOURCE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 OFFER_VERIFICATION_CACHE_TTL_DAYS = 7
-OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 6
+OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 7
 COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
@@ -1829,6 +1829,8 @@ def enrich_with_daily_metrics(
         external_has_offer = external_offer_type in {"PUT", "Call"} and bool(external_offer_date)
         moex_has_offer = moex_offer_type in {"PUT", "Call"} and bool(moex_offer_date)
 
+        has_put_call_offer = "✖"
+        put_call_offer_date = ""
         if external_has_offer:
             put_call_offer_date = external_offer_date
         elif moex_has_offer:
