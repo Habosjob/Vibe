@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 import moex_bonds_to_excel as script
 from moex_bonds_to_excel import (
+    calculate_coupon_value,
+    enrich_coupon_value_from_percent,
     enrich_with_daily_metrics,
     merge_offer_metrics,
     normalize_coupon_formula_source,
@@ -189,6 +191,70 @@ class OfferParsingTests(unittest.TestCase):
         jobs = select_offer_jobs_for_refresh(rows, offer_cache={}, daily_cache=daily_cache, now=script.datetime.now())
 
         self.assertEqual(jobs, [("I2", "S2")])
+
+    def test_calculate_coupon_value_formula(self) -> None:
+        result = calculate_coupon_value(face_value=1000, coupon_percent=12.5, coupon_period=91)
+        self.assertAlmostEqual(result, (1000 * 12.5 / 100 / 365) * 91, places=10)
+
+    def test_enrich_coupon_value_from_percent_uses_cache_when_inputs_same(self) -> None:
+        rows = [
+            {
+                "ISIN": "RU000A",
+                "SECID": "S1",
+                "COUPONVALUE": 0,
+                "COUPONPERCENT": 10,
+                "FACEVALUE": 1000,
+                "COUPONPERIOD": 91,
+            }
+        ]
+        cached_rows = {
+            "RU000A": {
+                "secid": "S1",
+                "coupon_value": 24.931507,
+                "coupon_percent": 10.0,
+                "coupon_period": 91,
+                "face_value": 1000.0,
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        }
+
+        with patch.object(script, "load_coupon_value_cache", return_value=cached_rows), \
+             patch.object(script, "save_coupon_value_cache") as save_cache_mock:
+            result_rows, calculated_cells = enrich_coupon_value_from_percent(rows)
+
+        self.assertAlmostEqual(result_rows[0]["COUPONVALUE"], 24.931507, places=6)
+        self.assertEqual(calculated_cells, {("RU000A", "S1")})
+        save_cache_mock.assert_called_once()
+
+    def test_enrich_coupon_value_from_percent_recalculates_when_coupon_percent_changed(self) -> None:
+        rows = [
+            {
+                "ISIN": "RU000A",
+                "SECID": "S1",
+                "COUPONVALUE": 0,
+                "COUPONPERCENT": 12,
+                "FACEVALUE": 1000,
+                "COUPONPERIOD": 91,
+            }
+        ]
+        cached_rows = {
+            "RU000A": {
+                "secid": "S1",
+                "coupon_value": 24.931507,
+                "coupon_percent": 10.0,
+                "coupon_period": 91,
+                "face_value": 1000.0,
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        }
+
+        with patch.object(script, "load_coupon_value_cache", return_value=cached_rows), \
+             patch.object(script, "save_coupon_value_cache") as save_cache_mock:
+            result_rows, _ = enrich_coupon_value_from_percent(rows)
+
+        self.assertAlmostEqual(result_rows[0]["COUPONVALUE"], round((1000 * 12 / 100 / 365) * 91, 6), places=6)
+        saved_payload = save_cache_mock.call_args.args[0]
+        self.assertEqual(saved_payload["RU000A"]["coupon_percent"], 12.0)
 
 
 
