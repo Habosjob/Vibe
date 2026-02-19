@@ -93,6 +93,7 @@ ACCRUED_INT_COLUMN_NAME = "ACCRUEDINT"
 TRADE_VOLUME_COLUMN_NAME = "VOLTODAY"
 TRADE_VALUE_COLUMN_NAME = "VALTODAY"
 YIELD_COLUMN_NAME = "YIELD"
+TOTAL_PRICE_COLUMN_NAME = "TOTAL_PRICE"
 BOND_TYPE_COLUMN_NAME = "BOND_TYPE"
 HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
 PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
@@ -521,6 +522,30 @@ def save_coupon_value_cache(rows: dict[str, dict[str, Any]]) -> None:
 def calculate_coupon_value(face_value: float, coupon_percent: float, coupon_period: int) -> float:
     """Считает COUPONVALUE по формуле пользователя: FACEVALUE*COUPONPERCENT/100/365*COUPONPERIOD."""
     return (face_value * coupon_percent / 100 / 365) * coupon_period
+
+
+def parse_float_safe(value: Any) -> float:
+    """Безопасно переводит значение в число с плавающей точкой; при ошибке возвращает 0.0."""
+    try:
+        return float(str(value or 0).replace(",", "."))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def calculate_total_price(face_value: float, prev_price: float, accrued_int: float) -> float:
+    """Считает итоговую цену: ((FACEVALUE * PREVPRICE / 100) + ACCRUEDINT) * 1.0005."""
+    return ((face_value * prev_price / 100) + accrued_int) * 1.0005
+
+
+def enrich_total_price(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Добавляет в каждую строку столбец TOTAL_PRICE по пользовательской формуле."""
+    logging.info("Этап 5.8/8: Расчёт итоговой цены TOTAL_PRICE...")
+    for row in rows:
+        face_value = parse_float_safe(row.get("FACEVALUE"))
+        prev_price = parse_float_safe(row.get("PREVPRICE"))
+        accrued_int = parse_float_safe(row.get(ACCRUED_INT_COLUMN_NAME))
+        row[TOTAL_PRICE_COLUMN_NAME] = round(calculate_total_price(face_value, prev_price, accrued_int), 6)
+    return rows
 
 
 def enrich_coupon_value_from_percent(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
@@ -2303,6 +2328,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         TRADE_VALUE_COLUMN_NAME,
         "NUMTRADES",
         YIELD_COLUMN_NAME,
+        TOTAL_PRICE_COLUMN_NAME,
     }
 
     for row_idx in range(3, ws.max_row + 1):
@@ -2433,6 +2459,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "PRIMARYBOARDID", "Описание": "Основной торговый режим/секция."},
         {"Поле": "PREVLEGALCLOSEPRICE", "Описание": "Предыдущая официальная цена закрытия."},
         {"Поле": "PREVPRICE", "Описание": "Предыдущая рыночная цена."},
+        {"Поле": "TOTAL_PRICE", "Описание": "Итоговая цена по формуле: ((FACEVALUE * PREVPRICE / 100) + ACCRUEDINT) * 1.0005."},
         {"Поле": "VOLTODAY", "Описание": "Объём торгов за текущий день (в штуках/бумагах)."},
         {"Поле": "VALTODAY", "Описание": "Денежный оборот торгов за текущий день."},
         {"Поле": "NUMTRADES", "Описание": "Количество сделок за текущий день."},
@@ -2497,6 +2524,7 @@ def save_excel(
                     "PRIMARYBOARDID",
                     "PREVLEGALCLOSEPRICE",
                     "PREVPRICE",
+                    TOTAL_PRICE_COLUMN_NAME,
                     TRADE_VOLUME_COLUMN_NAME,
                     TRADE_VALUE_COLUMN_NAME,
                     "NUMTRADES",
@@ -2589,6 +2617,7 @@ def main() -> None:
     rows = filter_rows_by_coupon_period(rows)
     rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
     rows, calculated_coupon_value_cells = enrich_coupon_value_from_percent(rows)
+    rows = enrich_total_price(rows)
 
     # 3) Повторная фильтрация после обогащения новыми данными
     rows = filter_rows_by_offer_date(rows)

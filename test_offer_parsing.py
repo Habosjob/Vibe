@@ -6,6 +6,8 @@ from unittest.mock import patch
 import moex_bonds_to_excel as script
 from moex_bonds_to_excel import (
     calculate_coupon_value,
+    calculate_total_price,
+    enrich_total_price,
     enrich_coupon_value_from_percent,
     enrich_with_daily_metrics,
     fetch_emitter_info_for_security,
@@ -31,6 +33,15 @@ class OfferParsingTests(unittest.TestCase):
         self.assertEqual(normalize_offer_type("Call-опцион"), "Call")
         self.assertEqual(normalize_offer_type("Оферта"), "PUT")
         self.assertEqual(normalize_offer_type("Погашение"), "✖")
+
+    def test_calculate_total_price(self) -> None:
+        result = calculate_total_price(face_value=1000, prev_price=97.5, accrued_int=12.34)
+        self.assertAlmostEqual(result, 987.83367, places=6)
+
+    def test_enrich_total_price_adds_column(self) -> None:
+        rows = [{"FACEVALUE": "1000", "PREVPRICE": "95.4", "ACCRUEDINT": "11.25"}]
+        result = enrich_total_price(rows)
+        self.assertAlmostEqual(result[0]["TOTAL_PRICE"], 965.732625, places=6)
 
     def test_parse_offer_metrics_ignores_redemption_rows(self) -> None:
         columns = ["offertype", "offerdate", "offerdatestart", "offerdateend"]
