@@ -95,7 +95,7 @@ PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 COUPON_FORMULA_SOURCE_COLUMN_NAME = "COUPON_FORMULA_SOURCE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 OFFER_VERIFICATION_CACHE_TTL_DAYS = 7
-OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 7
+OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 8
 COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
@@ -408,7 +408,7 @@ def save_daily_security_cache(secid_to_metrics: dict[str, dict[str, Any]]) -> No
 
 
 def load_offer_verification_cache() -> dict[str, dict[str, Any]]:
-    """Читает 7-дневный кэш проверки оферт через ДОХОД и Corpbonds."""
+    """Читает 7-дневный кэш проверки оферт через Corpbonds."""
     if not OFFER_VERIFICATION_CACHE_FILE.exists():
         return {}
 
@@ -431,7 +431,7 @@ def load_offer_verification_cache() -> dict[str, dict[str, Any]]:
 
 
 def save_offer_verification_cache(rows: dict[str, dict[str, Any]]) -> None:
-    """Сохраняет 7-дневный кэш проверки оферт через ДОХОД и Corpbonds."""
+    """Сохраняет 7-дневный кэш проверки оферт через Corpbonds."""
     payload = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "schema_version": OFFER_VERIFICATION_CACHE_SCHEMA_VERSION,
@@ -899,14 +899,34 @@ def parse_corpbonds_offer_metrics(session: requests.Session, isin: str, secid: s
         full_text = " | ".join(lines)
 
         offer_date = None
+
+        def find_nearby_date(start_idx: int) -> str | None:
+            direct_date = extract_offer_date_from_text(lines[start_idx])
+            if direct_date:
+                return direct_date
+            for shift in range(1, 8):
+                probe_idx = start_idx + shift
+                if probe_idx >= len(lines):
+                    break
+                candidate = extract_offer_date_from_text(lines[probe_idx])
+                if candidate:
+                    return candidate
+            return None
+
         for idx, line in enumerate(lines):
-            if "дата ближайшей оферты" not in line.lower():
+            if line.strip().lower() != "ближайшая дата":
                 continue
-            offer_date = extract_offer_date_from_text(line)
-            if offer_date is None and idx + 1 < len(lines):
-                offer_date = extract_offer_date_from_text(lines[idx + 1])
+            offer_date = find_nearby_date(idx)
             if offer_date:
                 break
+
+        if offer_date is None:
+            for idx, line in enumerate(lines):
+                if "дата ближайшей оферты" not in line.lower():
+                    continue
+                offer_date = find_nearby_date(idx)
+                if offer_date:
+                    break
 
         offer_type = "✖"
         for idx, line in enumerate(lines):
@@ -1735,7 +1755,7 @@ def enrich_with_daily_metrics(
 
     if offer_batches:
         logging.info(
-            "Проверка оферт через ДОХОД и Corpbonds: нужно обработать %s ISIN (%s пакетов, кэш %s дней, потоков=%s).",
+            "Проверка оферт через Corpbonds: нужно обработать %s ISIN (%s пакетов, кэш %s дней, потоков=%s).",
             len(offer_jobs),
             len(offer_batches),
             OFFER_VERIFICATION_CACHE_TTL_DAYS,
@@ -1743,70 +1763,47 @@ def enrich_with_daily_metrics(
         )
 
     if offer_jobs:
-        source_results: dict[str, dict[str, dict[str, Any]]] = {"dohod": {}, "corpbonds": {}}
+        source_results: dict[str, dict[str, dict[str, Any]]] = {"corpbonds": {}}
 
-        def resolve_offer_source_job(source_name: str, isin: str, secid: str) -> tuple[str, str, dict[str, Any] | None, str | None]:
+        def resolve_offer_source_job(isin: str, secid: str) -> tuple[str, dict[str, Any] | None, str | None]:
             try:
                 with build_session() as local_session:
-                    if source_name == "dohod":
-                        offer_type, offer_date = parse_dohod_offer_metrics(local_session, isin)
-                        return source_name, isin, {
-                            HAS_PUT_CALL_OFFER_COLUMN_NAME: normalize_offer_type(offer_type),
-                            PUT_CALL_OFFER_DATE_COLUMN_NAME: offer_date or "",
-                            "lookup": "isin",
-                        }, None
-
-                    corpbonds_type, corpbonds_date, corpbonds_lookup = parse_corpbonds_offer_metrics(local_session, isin, secid or None)
-                    return source_name, isin, {
-                        HAS_PUT_CALL_OFFER_COLUMN_NAME: normalize_offer_type(corpbonds_type),
+                    _offer_type, corpbonds_date, corpbonds_lookup = parse_corpbonds_offer_metrics(local_session, isin, secid or None)
+                    return isin, {
+                        HAS_PUT_CALL_OFFER_COLUMN_NAME: "✔" if corpbonds_date else "✖",
                         PUT_CALL_OFFER_DATE_COLUMN_NAME: corpbonds_date or "",
                         "lookup": corpbonds_lookup,
                     }, None
             except Exception as exc:
-                return source_name, isin, None, str(exc)
+                return isin, None, str(exc)
 
         with ThreadPoolExecutor(max_workers=OFFER_SOURCE_MAX_WORKERS) as executor:
-            futures = []
-            for isin, secid in offer_jobs:
-                futures.append(executor.submit(resolve_offer_source_job, "dohod", isin, secid or ""))
-                futures.append(executor.submit(resolve_offer_source_job, "corpbonds", isin, secid or ""))
+            futures = [executor.submit(resolve_offer_source_job, isin, secid or "") for isin, secid in offer_jobs]
 
             for processed, future in enumerate(as_completed(futures), start=1):
-                source_name, isin, payload, error_text = future.result()
+                isin, payload, error_text = future.result()
                 if payload is not None:
-                    source_results[source_name][isin] = payload
+                    source_results["corpbonds"][isin] = payload
                 elif processed % 30 == 0:
-                    logging.info("Проверка оферт: временная ошибка источника %s по %s: %s", source_name, isin, error_text)
+                    logging.info("Проверка оферт: временная ошибка Corpbonds по %s: %s", isin, error_text)
 
                 if processed % 50 == 0 or processed == len(futures):
                     logging.info("Проверка оферт: обработано задач %s/%s.", processed, len(futures))
 
         checked_at = datetime.now().isoformat(timespec="seconds")
         for isin, secid in offer_jobs:
-            dohod_row = source_results["dohod"].get(isin)
             corpbonds_row = source_results["corpbonds"].get(isin)
 
-            if dohod_row is None and corpbonds_row is None:
-                logging.warning("Не удалось проверить оферту по внешним источникам для %s (оба источника недоступны).", isin)
+            if corpbonds_row is None:
+                logging.warning("Не удалось проверить оферту через Corpbonds для %s.", isin)
                 continue
 
-            dohod_type = normalize_offer_type(str((dohod_row or {}).get(HAS_PUT_CALL_OFFER_COLUMN_NAME, "✖")))
-            dohod_date = str((dohod_row or {}).get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "") or None
-            corpbonds_type = normalize_offer_type(str((corpbonds_row or {}).get(HAS_PUT_CALL_OFFER_COLUMN_NAME, "✖")))
-            corpbonds_date = str((corpbonds_row or {}).get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "") or None
-            merged_type, merged_date = merge_offer_metrics(dohod_type, dohod_date, corpbonds_type, corpbonds_date)
-
-            source_parts: list[str] = []
-            if dohod_row is not None:
-                source_parts.append("dohod")
-            if corpbonds_row is not None:
-                lookup = str(corpbonds_row.get("lookup") or "isin")
-                source_parts.append(f"corpbonds:{lookup}")
-
+            corpbonds_date = str((corpbonds_row or {}).get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "")
+            lookup = str(corpbonds_row.get("lookup") or "isin")
             offer_cache[isin] = {
-                HAS_PUT_CALL_OFFER_COLUMN_NAME: merged_type,
-                PUT_CALL_OFFER_DATE_COLUMN_NAME: merged_date or "",
-                "source": "+".join(source_parts) if source_parts else "none",
+                HAS_PUT_CALL_OFFER_COLUMN_NAME: "✔" if corpbonds_date else "✖",
+                PUT_CALL_OFFER_DATE_COLUMN_NAME: corpbonds_date,
+                "source": f"corpbonds:{lookup}",
                 "checked_at": checked_at,
             }
 
@@ -1823,11 +1820,10 @@ def enrich_with_daily_metrics(
 
         isin = str(row.get("ISIN") or "")
         offer_entry = offer_cache.get(isin, {})
-        external_offer_type = normalize_offer_type(str(offer_entry.get(HAS_PUT_CALL_OFFER_COLUMN_NAME, "✖")))
         external_offer_date = str(offer_entry.get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "")
 
-        external_has_offer = external_offer_type in {"PUT", "Call"} and bool(external_offer_date)
-        moex_has_offer = moex_offer_type in {"PUT", "Call"} and bool(moex_offer_date)
+        external_has_offer = bool(parse_date_safe(external_offer_date))
+        moex_has_offer = bool(parse_date_safe(moex_offer_date))
 
         has_put_call_offer = "✖"
         put_call_offer_date = ""
@@ -2171,7 +2167,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "QUALIFIED_INVESTOR", "Описание": "Показывает, предназначена ли облигация только для квалифицированных инвесторов: ✔ — да, ✖ — нет."},
         {"Поле": "BOND_TYPE", "Описание": "Тип облигации по купону (например: фиксированная, флоатер и т.д.)."},
         {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Есть ли оферта: ✔ (есть) или ✖ (нет)."},
-        {"Поле": "PUT_CALL_OFFER_DATE", "Описание": "Ближайшая дата оферты (проверка через ДОХОД + Corpbonds, с fallback на MOEX)."},
+        {"Поле": "PUT_CALL_OFFER_DATE", "Описание": "Ближайшая дата оферты (MOEX + проверка Corpbonds для бумаг без оферты на MOEX)."},
         {"Поле": "HAS_AMORTIZATION", "Описание": "Есть ли у бумаги амортизация номинала: ✔ — да, ✖ — нет."},
         {"Поле": "AMORTIZATION_START_DATE", "Описание": "Дата начала амортизации (если есть)."},
                 {"Поле": "MATDATE", "Описание": "Дата погашения облигации (когда эмитент должен вернуть номинал)."},

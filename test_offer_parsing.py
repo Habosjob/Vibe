@@ -107,11 +107,47 @@ class OfferParsingTests(unittest.TestCase):
         self.assertEqual(offer_date, "2029-09-15")
         self.assertEqual(lookup, "isin")
 
+
+
+    def test_parse_corpbonds_offer_metrics_prefers_nearest_date_label(self) -> None:
+        html = """
+        <html><body>
+        <div>Ближайшая дата</div>
+        <div>28.09.2027</div>
+        <div>Дата ближайшей оферты</div>
+        <div>24.09.2027</div>
+        <div>put-оферта</div>
+        </body></html>
+        """
+        with patch.object(script, "fetch_corpbonds_offer_page_html", return_value=html):
+            offer_type, offer_date, lookup = parse_corpbonds_offer_metrics(session=None, isin="RU000TEST", secid=None)
+
+        self.assertEqual(offer_type, "PUT")
+        self.assertEqual(offer_date, "2027-09-28")
+        self.assertEqual(lookup, "isin")
+
+    def test_parse_corpbonds_offer_metrics_finds_date_in_nearby_lines(self) -> None:
+        html = """
+        <html><body>
+        <div>Дата ближайшей оферты</div>
+        <div>служебная строка</div>
+        <div>ещё строка</div>
+        <div>28.09.2027</div>
+        <div>put-оферта</div>
+        </body></html>
+        """
+        with patch.object(script, "fetch_corpbonds_offer_page_html", return_value=html):
+            offer_type, offer_date, lookup = parse_corpbonds_offer_metrics(session=None, isin="RU000TEST", secid=None)
+
+        self.assertEqual(offer_type, "PUT")
+        self.assertEqual(offer_date, "2027-09-28")
+        self.assertEqual(lookup, "isin")
+
     def test_load_offer_verification_cache_clears_old_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "offer_verification_cache.json"
             cache_path.write_text(
-                '{"schema_version": 6, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
+                '{"schema_version": 7, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
                 encoding="utf-8",
             )
 
