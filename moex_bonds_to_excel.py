@@ -95,7 +95,7 @@ PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 COUPON_FORMULA_SOURCE_COLUMN_NAME = "COUPON_FORMULA_SOURCE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 OFFER_VERIFICATION_CACHE_TTL_DAYS = 7
-OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 5
+OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 6
 COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
@@ -1361,8 +1361,8 @@ def validate_rows(rows: list[dict[str, Any]]) -> None:
     bonds_with_offer_on_maturity_count = 0
 
     for row in rows:
-        offer_type = normalize_offer_type(str(row.get(HAS_PUT_CALL_OFFER_COLUMN_NAME) or ""))
-        if offer_type not in {"PUT", "Call"}:
+        has_offer_sign = str(row.get(HAS_PUT_CALL_OFFER_COLUMN_NAME) or "").strip()
+        if has_offer_sign != "✔":
             continue
 
         bonds_with_offer_count += 1
@@ -1572,15 +1572,29 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     return rows
 
 
-def select_offer_jobs_for_refresh(rows: list[dict[str, Any]], offer_cache: dict[str, dict[str, Any]], now: datetime) -> list[tuple[str, str]]:
-    """Выбирает часть бумаг для пере-проверки оферт так, чтобы обновить все ISIN в течение 7 дней."""
+def select_offer_jobs_for_refresh(
+    rows: list[dict[str, Any]],
+    offer_cache: dict[str, dict[str, Any]],
+    daily_cache: dict[str, dict[str, Any]],
+    now: datetime,
+) -> list[tuple[str, str]]:
+    """Выбирает бумаги для внешней проверки оферт (только там, где MOEX не показал оферту)."""
     unique_jobs: dict[str, str] = {}
     for row in rows:
         isin = str(row.get("ISIN") or "").strip()
+        secid = str(row.get("SECID") or "").strip()
         if not isin:
             continue
+
+        daily_entry = daily_cache.get(secid, {})
+        moex_offer_type = normalize_offer_type(str(daily_entry.get("MOEX_HAS_PUT_CALL_OFFER", "✖")))
+        moex_offer_date = str(daily_entry.get("MOEX_PUT_CALL_OFFER_DATE", "") or "").strip()
+        moex_has_offer = moex_offer_type in {"PUT", "Call"} and bool(moex_offer_date)
+        if moex_has_offer:
+            continue
+
         if isin not in unique_jobs:
-            unique_jobs[isin] = str(row.get("SECID") or "").strip()
+            unique_jobs[isin] = secid
 
     total = len(unique_jobs)
     if total == 0:
@@ -1714,7 +1728,7 @@ def enrich_with_daily_metrics(
         save_daily_security_cache(daily_cache)
 
     if include_external_offers:
-        offer_jobs = select_offer_jobs_for_refresh(rows, offer_cache, now)
+        offer_jobs = select_offer_jobs_for_refresh(rows, offer_cache, daily_cache, now)
     else:
         offer_jobs = []
     offer_batches = chunked(offer_jobs, OFFER_CHECK_BATCH_SIZE)
@@ -1812,22 +1826,22 @@ def enrich_with_daily_metrics(
         external_offer_type = normalize_offer_type(str(offer_entry.get(HAS_PUT_CALL_OFFER_COLUMN_NAME, "✖")))
         external_offer_date = str(offer_entry.get(PUT_CALL_OFFER_DATE_COLUMN_NAME, "") or "")
 
-        has_put_call_offer = external_offer_type
-        put_call_offer_date = external_offer_date
+        external_has_offer = external_offer_type in {"PUT", "Call"} and bool(external_offer_date)
+        moex_has_offer = moex_offer_type in {"PUT", "Call"} and bool(moex_offer_date)
 
-        if has_put_call_offer == "✖" and moex_offer_type in {"PUT", "Call"}:
-            has_put_call_offer = moex_offer_type
-            if moex_offer_date:
-                put_call_offer_date = moex_offer_date
-
-        if has_put_call_offer in {"PUT", "Call"} and not put_call_offer_date and moex_offer_date:
+        if external_has_offer:
+            put_call_offer_date = external_offer_date
+        elif moex_has_offer:
             put_call_offer_date = moex_offer_date
+        else:
+            put_call_offer_date = ""
 
         if has_put_call_offer in {"PUT", "Call"} and not put_call_offer_date:
             has_put_call_offer = "✖"
 
         maturity_date = str(row.get(MATURITY_DATE_COLUMN_NAME) or "")
-        if has_put_call_offer in {"PUT", "Call"} and put_call_offer_date and maturity_date and put_call_offer_date == maturity_date:
+        has_put_call_offer = "✔" if put_call_offer_date else "✖"
+        if has_put_call_offer == "✔" and maturity_date and put_call_offer_date == maturity_date:
             has_put_call_offer = "✖"
             put_call_offer_date = ""
 
@@ -2154,7 +2168,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "ISSUER_BOND_CLASS", "Описание": "Тип бумаги на рынке облигаций (например: государственный, корпоративный, муниципальный, иностранный)."},
         {"Поле": "QUALIFIED_INVESTOR", "Описание": "Показывает, предназначена ли облигация только для квалифицированных инвесторов: ✔ — да, ✖ — нет."},
         {"Поле": "BOND_TYPE", "Описание": "Тип облигации по купону (например: фиксированная, флоатер и т.д.)."},
-        {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Тип ближайшей оферты: PUT, Call или ✖ (оферта не найдена)."},
+        {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Есть ли оферта: ✔ (есть) или ✖ (нет)."},
         {"Поле": "PUT_CALL_OFFER_DATE", "Описание": "Ближайшая дата оферты (проверка через ДОХОД + Corpbonds, с fallback на MOEX)."},
         {"Поле": "HAS_AMORTIZATION", "Описание": "Есть ли у бумаги амортизация номинала: ✔ — да, ✖ — нет."},
         {"Поле": "AMORTIZATION_START_DATE", "Описание": "Дата начала амортизации (если есть)."},

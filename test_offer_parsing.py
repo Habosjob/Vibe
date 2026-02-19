@@ -11,6 +11,7 @@ from moex_bonds_to_excel import (
     parse_corpbonds_offer_metrics,
     parse_dohod_offer_metrics,
     parse_offer_metrics,
+    select_offer_jobs_for_refresh,
     validate_rows,
 )
 
@@ -53,8 +54,8 @@ class OfferParsingTests(unittest.TestCase):
 
     def test_validate_rows_logs_offer_quality_counters(self) -> None:
         rows = [
-            {"ISIN": "A", "SECID": "A", "HAS_PUT_CALL_OFFER": "PUT", "PUT_CALL_OFFER_DATE": "", "MATDATE": "2099-01-01", "COUPONPERCENT": 10},
-            {"ISIN": "B", "SECID": "B", "HAS_PUT_CALL_OFFER": "Call", "PUT_CALL_OFFER_DATE": "2099-02-01", "MATDATE": "2099-02-01", "COUPONPERCENT": 9},
+            {"ISIN": "A", "SECID": "A", "HAS_PUT_CALL_OFFER": "✔", "PUT_CALL_OFFER_DATE": "", "MATDATE": "2099-01-01", "COUPONPERCENT": 10},
+            {"ISIN": "B", "SECID": "B", "HAS_PUT_CALL_OFFER": "✔", "PUT_CALL_OFFER_DATE": "2099-02-01", "MATDATE": "2099-02-01", "COUPONPERCENT": 9},
             {"ISIN": "C", "SECID": "C", "HAS_PUT_CALL_OFFER": "✖", "PUT_CALL_OFFER_DATE": "", "MATDATE": "2099-03-01", "COUPONPERCENT": 8},
         ]
 
@@ -109,7 +110,7 @@ class OfferParsingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "offer_verification_cache.json"
             cache_path.write_text(
-                '{"schema_version": 4, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
+                '{"schema_version": 5, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
                 encoding="utf-8",
             )
 
@@ -118,6 +119,20 @@ class OfferParsingTests(unittest.TestCase):
 
             self.assertEqual(rows, {})
             self.assertFalse(cache_path.exists())
+
+    def test_select_offer_jobs_for_refresh_checks_only_moex_without_offer(self) -> None:
+        rows = [
+            {"ISIN": "I1", "SECID": "S1"},
+            {"ISIN": "I2", "SECID": "S2"},
+        ]
+        daily_cache = {
+            "S1": {"MOEX_HAS_PUT_CALL_OFFER": "PUT", "MOEX_PUT_CALL_OFFER_DATE": "2030-01-01"},
+            "S2": {"MOEX_HAS_PUT_CALL_OFFER": "✖", "MOEX_PUT_CALL_OFFER_DATE": ""},
+        }
+        jobs = select_offer_jobs_for_refresh(rows, offer_cache={}, daily_cache=daily_cache, now=script.datetime.now())
+
+        self.assertEqual(jobs, [("I2", "S2")])
+
 
 
 if __name__ == "__main__":
