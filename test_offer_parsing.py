@@ -6,6 +6,9 @@ from unittest.mock import patch
 import moex_bonds_to_excel as script
 from moex_bonds_to_excel import (
     calculate_coupon_value,
+    calculate_total_price,
+    enrich_total_price,
+    has_non_zero_value,
     enrich_coupon_value_from_percent,
     enrich_with_daily_metrics,
     fetch_emitter_info_for_security,
@@ -31,6 +34,45 @@ class OfferParsingTests(unittest.TestCase):
         self.assertEqual(normalize_offer_type("Call-опцион"), "Call")
         self.assertEqual(normalize_offer_type("Оферта"), "PUT")
         self.assertEqual(normalize_offer_type("Погашение"), "✖")
+
+    def test_calculate_total_price(self) -> None:
+        result = calculate_total_price(face_value=1000, prev_price=97.5, accrued_int=12.34)
+        self.assertAlmostEqual(result, 987.83367, places=6)
+
+    def test_has_non_zero_value(self) -> None:
+        self.assertTrue(has_non_zero_value("101.25"))
+        self.assertTrue(has_non_zero_value(" 0,10 "))
+        self.assertFalse(has_non_zero_value(""))
+        self.assertFalse(has_non_zero_value("0"))
+
+    def test_enrich_total_price_adds_column_only_when_conditions_met(self) -> None:
+        rows = [
+            {
+                "FACEVALUE": "1000",
+                "PREVPRICE": "95.4",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "VOLTODAY": "250",
+            },
+            {
+                "FACEVALUE": "1000",
+                "PREVPRICE": "95.4",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "VOLTODAY": "0",
+            },
+            {
+                "FACEVALUE": "1000",
+                "PREVPRICE": "0",
+                "ACCRUEDINT": "11.25",
+                "PREVLEGALCLOSEPRICE": "95.5",
+                "VOLTODAY": "250",
+            },
+        ]
+        result = enrich_total_price(rows)
+        self.assertAlmostEqual(result[0]["TOTAL_PRICE"], 965.732625, places=6)
+        self.assertEqual(result[1]["TOTAL_PRICE"], "")
+        self.assertEqual(result[2]["TOTAL_PRICE"], "")
 
     def test_parse_offer_metrics_ignores_redemption_rows(self) -> None:
         columns = ["offertype", "offerdate", "offerdatestart", "offerdateend"]
