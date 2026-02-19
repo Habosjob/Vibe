@@ -1,6 +1,10 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from moex_bonds_to_excel import normalize_coupon_formula_source, normalize_offer_type, parse_offer_metrics
+import moex_bonds_to_excel as script
+from moex_bonds_to_excel import normalize_coupon_formula_source, normalize_offer_type, parse_offer_metrics, validate_rows
 
 
 class OfferParsingTests(unittest.TestCase):
@@ -38,6 +42,35 @@ class OfferParsingTests(unittest.TestCase):
 
         self.assertEqual(offer_type, "Call")
         self.assertEqual(offer_date, "2099-07-15")
+
+    def test_validate_rows_logs_offer_quality_counters(self) -> None:
+        rows = [
+            {"ISIN": "A", "SECID": "A", "HAS_PUT_CALL_OFFER": "PUT", "PUT_CALL_OFFER_DATE": "", "MATDATE": "2099-01-01", "COUPONPERCENT": 10},
+            {"ISIN": "B", "SECID": "B", "HAS_PUT_CALL_OFFER": "Call", "PUT_CALL_OFFER_DATE": "2099-02-01", "MATDATE": "2099-02-01", "COUPONPERCENT": 9},
+            {"ISIN": "C", "SECID": "C", "HAS_PUT_CALL_OFFER": "✖", "PUT_CALL_OFFER_DATE": "", "MATDATE": "2099-03-01", "COUPONPERCENT": 8},
+        ]
+
+        with self.assertLogs(level="INFO") as logs:
+            validate_rows(rows)
+
+        summary = "\n".join(logs.output)
+        self.assertIn("бумаг с офертами=2", summary)
+        self.assertIn("с пустой датой оферты=1", summary)
+        self.assertIn("оферта совпадает с датой погашения=1", summary)
+
+    def test_load_offer_verification_cache_clears_old_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "offer_verification_cache.json"
+            cache_path.write_text(
+                '{"schema_version": 2, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
+                encoding="utf-8",
+            )
+
+            with patch.object(script, "OFFER_VERIFICATION_CACHE_FILE", cache_path):
+                rows = script.load_offer_verification_cache()
+
+            self.assertEqual(rows, {})
+            self.assertFalse(cache_path.exists())
 
 
 if __name__ == "__main__":
