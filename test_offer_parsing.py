@@ -9,6 +9,7 @@ from moex_bonds_to_excel import (
     enrich_coupon_value_from_percent,
     enrich_with_daily_metrics,
     merge_offer_metrics,
+    normalize_issuer_rating,
     normalize_coupon_formula_source,
     normalize_offer_type,
     parse_corpbonds_offer_metrics,
@@ -75,6 +76,10 @@ class OfferParsingTests(unittest.TestCase):
         rating = extract_issuer_rating_from_description(description_rows)
 
         self.assertEqual(rating, "")
+
+    def test_normalize_issuer_rating_sets_fallback_when_empty(self) -> None:
+        self.assertEqual(normalize_issuer_rating(""), "Нет данных на MOEX")
+        self.assertEqual(normalize_issuer_rating("  A+(RU)  "), "A+(RU)")
 
     def test_validate_rows_logs_offer_quality_counters(self) -> None:
         rows = [

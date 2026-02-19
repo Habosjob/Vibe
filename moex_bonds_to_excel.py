@@ -81,6 +81,7 @@ ISSUER_COLUMN_NAME = "ISSUER_NAME"
 ISSUER_INN_COLUMN_NAME = "ISSUER_INN"
 ISSUER_BOND_CLASS_COLUMN_NAME = "ISSUER_BOND_CLASS"
 ISSUER_RATING_COLUMN_NAME = "ISSUER_RATING"
+DEFAULT_ISSUER_RATING = "Нет данных на MOEX"
 FIRST_COLUMN_NAME = "ISIN"
 GROUP_SEPARATOR_PREFIX = "GROUP_SEPARATOR__"
 QUALIFIED_INVESTOR_COLUMN_NAME = "QUALIFIED_INVESTOR"
@@ -1389,6 +1390,12 @@ def extract_issuer_rating_from_description(description_rows: list[list[Any]]) ->
     return ""
 
 
+def normalize_issuer_rating(raw_rating: str) -> str:
+    """Нормализует рейтинг эмитента для отчёта: если MOEX не передал значение, ставится понятная заглушка."""
+    cleaned = str(raw_rating or "").strip()
+    return cleaned if cleaned else DEFAULT_ISSUER_RATING
+
+
 def fetch_emitter_info_for_security(session: requests.Session, secid: str) -> tuple[int | None, str, str, int, bool, str]:
     """Возвращает ID эмитента, квалификацию, тип облигации и период купона по SECID."""
     params = {
@@ -1634,7 +1641,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                     if secid in secids_with_zero_coupon_period:
                         resolved_coupon_periods[secid] = coupon_period
                     resolved_is_structural[secid] = is_structural
-                    resolved_ratings[secid] = issuer_rating
+                    resolved_ratings[secid] = normalize_issuer_rating(issuer_rating)
                 except Exception as exc:
                     logging.warning("Не удалось получить данные эмитента для %s: %s", secid, exc)
                     resolved[secid] = None
@@ -1643,7 +1650,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                     if secid in secids_with_zero_coupon_period:
                         resolved_coupon_periods[secid] = 0
                     resolved_is_structural[secid] = False
-                    resolved_ratings[secid] = ""
+                    resolved_ratings[secid] = DEFAULT_ISSUER_RATING
         return resolved, resolved_qualified, resolved_bond_types, resolved_coupon_periods, resolved_is_structural, resolved_ratings
 
     if secid_batches:
@@ -1723,7 +1730,7 @@ def enrich_with_issuer_names(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         row[ISSUER_COLUMN_NAME] = emitter_cache.get(emitter_id) or ""
         row[ISSUER_INN_COLUMN_NAME] = emitter_inn_cache.get(emitter_id) or ""
         row[ISSUER_BOND_CLASS_COLUMN_NAME] = resolve_issuer_bond_class(row)
-        row[ISSUER_RATING_COLUMN_NAME] = secid_to_issuer_rating.get(secid, "")
+        row[ISSUER_RATING_COLUMN_NAME] = secid_to_issuer_rating.get(secid, DEFAULT_ISSUER_RATING)
         row[QUALIFIED_INVESTOR_COLUMN_NAME] = secid_to_qualified_sign.get(secid, "✖")
         row[BOND_TYPE_COLUMN_NAME] = secid_to_bond_type.get(secid, "Не указан")
         row["EXCLUDE_BY_BOND_TYPE"] = bool(secid_to_is_structural.get(secid, False))
@@ -2328,7 +2335,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "ISSUER_NAME", "Описание": "Наименование эмитента облигации (компании или организации, которая выпустила бумагу)."},
         {"Поле": "ISSUER_INN", "Описание": "ИНН эмитента для быстрой сверки компании в ваших внутренних системах и документах."},
         {"Поле": "ISSUER_BOND_CLASS", "Описание": "Тип бумаги на рынке облигаций (например: государственный, корпоративный, муниципальный, иностранный)."},
-        {"Поле": "ISSUER_RATING", "Описание": "Рейтинг эмитента по данным карточки бумаги на MOEX. Если поле пустое, биржа не передала рейтинг для этого выпуска."},
+        {"Поле": "ISSUER_RATING", "Описание": "Рейтинг эмитента по данным карточки бумаги на MOEX. Если биржа не передала рейтинг, ставится значение 'Нет данных на MOEX'."},
         {"Поле": "QUALIFIED_INVESTOR", "Описание": "Показывает, предназначена ли облигация только для квалифицированных инвесторов: ✔ — да, ✖ — нет."},
         {"Поле": "BOND_TYPE", "Описание": "Тип облигации по купону (например: фиксированная, флоатер и т.д.)."},
         {"Поле": "HAS_PUT_CALL_OFFER", "Описание": "Есть ли оферта: ✔ (есть) или ✖ (нет)."},
