@@ -2001,7 +2001,7 @@ def save_raw(rows: list[dict[str, Any]]) -> None:
 
 
 def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
-    """Применяет форматирование итогового Excel, добавляет разделители групп и скрывает SECID."""
+    """Применяет форматирование итогового Excel, добавляет групповые колонки и скрывает SECID."""
     ws = writer.sheets["MOEX_BONDS"]
     ws.insert_rows(1)
     ws.freeze_panes = "A3"
@@ -2026,7 +2026,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
     separator_columns = {c for c in df.columns if str(c).startswith(GROUP_SEPARATOR_PREFIX)}
     calculated_coupon_cells: set[tuple[str, str]] = df.attrs.get("calculated_coupon_cells", set())
 
-    ws.row_dimensions[1].height = 54
+    ws.row_dimensions[1].height = 78
     ws.row_dimensions[2].height = 22
 
     separator_indexes = [idx for idx, col in enumerate(df.columns, start=1) if col in separator_columns]
@@ -2041,7 +2041,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
             header_cell.value = ""
             header_cell.fill = separator_fill_by_idx[col_idx]
             header_cell.font = group_font
-            header_cell.alignment = Alignment(horizontal="center", vertical="center")
+            header_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             continue
 
         cell = ws.cell(row=2, column=col_idx)
@@ -2091,7 +2091,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         col_letter = get_column_letter(idx)
 
         if col_name in separator_columns:
-            ws.column_dimensions[col_letter].width = 7
+            ws.column_dimensions[col_letter].width = 15
             continue
 
         max_len = max(
@@ -2129,15 +2129,15 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
         group_indexes = list(range(sep_idx + 1, next_sep_idx))
 
         group_title = separator_titles.get(df.columns[sep_idx - 1], "Группа")
-        ws.merge_cells(start_row=1, start_column=sep_idx, end_row=2, end_column=sep_idx)
         top_cell = ws.cell(row=1, column=sep_idx)
         top_cell.value = group_title
         top_cell.fill = separator_fill_by_idx[sep_idx]
         top_cell.font = group_font
-        top_cell.alignment = Alignment(horizontal="center", vertical="center", text_rotation=90, wrap_text=True)
+        top_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        merged_second_cell = ws.cell(row=2, column=sep_idx)
-        merged_second_cell.fill = separator_fill_by_idx[sep_idx]
+        second_row_cell = ws.cell(row=2, column=sep_idx)
+        second_row_cell.fill = separator_fill_by_idx[sep_idx]
+        second_row_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
         if not group_indexes:
             continue
