@@ -106,6 +106,7 @@ COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
 TOTAL_PRICE_CACHE_SCHEMA_VERSION = 3
+CALCULATED_YIELD_MAX_WORKERS = 10
 DOHOD_BOND_URL = "https://analytics.dohod.ru/bond/{isin}"
 CORPBONDS_BOND_URL = "https://corpbonds.ru/bond/{isin}"
 DOHOD_USER_AGENT = (
@@ -660,6 +661,142 @@ def enrich_total_price(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     save_total_price_cache(cache)
     logging.info("TOTAL_PRICE рассчитан для %s выпусков.", calculated_count)
+    return rows
+
+
+def fetch_bond_cashflows_until_date(session: requests.Session, secid: str, end_date: datetime) -> tuple[list[tuple[datetime, float]], list[tuple[datetime, float]]]:
+    """Загружает будущие купоны и амортизации по бумаге до указанной даты включительно."""
+    params = {"iss.meta": "off"}
+    response = session.get(f"https://iss.moex.com/iss/securities/{secid}/bondization.json", params=params, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+
+    coupons_data = data.get("coupons", {}).get("data", [])
+    coupons_columns = data.get("coupons", {}).get("columns", [])
+    amort_data = data.get("amortizations", {}).get("data", [])
+    amort_columns = data.get("amortizations", {}).get("columns", [])
+
+    coupon_flows: list[tuple[datetime, float]] = []
+    amort_flows: list[tuple[datetime, float]] = []
+    today = datetime.now().date()
+
+    for raw_coupon in coupons_data:
+        coupon = dict(zip(coupons_columns, raw_coupon))
+        coupon_date = parse_date_safe(coupon.get("coupondate"))
+        if coupon_date is None:
+            continue
+        if coupon_date.date() < today or coupon_date.date() > end_date.date():
+            continue
+        coupon_value = parse_float_safe(coupon.get("value"))
+        if coupon_value <= 0:
+            continue
+        coupon_flows.append((coupon_date, coupon_value))
+
+    for raw_amort in amort_data:
+        amort = dict(zip(amort_columns, raw_amort))
+        amort_date = parse_date_safe(amort.get("amortdate"))
+        if amort_date is None:
+            continue
+        if amort_date.date() < today or amort_date.date() > end_date.date():
+            continue
+        amort_value = parse_float_safe(amort.get("value"))
+        if amort_value <= 0:
+            continue
+        amort_flows.append((amort_date, amort_value))
+
+    return coupon_flows, amort_flows
+
+
+def calculate_cashflow_yield(total_price: float, cashflows: list[tuple[datetime, float]]) -> float | None:
+    """Считает доходность через дисконтирование будущих денежных потоков (без реинвестирования купонов)."""
+    if total_price <= 0 or not cashflows:
+        return None
+
+    start_date = datetime.now().date()
+    dated_flows: list[tuple[int, float]] = []
+    for flow_date, amount in cashflows:
+        days = (flow_date.date() - start_date).days
+        if days <= 0 or amount <= 0:
+            continue
+        dated_flows.append((days, amount))
+
+    if not dated_flows:
+        return None
+
+    def npv(rate: float) -> float:
+        total = 0.0
+        for days, amount in dated_flows:
+            total += amount / ((1 + rate) ** (days / 365))
+        return total - total_price
+
+    left, right = -0.99, 10.0
+    left_npv, right_npv = npv(left), npv(right)
+    if left_npv * right_npv > 0:
+        return None
+
+    for _ in range(120):
+        mid = (left + right) / 2
+        mid_npv = npv(mid)
+        if abs(mid_npv) < 1e-8:
+            return mid * 100
+        if left_npv * mid_npv <= 0:
+            right = mid
+            right_npv = mid_npv
+        else:
+            left = mid
+            left_npv = mid_npv
+
+    return ((left + right) / 2) * 100
+
+
+def enrich_calculated_yield(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Пересчитывает YIELD из TOTAL_PRICE через денежные потоки; при оферте берёт дату оферты как дату погашения."""
+    logging.info("Этап 5.9/8: Расчёт YIELD через денежные потоки (TOTAL_PRICE, оферта, амортизация)...")
+
+    def process_row(row: dict[str, Any]) -> float | None:
+        secid = str(row.get("SECID") or "").strip()
+        if not secid:
+            return None
+
+        total_price = parse_float_safe(row.get(TOTAL_PRICE_COLUMN_NAME))
+        face_value = parse_float_safe(row.get("FACEVALUE"))
+        if total_price <= 0 or face_value <= 0:
+            return None
+
+        maturity_date = parse_date_safe(row.get(MATURITY_DATE_COLUMN_NAME))
+        offer_date = parse_date_safe(row.get(PUT_CALL_OFFER_DATE_COLUMN_NAME))
+        end_date = offer_date if offer_date is not None else maturity_date
+        if end_date is None or end_date.date() <= datetime.now().date():
+            return None
+
+        session = build_session()
+        try:
+            coupon_flows, amort_flows = fetch_bond_cashflows_until_date(session, secid, end_date)
+        finally:
+            session.close()
+
+        amort_sum = sum(amount for _, amount in amort_flows)
+        remaining_principal = max(face_value - amort_sum, 0.0)
+
+        all_flows = coupon_flows + amort_flows
+        if remaining_principal > 0:
+            all_flows.append((end_date, remaining_principal))
+
+        return calculate_cashflow_yield(total_price, all_flows)
+
+    with ThreadPoolExecutor(max_workers=CALCULATED_YIELD_MAX_WORKERS) as executor:
+        futures = {executor.submit(process_row, row): row for row in rows}
+        for future in as_completed(futures):
+            row = futures[future]
+            try:
+                calculated = future.result()
+            except Exception as exc:
+                logging.debug("Не удалось пересчитать YIELD для %s: %s", row.get("SECID"), exc)
+                continue
+            if calculated is None:
+                continue
+            row[YIELD_COLUMN_NAME] = round(calculated, 6)
+
     return rows
 
 
@@ -2578,7 +2715,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "VOLTODAY", "Описание": "Объём торгов за текущий день (в штуках/бумагах)."},
         {"Поле": "VALTODAY", "Описание": "Денежный оборот торгов за текущий день."},
         {"Поле": "NUMTRADES", "Описание": "Количество сделок за текущий день."},
-        {"Поле": "YIELD", "Описание": "Доходность к погашению по данным биржи (в процентах годовых)."},
+        {"Поле": "YIELD", "Описание": "Доходность по денежным потокам (в процентах годовых) без реинвестирования купонов. Цена покупки берётся из TOTAL_PRICE. Если есть оферта, расчёт ведётся до даты оферты. Для бумаг с амортизацией учитываются частичные возвраты номинала."},
     ]
 
     info_df = pd.DataFrame(info_rows)
@@ -2733,6 +2870,7 @@ def main() -> None:
     rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
     rows, calculated_coupon_value_cells = enrich_coupon_value_from_percent(rows)
     rows = enrich_total_price(rows)
+    rows = enrich_calculated_yield(rows)
 
     # 3) Повторная фильтрация после обогащения новыми данными
     rows = filter_rows_by_offer_date(rows)
