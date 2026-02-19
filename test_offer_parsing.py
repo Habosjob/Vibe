@@ -8,6 +8,7 @@ from moex_bonds_to_excel import (
     merge_offer_metrics,
     normalize_coupon_formula_source,
     normalize_offer_type,
+    parse_corpbonds_offer_metrics,
     parse_dohod_offer_metrics,
     parse_offer_metrics,
     validate_rows,
@@ -84,11 +85,31 @@ class OfferParsingTests(unittest.TestCase):
         self.assertEqual(offer_type, "✖")
         self.assertIsNone(offer_date)
 
+
+    def test_merge_offer_metrics_requires_date_for_offer_type(self) -> None:
+        offer_type, offer_date = merge_offer_metrics("PUT", None, "✖", None)
+        self.assertEqual(offer_type, "✖")
+        self.assertIsNone(offer_date)
+
+    def test_parse_corpbonds_offer_metrics_detects_call(self) -> None:
+        html = """
+        <html><body>
+        <div>Наличие call-опциона: Да</div>
+        <div>Дата ближайшей оферты: 15.09.2029</div>
+        </body></html>
+        """
+        with patch.object(script, "fetch_corpbonds_offer_page_html", return_value=html):
+            offer_type, offer_date, lookup = parse_corpbonds_offer_metrics(session=None, isin="RU000TEST", secid=None)
+
+        self.assertEqual(offer_type, "Call")
+        self.assertEqual(offer_date, "2029-09-15")
+        self.assertEqual(lookup, "isin")
+
     def test_load_offer_verification_cache_clears_old_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "offer_verification_cache.json"
             cache_path.write_text(
-                '{"schema_version": 3, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
+                '{"schema_version": 4, "rows": {"RU000A": {"HAS_PUT_CALL_OFFER": "PUT"}}}',
                 encoding="utf-8",
             )
 

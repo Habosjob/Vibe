@@ -95,7 +95,7 @@ PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 COUPON_FORMULA_SOURCE_COLUMN_NAME = "COUPON_FORMULA_SOURCE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 OFFER_VERIFICATION_CACHE_TTL_DAYS = 7
-OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 4
+OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 5
 COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
@@ -950,11 +950,11 @@ def merge_offer_metrics(dohod_type: str, dohod_date: str | None, corpbonds_type:
         return "✖", None
 
     candidate_dates = [date for date in [dohod_date, corpbonds_date] if parse_date_safe(date)]
-    if candidate_dates:
-        nearest = min(candidate_dates, key=lambda value: parse_date_safe(value) or datetime.max)
-        return offer_type, nearest
+    if not candidate_dates:
+        return "✖", None
 
-    return offer_type, None
+    nearest = min(candidate_dates, key=lambda value: parse_date_safe(value) or datetime.max)
+    return offer_type, nearest
 
 
 def fetch_reference_index_values(session: requests.Session) -> dict[str, float]:
@@ -1822,6 +1822,9 @@ def enrich_with_daily_metrics(
 
         if has_put_call_offer in {"PUT", "Call"} and not put_call_offer_date and moex_offer_date:
             put_call_offer_date = moex_offer_date
+
+        if has_put_call_offer in {"PUT", "Call"} and not put_call_offer_date:
+            has_put_call_offer = "✖"
 
         maturity_date = str(row.get(MATURITY_DATE_COLUMN_NAME) or "")
         if has_put_call_offer in {"PUT", "Call"} and put_call_offer_date and maturity_date and put_call_offer_date == maturity_date:

@@ -45,6 +45,7 @@
   - `Рынок`: `FACEVALUE`, `FACEUNIT`, `PRIMARYBOARDID`, `PREVLEGALCLOSEPRICE`, `PREVPRICE`, `VOLTODAY`, `VALTODAY`, `NUMTRADES`, `YIELD`.
 - `COUPON_FORMULA_SOURCE` — источник формулы для расчётного `COUPONPERCENT` (`DOHOD` или `CORPBONDS`).
 - Важная защита от ложных оферт: если дата оферты совпадает с датой погашения (`MATDATE`), такая запись автоматически очищается как не-оферта.
+- Дополнительная защита: если у бумаги нет даты оферты, поле `HAS_PUT_CALL_OFFER` автоматически приводится к `✖` (тип оферты без даты не сохраняется).
 - Расчётные значения `COUPONPERCENT` подсвечиваются жёлтым.
 - `SECID` скрыт (для технических связок).
 
