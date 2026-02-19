@@ -526,25 +526,50 @@ def calculate_coupon_value(face_value: float, coupon_percent: float, coupon_peri
 
 def parse_float_safe(value: Any) -> float:
     """Безопасно переводит значение в число с плавающей точкой; при ошибке возвращает 0.0."""
+    normalized = str(value or "").strip().replace(" ", "").replace(",", ".")
+    if not normalized:
+        return 0.0
     try:
-        return float(str(value or 0).replace(",", "."))
+        return float(normalized)
     except (TypeError, ValueError):
         return 0.0
 
 
+def has_non_zero_value(value: Any) -> bool:
+    """Проверяет, что значение непустое и не равно нулю."""
+    return parse_float_safe(value) != 0.0
+
+
 def calculate_total_price(face_value: float, prev_price: float, accrued_int: float) -> float:
-    """Считает итоговую цену: ((FACEVALUE * PREVPRICE / 100) + ACCRUEDINT) * 1.0005."""
-    return ((face_value * prev_price / 100) + accrued_int) * 1.0005
+    """Считает итоговую цену: рыночная цена + НКД + комиссия 0.05% от (рыночная цена + НКД)."""
+    market_price = face_value * prev_price / 100
+    base_with_accrued = market_price + accrued_int
+    commission = base_with_accrued * 0.0005
+    return market_price + accrued_int + commission
 
 
 def enrich_total_price(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Добавляет в каждую строку столбец TOTAL_PRICE по пользовательской формуле."""
+    """Добавляет TOTAL_PRICE только для ликвидных бумаг с валидной ценой закрытия и рыночной ценой."""
     logging.info("Этап 5.8/8: Расчёт итоговой цены TOTAL_PRICE...")
+    calculated_count = 0
+
     for row in rows:
+        if parse_float_safe(row.get(TRADE_VOLUME_COLUMN_NAME)) <= 0:
+            row[TOTAL_PRICE_COLUMN_NAME] = ""
+            continue
+
+        if not has_non_zero_value(row.get("PREVLEGALCLOSEPRICE")) or not has_non_zero_value(row.get("PREVPRICE")):
+            row[TOTAL_PRICE_COLUMN_NAME] = ""
+            continue
+
         face_value = parse_float_safe(row.get("FACEVALUE"))
         prev_price = parse_float_safe(row.get("PREVPRICE"))
         accrued_int = parse_float_safe(row.get(ACCRUED_INT_COLUMN_NAME))
+
         row[TOTAL_PRICE_COLUMN_NAME] = round(calculate_total_price(face_value, prev_price, accrued_int), 6)
+        calculated_count += 1
+
+    logging.info("TOTAL_PRICE рассчитан для %s выпусков.", calculated_count)
     return rows
 
 
@@ -2459,7 +2484,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
         {"Поле": "PRIMARYBOARDID", "Описание": "Основной торговый режим/секция."},
         {"Поле": "PREVLEGALCLOSEPRICE", "Описание": "Предыдущая официальная цена закрытия."},
         {"Поле": "PREVPRICE", "Описание": "Предыдущая рыночная цена."},
-        {"Поле": "TOTAL_PRICE", "Описание": "Итоговая цена по формуле: ((FACEVALUE * PREVPRICE / 100) + ACCRUEDINT) * 1.0005."},
+        {"Поле": "TOTAL_PRICE", "Описание": "Итоговая цена (только при VOLTODAY > 0 и ненулевых PREVLEGALCLOSEPRICE/PREVPRICE): рыночная цена FACEVALUE*PREVPRICE/100 + НКД (ACCRUEDINT) + комиссия 0.05% от суммы (рыночная цена + НКД)."},
         {"Поле": "VOLTODAY", "Описание": "Объём торгов за текущий день (в штуках/бумагах)."},
         {"Поле": "VALTODAY", "Описание": "Денежный оборот торгов за текущий день."},
         {"Поле": "NUMTRADES", "Описание": "Количество сделок за текущий день."},
