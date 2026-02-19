@@ -1,6 +1,6 @@
 import unittest
 
-from moex_bonds_to_excel import normalize_offer_type, parse_offer_metrics
+from moex_bonds_to_excel import normalize_coupon_formula_source, normalize_offer_type, parse_offer_metrics
 
 
 class OfferParsingTests(unittest.TestCase):
@@ -23,6 +23,12 @@ class OfferParsingTests(unittest.TestCase):
 
         self.assertEqual(offer_type, "PUT")
         self.assertEqual(offer_date, "2099-05-01")
+
+
+    def test_normalize_coupon_formula_source(self) -> None:
+        self.assertEqual(normalize_coupon_formula_source("dohod"), "DOHOD")
+        self.assertEqual(normalize_coupon_formula_source("corpbonds"), "CORPBONDS")
+        self.assertEqual(normalize_coupon_formula_source(""), "")
 
     def test_parse_offer_metrics_returns_call_type(self) -> None:
         columns = ["offertype", "offerdate", "offerdatestart", "offerdateend"]
