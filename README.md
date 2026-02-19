@@ -24,19 +24,20 @@
 13. Для расчётного купона в поле `COUPON_FORMULA_SOURCE` указывается источник: `DOHOD` или `CORPBONDS`.
 14. Если `COUPONVALUE = 0`, но есть `COUPONPERCENT`, `FACEVALUE` и `COUPONPERIOD`, скрипт рассчитывает `COUPONVALUE` по формуле: `FACEVALUE * COUPONPERCENT / 100 / 365 * COUPONPERIOD`.
 15. Расчётный `COUPONVALUE` берётся из кэша `cache/coupon_value_cache.json`, пока MOEX не изменит исходные данные или пока не изменится `COUPONPERCENT`.
-16. Для оферт используется отдельный 7-дневный кэш `cache/offer_verification_cache.json`; при изменении версии формата старый кэш автоматически удаляется и собирается заново. Источник внешней проверки оферт: Corpbonds.
-17. Для расчёта купона используется отдельный 7-дневный кэш `cache/coupon_formula_cache.json`.
-18. Добавляются данные эмитента (`ISSUER_NAME`, `ISSUER_INN`, `ISSUER_BOND_CLASS`, `ISSUER_RATING`), признак `QUALIFIED_INVESTOR` и `BOND_TYPE`.
-19. `ISSUER_RATING` берётся из MOEX в два шага: сначала из карточки бумаги (`description`), а если там пусто — через CCI API MOEX по эмитенту/ISIN.
-20. Если и в CCI API нет рейтинга, ставится понятное значение `Нет данных на MOEX`.
-21. Структурные облигации исключаются из итогового отчёта.
-22. Если `COUPONPERIOD = 0`, период пытается восстановиться из `COUPONFREQUENCY`.
-23. Если после восстановления `COUPONPERIOD` всё равно `0`, бумага исключается.
-24. После обогащения снова применяется фильтрация по офертам и амортизации.
-25. Выполняется проверка качества данных.
-26. В проверке качества отдельно выводится контроль оферт: сколько бумаг с офертами, сколько из них без даты оферты и сколько с совпадением даты оферты и даты погашения.
-27. Сохраняются `raw/moex_bonds_raw.json` и `output/moex_bonds.xlsx`.
-28. В лог записывается время выполнения.
+16. Для каждой бумаги считается новая колонка `TOTAL_PRICE` по формуле: `((FACEVALUE * PREVPRICE / 100) + ACCRUEDINT) * 1.0005`.
+17. Для оферт используется отдельный 7-дневный кэш `cache/offer_verification_cache.json`; при изменении версии формата старый кэш автоматически удаляется и собирается заново. Источник внешней проверки оферт: Corpbonds.
+18. Для расчёта купона используется отдельный 7-дневный кэш `cache/coupon_formula_cache.json`.
+19. Добавляются данные эмитента (`ISSUER_NAME`, `ISSUER_INN`, `ISSUER_BOND_CLASS`, `ISSUER_RATING`), признак `QUALIFIED_INVESTOR` и `BOND_TYPE`.
+20. `ISSUER_RATING` берётся из MOEX в два шага: сначала из карточки бумаги (`description`), а если там пусто — через CCI API MOEX по эмитенту/ISIN.
+21. Если и в CCI API нет рейтинга, ставится понятное значение `Нет данных на MOEX`.
+22. Структурные облигации исключаются из итогового отчёта.
+23. Если `COUPONPERIOD = 0`, период пытается восстановиться из `COUPONFREQUENCY`.
+24. Если после восстановления `COUPONPERIOD` всё равно `0`, бумага исключается.
+25. После обогащения снова применяется фильтрация по офертам и амортизации.
+26. Выполняется проверка качества данных.
+27. В проверке качества отдельно выводится контроль оферт: сколько бумаг с офертами, сколько из них без даты оферты и сколько с совпадением даты оферты и даты погашения.
+28. Сохраняются `raw/moex_bonds_raw.json` и `output/moex_bonds.xlsx`.
+29. В лог записывается время выполнения.
 
 ## Что в Excel
 ### Лист `MOEX_BONDS`
@@ -46,8 +47,9 @@
   - `Оферты`: `HAS_PUT_CALL_OFFER` (✔/✖), `PUT_CALL_OFFER_DATE`.
   - `Торги, погашение и амортизация`: `HAS_AMORTIZATION`, `AMORTIZATION_START_DATE`, `MATDATE`.
   - `Купоны`: `COUPONVALUE`, `ACCRUEDINT`, `COUPONPERIOD`, `COUPONPERCENT`, `COUPON_FORMULA_SOURCE`.
-  - `Рынок`: `FACEVALUE`, `FACEUNIT`, `PRIMARYBOARDID`, `PREVLEGALCLOSEPRICE`, `PREVPRICE`, `VOLTODAY`, `VALTODAY`, `NUMTRADES`, `YIELD`.
+  - `Рынок`: `FACEVALUE`, `FACEUNIT`, `PRIMARYBOARDID`, `PREVLEGALCLOSEPRICE`, `PREVPRICE`, `TOTAL_PRICE`, `VOLTODAY`, `VALTODAY`, `NUMTRADES`, `YIELD`.
 - `COUPON_FORMULA_SOURCE` — источник формулы для расчётного `COUPONPERCENT` (`DOHOD` или `CORPBONDS`).
+- `TOTAL_PRICE` — итоговая цена бумаги с учётом НКД и коэффициента 1.0005 по пользовательской формуле.
 - Важная защита от ложных оферт: если дата оферты совпадает с датой погашения (`MATDATE`), такая запись автоматически очищается как не-оферта.
 - Дополнительная защита: если у бумаги нет даты оферты, поле `HAS_PUT_CALL_OFFER` автоматически приводится к `✖`.
 - Расчётные значения `COUPONPERCENT` подсвечиваются жёлтым.
