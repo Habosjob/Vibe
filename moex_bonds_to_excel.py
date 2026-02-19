@@ -56,6 +56,7 @@ ISSUER_CHECKPOINT_FILE = CACHE_DIR / "issuer_enrichment_checkpoint.json"
 DAILY_CACHE_FILE = CACHE_DIR / "daily_security_metrics_cache.json"
 OFFER_VERIFICATION_CACHE_FILE = CACHE_DIR / "offer_verification_cache.json"
 COUPON_FORMULA_CACHE_FILE = CACHE_DIR / "coupon_formula_cache.json"
+COUPON_VALUE_CACHE_FILE = CACHE_DIR / "coupon_value_cache.json"
 OUTPUT_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 
 # Колонки, которые пользователь попросил убрать из итогового файла
@@ -463,6 +464,113 @@ def save_coupon_formula_cache(rows: dict[str, dict[str, Any]]) -> None:
         "rows": rows,
     }
     COUPON_FORMULA_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_coupon_value_cache() -> dict[str, dict[str, Any]]:
+    """Читает кэш расчётов COUPONVALUE для бумаг с нулевым купоном от MOEX."""
+    if not COUPON_VALUE_CACHE_FILE.exists():
+        return {}
+
+    try:
+        payload = json.loads(COUPON_VALUE_CACHE_FILE.read_text(encoding="utf-8"))
+        rows = payload.get("rows", {})
+        if isinstance(rows, dict):
+            return {str(k): v for k, v in rows.items() if isinstance(v, dict)}
+    except Exception as exc:
+        logging.warning("Не удалось прочитать кэш COUPONVALUE: %s", exc)
+    return {}
+
+
+def save_coupon_value_cache(rows: dict[str, dict[str, Any]]) -> None:
+    """Сохраняет кэш расчётных значений COUPONVALUE."""
+    CACHE_DIR.mkdir(exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "rows": rows,
+    }
+    COUPON_VALUE_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def calculate_coupon_value(face_value: float, coupon_percent: float, coupon_period: int) -> float:
+    """Считает COUPONVALUE по формуле пользователя: FACEVALUE*COUPONPERCENT/100/365*COUPONPERIOD."""
+    return (face_value * coupon_percent / 100 / 365) * coupon_period
+
+
+def enrich_coupon_value_from_percent(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
+    """Если COUPONVALUE=0 и есть COUPONPERCENT, рассчитывает COUPONVALUE и подсвечивает его в Excel."""
+    logging.info("Этап 5.7/8: Расчёт COUPONVALUE по COUPONPERCENT для бумаг с нулевым купоном...")
+    cache = load_coupon_value_cache()
+    calculated_cells: set[tuple[str, str]] = set()
+    now = datetime.now()
+
+    for row in rows:
+        isin = str(row.get("ISIN") or "").strip()
+        secid = str(row.get("SECID") or "").strip()
+        if not isin:
+            continue
+
+        try:
+            coupon_value = float(str(row.get("COUPONVALUE") or 0).replace(",", "."))
+        except ValueError:
+            coupon_value = 0.0
+        if coupon_value != 0:
+            continue
+
+        try:
+            coupon_percent = float(str(row.get("COUPONPERCENT") or 0).replace(",", "."))
+        except ValueError:
+            coupon_percent = 0.0
+        if coupon_percent <= 0:
+            continue
+
+        try:
+            face_value = float(str(row.get("FACEVALUE") or 0).replace(",", "."))
+        except ValueError:
+            face_value = 0.0
+        try:
+            coupon_period = int(float(str(row.get("COUPONPERIOD") or 0).replace(",", ".")))
+        except ValueError:
+            coupon_period = 0
+
+        if face_value <= 0 or coupon_period <= 0:
+            continue
+
+        cache_entry = cache.get(isin)
+        if cache_entry is not None:
+            cached_percent = cache_entry.get("coupon_percent")
+            cached_period = cache_entry.get("coupon_period")
+            cached_face_value = cache_entry.get("face_value")
+            cached_coupon_value = cache_entry.get("coupon_value")
+            cached_secid = str(cache_entry.get("secid") or "")
+            if (
+                isinstance(cached_coupon_value, (int, float))
+                and isinstance(cached_percent, (int, float))
+                and isinstance(cached_period, int)
+                and isinstance(cached_face_value, (int, float))
+                and cached_secid == secid
+                and math.isclose(float(cached_percent), coupon_percent, rel_tol=0, abs_tol=1e-10)
+                and cached_period == coupon_period
+                and math.isclose(float(cached_face_value), face_value, rel_tol=0, abs_tol=1e-10)
+            ):
+                row["COUPONVALUE"] = round(float(cached_coupon_value), 6)
+                calculated_cells.add((isin, secid))
+                continue
+
+        calculated_value = calculate_coupon_value(face_value, coupon_percent, coupon_period)
+        row["COUPONVALUE"] = round(calculated_value, 6)
+        calculated_cells.add((isin, secid))
+        cache[isin] = {
+            "secid": secid,
+            "coupon_value": round(calculated_value, 6),
+            "coupon_percent": coupon_percent,
+            "coupon_period": coupon_period,
+            "face_value": face_value,
+            "updated_at": now.isoformat(timespec="seconds"),
+        }
+
+    save_coupon_value_cache(cache)
+    logging.info("COUPONVALUE рассчитан для %s выпусков.", len(calculated_cells))
+    return rows, calculated_cells
 
 
 def parse_date_safe(value: Any) -> datetime | None:
@@ -2025,6 +2133,7 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
     separator_titles: dict[str, str] = df.attrs.get("group_separator_titles", {})
     separator_columns = {c for c in df.columns if str(c).startswith(GROUP_SEPARATOR_PREFIX)}
     calculated_coupon_cells: set[tuple[str, str]] = df.attrs.get("calculated_coupon_cells", set())
+    calculated_coupon_value_cells: set[tuple[str, str]] = df.attrs.get("calculated_coupon_value_cells", set())
 
     ws.row_dimensions[1].height = 78
     ws.row_dimensions[2].height = 22
@@ -2085,6 +2194,15 @@ def apply_excel_formatting(writer: pd.ExcelWriter, df: pd.DataFrame) -> None:
                     secid_col_idx = list(df.columns).index(HIDDEN_COLUMN_NAME) + 1
                     secid_value = str(ws.cell(row=row_idx, column=secid_col_idx).value or "")
                 if (isin_value, secid_value) in calculated_coupon_cells:
+                    cell.fill = CALCULATED_COUPON_FILL
+
+            if col_name == "COUPONVALUE":
+                isin_value = str(ws.cell(row=row_idx, column=1).value or "")
+                secid_value = ""
+                if HIDDEN_COLUMN_NAME in df.columns:
+                    secid_col_idx = list(df.columns).index(HIDDEN_COLUMN_NAME) + 1
+                    secid_value = str(ws.cell(row=row_idx, column=secid_col_idx).value or "")
+                if (isin_value, secid_value) in calculated_coupon_value_cells:
                     cell.fill = CALCULATED_COUPON_FILL
 
     for idx, col_name in enumerate(df.columns, start=1):
@@ -2173,7 +2291,7 @@ def add_info_sheet(writer: pd.ExcelWriter) -> None:
                 {"Поле": "MATDATE", "Описание": "Дата погашения облигации (когда эмитент должен вернуть номинал)."},
         {"Поле": "FACEVALUE", "Описание": "Номинал облигации."},
         {"Поле": "FACEUNIT", "Описание": "Валюта номинала (например, RUB)."},
-        {"Поле": "COUPONVALUE", "Описание": "Размер купонной выплаты."},
+        {"Поле": "COUPONVALUE", "Описание": "Размер купонной выплаты. Если ячейка жёлтая, значение рассчитано по формуле из FACEVALUE, COUPONPERCENT и COUPONPERIOD (когда MOEX вернул 0)."},
         {"Поле": "ACCRUEDINT", "Описание": "Накопленный купонный доход (НКД) на текущую дату."},
         {"Поле": "COUPONPERIOD", "Описание": "Период выплаты купона в днях."},
         {"Поле": "COUPONPERCENT", "Описание": "Купонная ставка в процентах. Если ячейка жёлтая, ставка рассчитана по формуле (analytics.dohod.ru и, при необходимости, fallback corpbonds.ru). Это приближённое значение."},
@@ -2206,7 +2324,11 @@ def drop_deprecated_output_columns(rows: list[dict[str, Any]]) -> list[dict[str,
     return rows
 
 
-def save_excel(rows: list[dict[str, Any]], calculated_coupon_cells: set[tuple[str, str]] | None = None) -> None:
+def save_excel(
+    rows: list[dict[str, Any]],
+    calculated_coupon_cells: set[tuple[str, str]] | None = None,
+    calculated_coupon_value_cells: set[tuple[str, str]] | None = None,
+) -> None:
     """Сохраняет итоговый набор в Excel."""
     logging.info("Этап 7/8: Подготовка итогового Excel...")
     df = pd.DataFrame(rows)
@@ -2279,6 +2401,8 @@ def save_excel(rows: list[dict[str, Any]], calculated_coupon_cells: set[tuple[st
 
     if calculated_coupon_cells is not None:
         df.attrs["calculated_coupon_cells"] = calculated_coupon_cells
+    if calculated_coupon_value_cells is not None:
+        df.attrs["calculated_coupon_value_cells"] = calculated_coupon_value_cells
 
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="MOEX_BONDS")
@@ -2330,6 +2454,7 @@ def main() -> None:
     rows = filter_rows_by_bond_type(rows)
     rows = filter_rows_by_coupon_period(rows)
     rows, calculated_coupon_cells = enrich_coupon_percent_from_dohod(rows)
+    rows, calculated_coupon_value_cells = enrich_coupon_value_from_percent(rows)
 
     # 3) Повторная фильтрация после обогащения новыми данными
     rows = filter_rows_by_offer_date(rows)
@@ -2338,7 +2463,7 @@ def main() -> None:
     rows = drop_deprecated_output_columns(rows)
     save_cache(rows)
     save_raw(rows)
-    save_excel(rows, calculated_coupon_cells)
+    save_excel(rows, calculated_coupon_cells, calculated_coupon_value_cells)
 
     elapsed = time.perf_counter() - started_at
     logging.info("Готово. Всего облигаций: %s", len(rows))
