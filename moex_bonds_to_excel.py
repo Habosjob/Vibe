@@ -1362,12 +1362,36 @@ def validate_rows(rows: list[dict[str, Any]]) -> None:
     empty_isin_count = sum(1 for row in rows if not row.get("ISIN"))
     duplicate_keys = len(rows) - len({(row.get("SECID"), row.get("ISIN")) for row in rows})
     invalid_coupon_count = sum(1 for row in rows if isinstance(row.get("COUPONPERCENT"), (int, float)) and row.get("COUPONPERCENT") < 0)
+    bonds_with_offer_count = 0
+    bonds_with_empty_offer_date_count = 0
+    bonds_with_offer_on_maturity_count = 0
+
+    for row in rows:
+        offer_type = normalize_offer_type(str(row.get(HAS_PUT_CALL_OFFER_COLUMN_NAME) or ""))
+        if offer_type not in {"PUT", "Call"}:
+            continue
+
+        bonds_with_offer_count += 1
+        offer_date_raw = str(row.get(PUT_CALL_OFFER_DATE_COLUMN_NAME) or "").strip()
+        maturity_date_raw = str(row.get(MATURITY_DATE_COLUMN_NAME) or "").strip()
+        if not offer_date_raw:
+            bonds_with_empty_offer_date_count += 1
+            continue
+
+        if maturity_date_raw and offer_date_raw == maturity_date_raw:
+            bonds_with_offer_on_maturity_count += 1
 
     logging.info(
         "Проверка качества завершена: пустых ISIN=%s, дубликатов ключа (SECID+ISIN)=%s, отрицательных COUPONPERCENT=%s.",
         empty_isin_count,
         duplicate_keys,
         invalid_coupon_count,
+    )
+    logging.info(
+        "Контроль оферт: бумаг с офертами=%s, из них с пустой датой оферты=%s, оферта совпадает с датой погашения=%s.",
+        bonds_with_offer_count,
+        bonds_with_empty_offer_date_count,
+        bonds_with_offer_on_maturity_count,
     )
 
 
