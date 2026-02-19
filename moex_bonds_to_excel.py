@@ -99,6 +99,7 @@ HAS_PUT_CALL_OFFER_COLUMN_NAME = "HAS_PUT_CALL_OFFER"
 PUT_CALL_OFFER_DATE_COLUMN_NAME = "PUT_CALL_OFFER_DATE"
 SECURITY_DAILY_CACHE_TTL_HOURS = 24
 OFFER_VERIFICATION_CACHE_TTL_DAYS = 7
+OFFER_VERIFICATION_CACHE_SCHEMA_VERSION = 2
 COUPON_FORMULA_CACHE_TTL_DAYS = 7
 MIN_MATURITY_YEARS = 1
 DAILY_METRICS_CACHE_SCHEMA_VERSION = 7
@@ -417,6 +418,14 @@ def load_offer_verification_cache() -> dict[str, dict[str, Any]]:
 
     try:
         payload = json.loads(OFFER_VERIFICATION_CACHE_FILE.read_text(encoding="utf-8"))
+        schema_version = int(payload.get("schema_version", 1))
+        if schema_version != OFFER_VERIFICATION_CACHE_SCHEMA_VERSION:
+            logging.info(
+                "Обнаружен старый формат кэша оферт (v%s). Старый кэш будет стёрт и собран заново.",
+                schema_version,
+            )
+            OFFER_VERIFICATION_CACHE_FILE.unlink(missing_ok=True)
+            return {}
         rows = payload.get("rows", {})
         if isinstance(rows, dict):
             return {str(isin): value for isin, value in rows.items() if isinstance(value, dict)}
@@ -429,6 +438,7 @@ def save_offer_verification_cache(rows: dict[str, dict[str, Any]]) -> None:
     """Сохраняет 7-дневный кэш проверки оферт через ДОХОД и Corpbonds."""
     payload = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "schema_version": OFFER_VERIFICATION_CACHE_SCHEMA_VERSION,
         "rows": rows,
     }
     OFFER_VERIFICATION_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1031,7 +1041,7 @@ def fetch_reference_index_values(session: requests.Session) -> dict[str, float]:
 
 def enrich_coupon_percent_from_dohod(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
     """Считает COUPONPERCENT через формулы ДОХОД, затем fallback через corpbonds.ru."""
-    logging.info("Этап 5.25/9: Расчёт COUPONPERCENT через ДОХОД + fallback CORPBONDS для выпусков с нулевым купоном...")
+    logging.info("Этап 5.6/8: Расчёт COUPONPERCENT через ДОХОД + fallback CORPBONDS для выпусков с нулевым купоном...")
     calculated_cells: set[tuple[str, str]] = set()
     cache = load_coupon_formula_cache()
     now = datetime.now()
@@ -1291,7 +1301,7 @@ def fetch_trade_start_date_for_security(session: requests.Session, secid: str) -
 
 def enrich_trade_start_dates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Добавляет колонку ISSUEDATE (дата начала торгов) через карточку бумаги MOEX и кэш."""
-    logging.info("Этап 5.05/8: Обогащение датой начала торгов (ISSUEDATE)...")
+    logging.info("Этап 5.5/8: Обогащение датой начала торгов (ISSUEDATE)...")
     secids = sorted({str(row.get("SECID") or "").strip() for row in rows if row.get("SECID")})
     if not secids:
         for row in rows:
@@ -1732,7 +1742,7 @@ def enrich_with_daily_metrics(
     include_external_offers: bool = True,
 ) -> list[dict[str, Any]]:
     """Добавляет НКД/амортизацию и при необходимости внешнюю проверку Put/Call оферт с кэшированием."""
-    logging.info("Этап 3/8: Обогащение суточными метриками (амортизация, оферты и НКД)...")
+    logging.info("Обогащение суточными метриками (амортизация, оферты и НКД)...")
     secids = sorted({str(row.get("SECID")) for row in rows if row.get("SECID")})
     if not secids:
         return rows
@@ -1995,7 +2005,7 @@ def filter_rows_by_offer_date(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         filtered_rows.append(row)
 
     logging.info(
-        "Этап 4.1/8: Фильтр по дате оферты: исключено %s бумаг, оставлено %s.",
+        "Этап 4.2/8: Фильтр по дате оферты: исключено %s бумаг, оставлено %s.",
         skipped_count,
         len(filtered_rows),
     )
@@ -2014,7 +2024,7 @@ def filter_rows_by_bond_type(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         filtered_rows.append(row)
 
     logging.info(
-        "Этап 5.15/8: Фильтр структурных облигаций: исключено %s бумаг, оставлено %s.",
+        "Этап 5.3/8: Фильтр структурных облигаций: исключено %s бумаг, оставлено %s.",
         skipped_count,
         len(filtered_rows),
     )
@@ -2043,7 +2053,7 @@ def filter_rows_by_coupon_period(rows: list[dict[str, Any]]) -> list[dict[str, A
         filtered_rows.append(row)
 
     logging.info(
-        "Этап 5.2/8: Фильтр по COUPONPERIOD: исключено %s бумаг, оставлено %s.",
+        "Этап 5.4/8: Фильтр по COUPONPERIOD: исключено %s бумаг, оставлено %s.",
         skipped_count,
         len(filtered_rows),
     )
@@ -2390,12 +2400,15 @@ def main() -> None:
         logging.warning("Используем резервный кэш из-за недоступности API.")
 
     # 1) Базовый сбор и первичная фильтрация по данным MOEX
+    logging.info("Этап 2/8: Фильтр по сроку до погашения...")
     rows = filter_rows_by_maturity(rows)
+    logging.info("Этап 3/8: Обогащение суточными метриками (MOEX)...")
     rows = enrich_with_daily_metrics(rows, include_daily_metrics=True, include_external_offers=False)
     rows = filter_rows_by_amortization_timing(rows)
     rows = filter_rows_by_offer_date(rows)
 
     # 2) Обогащение из альтернативных источников (после первичной фильтрации)
+    logging.info("Этап 5/8: Обогащение из внешних источников и данных эмитента...")
     rows = enrich_with_daily_metrics(rows, include_daily_metrics=False, include_external_offers=True)
     rows = enrich_with_issuer_names(rows)
     rows = filter_rows_by_bond_type(rows)
