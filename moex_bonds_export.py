@@ -30,6 +30,7 @@ MAX_WORKERS = 16
 REQUEST_TIMEOUT_SECONDS = 30
 RETRY_COUNT = 3
 CACHE_TTL_HOURS = 24
+MAX_PAGES_PER_REQUEST = 300
 MAX_BONDS_TO_PROCESS: int | None = None  # Например, 100 для быстрого теста; None = все облигации.
 
 MOEX_BASE_URL = "https://iss.moex.com/iss"
@@ -57,6 +58,8 @@ def setup_environment() -> None:
 
     # Папка raw очищается полностью перед новым отладочным запуском.
     for item in RAW_DIR.iterdir():
+        if item.name == ".gitkeep":
+            continue
         if item.is_dir():
             shutil.rmtree(item, ignore_errors=True)
         else:
@@ -96,7 +99,15 @@ def fetch_all_pages(url: str, block_name: str, extra_params: dict[str, Any] | No
     all_rows: list[list[Any]] = []
     columns: list[str] | None = None
     previous_rows: list[list[Any]] | None = None
+    page_counter = 0
     while True:
+        page_counter += 1
+        if page_counter > MAX_PAGES_PER_REQUEST:
+            raise RuntimeError(
+                f"Превышен лимит страниц ({MAX_PAGES_PER_REQUEST}) для {url}. "
+                "Остановка для защиты от потенциального бесконечного цикла."
+            )
+
         params = {"iss.meta": "off", "start": start}
         if extra_params:
             params.update(extra_params)
@@ -122,7 +133,15 @@ def fetch_all_pages(url: str, block_name: str, extra_params: dict[str, Any] | No
             break
 
         all_rows.extend(rows)
-        logging.info("Загружено %s строк из %s (start=%s)", len(rows), block_name, start)
+        if page_counter == 1 or page_counter % 10 == 0:
+            logging.info(
+                "Пагинация %s: страница=%s, start=%s, строк в странице=%s, накоплено=%s",
+                block_name,
+                page_counter,
+                start,
+                len(rows),
+                len(all_rows),
+            )
 
         # Если API возвращает все записи сразу, дополнительный запрос не нужен.
         if len(rows) < 100:
@@ -132,6 +151,30 @@ def fetch_all_pages(url: str, block_name: str, extra_params: dict[str, Any] | No
         start += len(rows)
 
     return pd.DataFrame(all_rows, columns=columns or [])
+
+
+def load_bonds_reference_data() -> pd.DataFrame:
+    """Загружает справочник облигаций с данными эмитентов, используя кэш полного ответа."""
+    cache_file = CACHE_DIR / "all_bonds_securities.json"
+
+    if is_cache_valid(cache_file):
+        logging.info("Использую кэш справочника облигаций: %s", cache_file)
+        cached_payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        return pd.DataFrame(cached_payload["data"], columns=cached_payload["columns"])
+
+    logging.info("Кэш справочника отсутствует или устарел. Запрашиваю данные у MOEX...")
+    reference_df = fetch_all_pages(
+        f"{MOEX_BASE_URL}/securities.json",
+        block_name="securities",
+        extra_params={"engine": "stock", "market": "bonds"},
+    )
+
+    cache_file.write_text(
+        json.dumps({"columns": reference_df.columns.tolist(), "data": reference_df.values.tolist()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logging.info("Справочник облигаций сохранен в кэш: %s", cache_file)
+    return reference_df
 
 
 def to_records(payload_block: dict[str, Any]) -> list[dict[str, Any]]:
@@ -228,17 +271,22 @@ def save_raw(df: pd.DataFrame, file_name: str) -> None:
 
 
 def build_emitents_sheet(traded_bonds: pd.DataFrame) -> pd.DataFrame:
-    emitent_cols = [
-        "emitent_id",
-        "emitent_title",
-        "emitent_inn",
-        "emitent_okpo",
+    """Формирует сводный лист по эмитентам из итоговой таблицы облигаций."""
+    emitent_cols_upper = [
+        "EMITENT_ID",
+        "EMITENT_TITLE",
+        "EMITENT_INN",
+        "EMITENT_OKPO",
     ]
-    existing_cols = [col for col in emitent_cols if col in traded_bonds.columns]
+    existing_cols = [col for col in emitent_cols_upper if col in traded_bonds.columns]
+    if not existing_cols:
+        return pd.DataFrame(columns=emitent_cols_upper + ["bonds_count", "secids"])
+
+    emitent_id_column = "EMITENT_ID" if "EMITENT_ID" in existing_cols else existing_cols[0]
 
     emitents = (
         traded_bonds[existing_cols + ["SECID"]]
-        .dropna(subset=["emitent_id"], how="all")
+        .dropna(subset=[emitent_id_column], how="all")
         .copy()
     )
 
@@ -260,12 +308,8 @@ def main() -> None:
         block_name="securities",
     )
 
-    print("[2/6] Загружаю общие данные по инструментам (включая эмитентов)...")
-    all_securities_df = fetch_all_pages(
-        f"{MOEX_BASE_URL}/securities.json",
-        block_name="securities",
-        extra_params={"engine": "stock", "market": "bonds"},
-    )
+    print("[2/6] Загружаю справочник облигаций с данными эмитентов (может занять до пары минут)...")
+    all_securities_df = load_bonds_reference_data()
 
     # Приводим названия столбцов к единому стилю перед merge.
     all_securities_df = all_securities_df.rename(columns=str.upper)
