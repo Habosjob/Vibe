@@ -30,7 +30,6 @@ MAX_WORKERS = 16
 REQUEST_TIMEOUT_SECONDS = 30
 RETRY_COUNT = 3
 CACHE_TTL_HOURS = 24
-MAX_PAGES_PER_REQUEST = 300
 MAX_BONDS_TO_PROCESS: int | None = None  # Например, 100 для быстрого теста; None = все облигации.
 
 MOEX_BASE_URL = "https://iss.moex.com/iss"
@@ -102,12 +101,6 @@ def fetch_all_pages(url: str, block_name: str, extra_params: dict[str, Any] | No
     page_counter = 0
     while True:
         page_counter += 1
-        if page_counter > MAX_PAGES_PER_REQUEST:
-            raise RuntimeError(
-                f"Превышен лимит страниц ({MAX_PAGES_PER_REQUEST}) для {url}. "
-                "Остановка для защиты от потенциального бесконечного цикла."
-            )
-
         params = {"iss.meta": "off", "start": start}
         if extra_params:
             params.update(extra_params)
@@ -143,7 +136,6 @@ def fetch_all_pages(url: str, block_name: str, extra_params: dict[str, Any] | No
                 len(all_rows),
             )
 
-        # Если API возвращает все записи сразу, дополнительный запрос не нужен.
         if len(rows) < 100:
             break
 
@@ -153,28 +145,58 @@ def fetch_all_pages(url: str, block_name: str, extra_params: dict[str, Any] | No
     return pd.DataFrame(all_rows, columns=columns or [])
 
 
-def load_bonds_reference_data() -> pd.DataFrame:
-    """Загружает справочник облигаций с данными эмитентов, используя кэш полного ответа."""
-    cache_file = CACHE_DIR / "all_bonds_securities.json"
+def fetch_reference_row(secid: str) -> dict[str, Any] | None:
+    """Загружает строку справочника securities по конкретному SECID через параметр q."""
+    ref_cache_dir = CACHE_DIR / "reference_rows"
+    ref_cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = ref_cache_dir / f"{secid}.json"
 
     if is_cache_valid(cache_file):
-        logging.info("Использую кэш справочника облигаций: %s", cache_file)
-        cached_payload = json.loads(cache_file.read_text(encoding="utf-8"))
-        return pd.DataFrame(cached_payload["data"], columns=cached_payload["columns"])
+        return json.loads(cache_file.read_text(encoding="utf-8"))
 
-    logging.info("Кэш справочника отсутствует или устарел. Запрашиваю данные у MOEX...")
-    reference_df = fetch_all_pages(
+    payload = request_json(
         f"{MOEX_BASE_URL}/securities.json",
-        block_name="securities",
-        extra_params={"engine": "stock", "market": "bonds"},
+        params={"iss.meta": "off", "engine": "stock", "market": "bonds", "q": secid},
     )
+    block = payload.get("securities", {"columns": [], "data": []})
+    columns = block.get("columns", [])
+    rows = block.get("data", [])
 
-    cache_file.write_text(
-        json.dumps({"columns": reference_df.columns.tolist(), "data": reference_df.values.tolist()}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    logging.info("Справочник облигаций сохранен в кэш: %s", cache_file)
-    return reference_df
+    target_row = None
+    secid_index = columns.index("secid") if "secid" in columns else None
+    if secid_index is not None:
+        for row in rows:
+            if str(row[secid_index]) == secid:
+                target_row = dict(zip(columns, row))
+                break
+
+    if target_row is not None:
+        cache_file.write_text(json.dumps(target_row, ensure_ascii=False), encoding="utf-8")
+
+    return target_row
+
+
+def collect_reference_data_for_secids(secids: list[str]) -> pd.DataFrame:
+    """Параллельно загружает справочные данные по списку SECID."""
+    records: list[dict[str, Any]] = []
+    total = len(secids)
+    logging.info("Загружаю справочные данные по %s облигациям через точечные запросы", total)
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_map = {executor.submit(fetch_reference_row, secid): secid for secid in secids}
+        for index, future in enumerate(as_completed(future_map), start=1):
+            secid = future_map[future]
+            try:
+                row = future.result()
+                if row:
+                    records.append(row)
+            except Exception as exc:  # noqa: BLE001
+                logging.error("Ошибка загрузки справочника для %s: %s", secid, exc)
+
+            if index % 200 == 0 or index == total:
+                logging.info("Справочник: обработано %s/%s", index, total)
+
+    return pd.DataFrame(records)
 
 
 def to_records(payload_block: dict[str, Any]) -> list[dict[str, Any]]:
@@ -308,11 +330,33 @@ def main() -> None:
         block_name="securities",
     )
 
-    print("[2/6] Загружаю справочник облигаций с данными эмитентов (может занять до пары минут)...")
-    all_securities_df = load_bonds_reference_data()
+    print("[2/6] Загружаю данные по эмитентам для найденных облигаций...")
+    source_secids = bonds_market_df["SECID"].dropna().astype(str).unique().tolist()
+    if MAX_BONDS_TO_PROCESS:
+        source_secids = source_secids[:MAX_BONDS_TO_PROCESS]
+        bonds_market_df = bonds_market_df[bonds_market_df["SECID"].isin(source_secids)].copy()
+        logging.warning("Для отладки ограничен список облигаций до %s штук на раннем этапе", MAX_BONDS_TO_PROCESS)
+
+    all_securities_df = collect_reference_data_for_secids(source_secids)
 
     # Приводим названия столбцов к единому стилю перед merge.
     all_securities_df = all_securities_df.rename(columns=str.upper)
+
+    required_reference_cols = [
+        "SECID",
+        "IS_TRADED",
+        "EMITENT_ID",
+        "EMITENT_TITLE",
+        "EMITENT_INN",
+        "EMITENT_OKPO",
+        "TYPE",
+        "GROUP",
+        "PRIMARY_BOARDID",
+        "MARKETPRICE_BOARDID",
+    ]
+    for column in required_reference_cols:
+        if column not in all_securities_df.columns:
+            all_securities_df[column] = None
 
     merged_df = bonds_market_df.merge(
         all_securities_df[[
@@ -331,12 +375,8 @@ def main() -> None:
         on="SECID",
     )
 
-    traded_bonds_df = merged_df[merged_df["IS_TRADED"] == 1].copy()
+    traded_bonds_df = merged_df[(merged_df["IS_TRADED"] == 1) | (merged_df["STATUS"] == "A")].copy()
     traded_bonds_df = traded_bonds_df.sort_values(["EMITENT_TITLE", "SECID"], na_position="last")
-
-    if MAX_BONDS_TO_PROCESS:
-        traded_bonds_df = traded_bonds_df.head(MAX_BONDS_TO_PROCESS)
-        logging.warning("Включен лимит MAX_BONDS_TO_PROCESS=%s", MAX_BONDS_TO_PROCESS)
 
     secids = traded_bonds_df["SECID"].dropna().astype(str).unique().tolist()
     print(f"Найдено торгуемых облигаций: {len(secids)}")
