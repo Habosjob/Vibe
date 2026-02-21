@@ -65,6 +65,23 @@ CHECKPOINT_COUPONS_FILE = CHECKPOINT_DIR / "coupons.json"
 CHECKPOINT_AMORTIZATIONS_FILE = CHECKPOINT_DIR / "amortizations.json"
 CHECKPOINT_OFFERS_FILE = CHECKPOINT_DIR / "offers.json"
 
+# Файл состояния этапа фильтрации бумаг (кого и до какого срока исключать из опроса).
+FILTER_STATE_FILE = CACHE_DIR / "filter_state.json"
+
+# Этап "Фильтр": правила исключения бумаг до загрузки расширенных данных.
+FILTER_CONFIG = {
+    # Включение/выключение всего этапа фильтра.
+    "enabled": True,
+    # Через сколько дней можно повторно опрашивать бумагу с временным исключением.
+    "temporary_exclusion_days": 7,
+    # Ручной список SECID для исключения навсегда.
+    "manual_permanent_secids": [],
+    # Ручной список SECID для исключения на temporary_exclusion_days.
+    "manual_temporary_secids": [],
+    # Автоматическое правило: структурные облигации исключаются навсегда.
+    "exclude_structural_bonds_permanently": True,
+}
+
 
 # Настройки архивации raw-данных после успешного запуска.
 RAW_ARCHIVE_DIR = BASE_DIR / "raw_archive"
