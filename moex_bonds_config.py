@@ -82,6 +82,10 @@ FILTER_CONFIG = {
     "exclude_structural_bonds_permanently": True,
     # Если до даты погашения осталось меньше этого числа дней — исключаем бумагу навсегда.
     "permanent_exclusion_if_maturity_within_days": 365,
+    # Если амортизация уже началась (дата амортизации в прошлом) — исключаем бумагу навсегда.
+    "permanent_exclusion_if_amortization_started": True,
+    # Если до ближайшей даты амортизации осталось меньше этого числа дней — исключаем бумагу навсегда.
+    "permanent_exclusion_if_amortization_within_days": 365,
     # Если до ближайшей даты оферты осталось меньше этого числа дней — исключаем бумагу временно.
     "temporary_exclusion_if_offer_within_days": 365,
 }

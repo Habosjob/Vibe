@@ -549,12 +549,17 @@ def calculate_days_left(target_date: datetime) -> int:
     return (target_date.date() - datetime.now().date()).days
 
 
-def detect_exclusion_rule(description_rows: list[dict[str, Any]], offers: list[dict[str, Any]]) -> tuple[str, str]:
+def detect_exclusion_rule(
+    description_rows: list[dict[str, Any]],
+    amortizations: list[dict[str, Any]],
+    offers: list[dict[str, Any]],
+) -> tuple[str, str, str]:
     """Определяет, нужно ли исключить бумагу по сроку до погашения/оферты.
 
-    Возвращает кортеж `(mode, reason)`, где mode: `permanent`, `temporary` или `""`.
+    Возвращает кортеж `(mode, reason, filter_key)`, где mode: `permanent`, `temporary` или `""`.
     """
     maturity_limit = int(cfg.FILTER_CONFIG["permanent_exclusion_if_maturity_within_days"])
+    amortization_limit = int(cfg.FILTER_CONFIG["permanent_exclusion_if_amortization_within_days"])
     offer_limit = int(cfg.FILTER_CONFIG["temporary_exclusion_if_offer_within_days"])
 
     matdate_raw = next(
@@ -565,7 +570,39 @@ def detect_exclusion_rule(description_rows: list[dict[str, Any]], offers: list[d
     if matdate is not None:
         days_to_maturity = calculate_days_left(matdate)
         if days_to_maturity < maturity_limit:
-            return "permanent", f"До погашения меньше {maturity_limit} дней ({days_to_maturity} дн.)"
+            return "permanent", f"До погашения меньше {maturity_limit} дней ({days_to_maturity} дн.)", "maturity_lt_year"
+
+    amortization_dates: list[datetime] = []
+    for amortization in amortizations:
+        parsed_amortization = parse_moex_date(amortization.get("amortdate"))
+        if parsed_amortization is not None:
+            amortization_dates.append(parsed_amortization)
+
+    amortdate_raw = next(
+        (row.get("value") for row in description_rows if str(row.get("name") or "").strip().upper() == "AMORTDATE"),
+        None,
+    )
+    parsed_amortdate_description = parse_moex_date(amortdate_raw)
+    if parsed_amortdate_description is not None:
+        amortization_dates.append(parsed_amortdate_description)
+
+    if amortization_dates:
+        today = datetime.now().date()
+        if cfg.FILTER_CONFIG["permanent_exclusion_if_amortization_started"] and any(
+            amortization_date.date() < today for amortization_date in amortization_dates
+        ):
+            return "permanent", "Амортизация уже началась (есть дата амортизации в прошлом)", "amortization_started"
+
+        future_amortization_dates = [date for date in amortization_dates if date.date() >= today]
+        if future_amortization_dates:
+            nearest_amortization = min(future_amortization_dates)
+            days_to_amortization = calculate_days_left(nearest_amortization)
+            if days_to_amortization < amortization_limit:
+                return (
+                    "permanent",
+                    f"До амортизации меньше {amortization_limit} дней ({days_to_amortization} дн.)",
+                    "amortization_lt_year",
+                )
 
     offer_dates: list[datetime] = []
     for offer in offers:
@@ -586,9 +623,9 @@ def detect_exclusion_rule(description_rows: list[dict[str, Any]], offers: list[d
         nearest_offer = min(offer_dates)
         days_to_offer = calculate_days_left(nearest_offer)
         if days_to_offer < offer_limit:
-            return "temporary", f"До оферты меньше {offer_limit} дней ({days_to_offer} дн.)"
+            return "temporary", f"До оферты меньше {offer_limit} дней ({days_to_offer} дн.)", "offer_lt_year_temp_7d"
 
-    return "", ""
+    return "", "", ""
 
 
 def filter_dataframe_by_filter_state(df: pd.DataFrame, filter_state: dict[str, dict[str, Any]]) -> tuple[pd.DataFrame, int]:
@@ -659,7 +696,7 @@ def fetch_security_details(secid: str) -> FetchResult:
     for row in offers:
         row["secid"] = secid
 
-    exclusion_mode, exclusion_reason = detect_exclusion_rule(description_rows, offers)
+    exclusion_mode, exclusion_reason, exclusion_filter_key = detect_exclusion_rule(description_rows, amortizations, offers)
     if exclusion_mode == "permanent":
         return FetchResult(
             blocks=MoexBlocks(
@@ -670,7 +707,7 @@ def fetch_security_details(secid: str) -> FetchResult:
             ),
             should_exclude_permanently=True,
             exclusion_reason=exclusion_reason,
-            exclusion_filter_key="maturity_lt_year",
+            exclusion_filter_key=exclusion_filter_key,
         )
     if exclusion_mode == "temporary":
         return FetchResult(
@@ -682,7 +719,7 @@ def fetch_security_details(secid: str) -> FetchResult:
             ),
             should_exclude_temporarily=True,
             exclusion_reason=exclusion_reason,
-            exclusion_filter_key="offer_lt_year_temp_7d",
+            exclusion_filter_key=exclusion_filter_key,
         )
 
     is_structural = cfg.FILTER_CONFIG["exclude_structural_bonds_permanently"] and parse_structural_bond_flag(description_rows)
@@ -975,12 +1012,16 @@ def collect_extended_data(secids: list[str], filter_state: dict[str, dict[str, A
             "Фильтры расширенной загрузки: "
             f"структурные (навсегда)={exclusion_stats.get('structural_permanent', 0)}, "
             f"до погашения < года (навсегда)={exclusion_stats.get('maturity_lt_year', 0)}, "
+            f"амортизация уже началась (навсегда)={exclusion_stats.get('amortization_started', 0)}, "
+            f"до амортизации < года (навсегда)={exclusion_stats.get('amortization_lt_year', 0)}, "
             f"до оферты < года (на 7 дней)={exclusion_stats.get('offer_lt_year_temp_7d', 0)}"
         )
         logging.info(
-            "Фильтры расширенной загрузки: structural_permanent=%s, maturity_lt_year=%s, offer_lt_year_temp_7d=%s",
+            "Фильтры расширенной загрузки: structural_permanent=%s, maturity_lt_year=%s, amortization_started=%s, amortization_lt_year=%s, offer_lt_year_temp_7d=%s",
             exclusion_stats.get("structural_permanent", 0),
             exclusion_stats.get("maturity_lt_year", 0),
+            exclusion_stats.get("amortization_started", 0),
+            exclusion_stats.get("amortization_lt_year", 0),
             exclusion_stats.get("offer_lt_year_temp_7d", 0),
         )
     return blocks, filter_state
