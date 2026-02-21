@@ -38,12 +38,15 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/moex_bonds_export.log
 ------------------------------------------------------------
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/output/.gitkeep
+https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bond_amortizations.parquet
 https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bond_amortizations.xlsx
+https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bond_coupons.parquet
 https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bond_coupons.xlsx
+https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bond_offers.parquet
 https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bond_offers.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bonds_full_export.xlsx
+https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_emitents.parquet
 https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_emitents.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/output/~$moex_bonds_full_export.xlsx
 
 ------------------------------------------------------------
 Директория: raw/
@@ -54,8 +57,15 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/bond_coupons.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/bond_descriptions_long.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/bond_descriptions_wide.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/bond_offers.json
+https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/bonds_traded_merged.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/emitents.json
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/traded_bonds.json
+
+------------------------------------------------------------
+Директория: raw_archive/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_archive/raw_20260221_130250.zip
 
   ----------------------------------------------------------
   Директория: cache/moex/
