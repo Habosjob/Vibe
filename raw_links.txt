@@ -1,0 +1,36 @@
+
+============================================================
+КОРНЕВАЯ ДИРЕКТОРИЯ:
+============================================================
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/CHANGELOG.md
+https://raw.githubusercontent.com/Habosjob/Vibe/main/Git_auto.bat
+https://raw.githubusercontent.com/Habosjob/Vibe/main/IMPROVEMENTS.md
+https://raw.githubusercontent.com/Habosjob/Vibe/main/README.md
+https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/moex_bonds_export.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
+
+------------------------------------------------------------
+Директория: cache/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/cache/.gitkeep
+
+------------------------------------------------------------
+Директория: logs/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/.gitkeep
+
+------------------------------------------------------------
+Директория: output/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/output/.gitkeep
+
+------------------------------------------------------------
+Директория: raw/
+------------------------------------------------------------
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/.gitkeep
