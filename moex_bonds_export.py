@@ -34,7 +34,9 @@ class MoexBlocks:
 class FetchResult:
     blocks: MoexBlocks
     should_exclude_permanently: bool = False
+    should_exclude_temporarily: bool = False
     exclusion_reason: str = ""
+    exclusion_filter_key: str = ""
 
 
 RUSSIAN_COLUMN_NAMES = {
@@ -519,6 +521,74 @@ def parse_structural_bond_flag(description_rows: list[dict[str, Any]]) -> bool:
     return False
 
 
+def parse_moex_date(value: Any) -> datetime | None:
+    """Преобразует строку даты MOEX в datetime (без падения на пустых/битых значениях)."""
+    if value is None:
+        return None
+
+    raw = str(value).strip()
+    if not raw or raw in DATE_PLACEHOLDER_VALUES:
+        return None
+
+    for pattern in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(raw, pattern)
+        except ValueError:
+            continue
+
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def calculate_days_left(target_date: datetime) -> int:
+    """Возвращает сколько полных дней осталось до даты относительно текущего момента."""
+    return (target_date.date() - datetime.now().date()).days
+
+
+def detect_exclusion_rule(description_rows: list[dict[str, Any]], offers: list[dict[str, Any]]) -> tuple[str, str]:
+    """Определяет, нужно ли исключить бумагу по сроку до погашения/оферты.
+
+    Возвращает кортеж `(mode, reason)`, где mode: `permanent`, `temporary` или `""`.
+    """
+    maturity_limit = int(cfg.FILTER_CONFIG["permanent_exclusion_if_maturity_within_days"])
+    offer_limit = int(cfg.FILTER_CONFIG["temporary_exclusion_if_offer_within_days"])
+
+    matdate_raw = next(
+        (row.get("value") for row in description_rows if str(row.get("name") or "").strip().upper() == "MATDATE"),
+        None,
+    )
+    matdate = parse_moex_date(matdate_raw)
+    if matdate is not None:
+        days_to_maturity = calculate_days_left(matdate)
+        if days_to_maturity < maturity_limit:
+            return "permanent", f"До погашения меньше {maturity_limit} дней ({days_to_maturity} дн.)"
+
+    offer_dates: list[datetime] = []
+    for offer in offers:
+        for key in ("offerdate", "offerdatestart", "offerdateend"):
+            parsed = parse_moex_date(offer.get(key))
+            if parsed is not None:
+                offer_dates.append(parsed)
+
+    offer_date_from_description = next(
+        (row.get("value") for row in description_rows if str(row.get("name") or "").strip().upper() in {"OFFERDATE", "BUYBACKDATE"}),
+        None,
+    )
+    parsed_offer_description = parse_moex_date(offer_date_from_description)
+    if parsed_offer_description is not None:
+        offer_dates.append(parsed_offer_description)
+
+    if offer_dates:
+        nearest_offer = min(offer_dates)
+        days_to_offer = calculate_days_left(nearest_offer)
+        if days_to_offer < offer_limit:
+            return "temporary", f"До оферты меньше {offer_limit} дней ({days_to_offer} дн.)"
+
+    return "", ""
+
+
 def filter_dataframe_by_filter_state(df: pd.DataFrame, filter_state: dict[str, dict[str, Any]]) -> tuple[pd.DataFrame, int]:
     """Удаляет из DataFrame бумаги, которые в текущем состоянии фильтра исключены из опроса."""
     if df.empty or "SECID" not in df.columns:
@@ -587,6 +657,32 @@ def fetch_security_details(secid: str) -> FetchResult:
     for row in offers:
         row["secid"] = secid
 
+    exclusion_mode, exclusion_reason = detect_exclusion_rule(description_rows, offers)
+    if exclusion_mode == "permanent":
+        return FetchResult(
+            blocks=MoexBlocks(
+                descriptions=descriptions,
+                coupons=coupons,
+                amortizations=amortizations,
+                offers=offers,
+            ),
+            should_exclude_permanently=True,
+            exclusion_reason=exclusion_reason,
+            exclusion_filter_key="maturity_lt_year",
+        )
+    if exclusion_mode == "temporary":
+        return FetchResult(
+            blocks=MoexBlocks(
+                descriptions=descriptions,
+                coupons=coupons,
+                amortizations=amortizations,
+                offers=offers,
+            ),
+            should_exclude_temporarily=True,
+            exclusion_reason=exclusion_reason,
+            exclusion_filter_key="offer_lt_year_temp_7d",
+        )
+
     is_structural = cfg.FILTER_CONFIG["exclude_structural_bonds_permanently"] and parse_structural_bond_flag(description_rows)
 
     return FetchResult(
@@ -598,6 +694,7 @@ def fetch_security_details(secid: str) -> FetchResult:
         ),
         should_exclude_permanently=is_structural,
         exclusion_reason="Тип облигации = Структурная облигация",
+        exclusion_filter_key="structural_permanent" if is_structural else "",
     )
 
 
@@ -779,6 +876,7 @@ def collect_extended_data(secids: list[str], filter_state: dict[str, dict[str, A
     )
 
     failed_secids: set[str] = set()
+    exclusion_stats: defaultdict[str, int] = defaultdict(int)
     for chunk_index, secid_chunk in enumerate(grouped, start=1):
         print(f"Обрабатываю чанк {chunk_index}/{len(grouped)} ({len(secid_chunk)} облигаций)...")
         with ThreadPoolExecutor(max_workers=cfg.MAX_WORKERS) as executor:
@@ -793,6 +891,19 @@ def collect_extended_data(secids: list[str], filter_state: dict[str, dict[str, A
                             "reason": result.exclusion_reason,
                             "updated_at": datetime.now().isoformat(),
                         }
+                        if result.exclusion_filter_key:
+                            exclusion_stats[result.exclusion_filter_key] += 1
+                        continue
+
+                    if result.should_exclude_temporarily:
+                        filter_state[secid] = {
+                            "mode": "temporary",
+                            "reason": result.exclusion_reason,
+                            "exclude_until": (datetime.now() + timedelta(days=cfg.FILTER_CONFIG["temporary_exclusion_days"])).isoformat(),
+                            "updated_at": datetime.now().isoformat(),
+                        }
+                        if result.exclusion_filter_key:
+                            exclusion_stats[result.exclusion_filter_key] += 1
                         continue
 
                     blocks.descriptions.extend(result.blocks.descriptions)
@@ -831,6 +942,19 @@ def collect_extended_data(secids: list[str], filter_state: dict[str, dict[str, A
                             "reason": result.exclusion_reason,
                             "updated_at": datetime.now().isoformat(),
                         }
+                        if result.exclusion_filter_key:
+                            exclusion_stats[result.exclusion_filter_key] += 1
+                        continue
+
+                    if result.should_exclude_temporarily:
+                        filter_state[secid] = {
+                            "mode": "temporary",
+                            "reason": result.exclusion_reason,
+                            "exclude_until": (datetime.now() + timedelta(days=cfg.FILTER_CONFIG["temporary_exclusion_days"])).isoformat(),
+                            "updated_at": datetime.now().isoformat(),
+                        }
+                        if result.exclusion_filter_key:
+                            exclusion_stats[result.exclusion_filter_key] += 1
                         continue
 
                     blocks.descriptions.extend(result.blocks.descriptions)
@@ -844,6 +968,19 @@ def collect_extended_data(secids: list[str], filter_state: dict[str, dict[str, A
         save_checkpoint(blocks, sorted(completed_secids))
 
     save_filter_state(filter_state)
+    if exclusion_stats:
+        print(
+            "Фильтры расширенной загрузки: "
+            f"структурные (навсегда)={exclusion_stats.get('structural_permanent', 0)}, "
+            f"до погашения < года (навсегда)={exclusion_stats.get('maturity_lt_year', 0)}, "
+            f"до оферты < года (на 7 дней)={exclusion_stats.get('offer_lt_year_temp_7d', 0)}"
+        )
+        logging.info(
+            "Фильтры расширенной загрузки: structural_permanent=%s, maturity_lt_year=%s, offer_lt_year_temp_7d=%s",
+            exclusion_stats.get("structural_permanent", 0),
+            exclusion_stats.get("maturity_lt_year", 0),
+            exclusion_stats.get("offer_lt_year_temp_7d", 0),
+        )
     return blocks, filter_state
 
 
@@ -1135,7 +1272,7 @@ def build_grouped_bonds_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict
         if not actual_columns:
             continue
 
-        separator_column = group_name
+        separator_column = f"__GROUP_SEPARATOR_{separator_index}__"
         grouped_columns.append(separator_column)
         start_position = len(grouped_columns) + 1
         grouped_columns.extend(actual_columns)
@@ -1154,7 +1291,7 @@ def build_grouped_bonds_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict
 
     remaining_columns = [column for column in df.columns if column not in used_columns]
     if remaining_columns:
-        separator_column = "Прочие поля"
+        separator_column = f"__GROUP_SEPARATOR_{separator_index}__"
         grouped_columns.append(separator_column)
         start_position = len(grouped_columns) + 1
         grouped_columns.extend(remaining_columns)
@@ -1194,7 +1331,9 @@ def apply_column_groups_to_sheet(worksheet: Any, group_metadata: list[dict[str, 
             cell.fill = PatternFill("solid", fgColor=fill_color)
             cell.font = Font(color=font_color, bold=True)
             cell.alignment = Alignment(horizontal="center", vertical="center")
-            if row_idx > 1:
+            if row_idx == 1:
+                cell.value = meta["group_name"]
+            else:
                 cell.value = None
 
         start_letter = get_column_letter(meta["start"])
@@ -1314,6 +1453,12 @@ def main() -> None:
     print(
         f"Фильтр: исключено навсегда={filter_stats['permanent']}, временно={filter_stats['temporary']}, "
         f"к опросу допущено={len(secids_after_filter)}"
+    )
+    logging.info(
+        "Фильтр (до расширенной загрузки): permanent=%s, temporary=%s, allowed=%s",
+        filter_stats["permanent"],
+        filter_stats["temporary"],
+        len(secids_after_filter),
     )
 
     secids = secids_after_filter
