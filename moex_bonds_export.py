@@ -264,6 +264,7 @@ COLUMN_GROUP_DEFINITIONS: list[tuple[str, list[str]]] = [
         "Погашение и оферты",
         [
             "Дата погашения",
+            "Дата амортизации",
             "Дата оферты (описание)",
             "Дней до погашения",
             "Дата оферты",
@@ -1153,13 +1154,24 @@ def build_merged_bonds_sheet(
 
 
 def build_amortization_dates_sheet(amortizations_df: pd.DataFrame) -> pd.DataFrame:
-    """Готовит таблицу дат амортизации по каждой бумаге из справочника MOEX."""
-    if amortizations_df.empty or "secid" not in amortizations_df.columns or "amortdate" not in amortizations_df.columns:
+    """Готовит ближайшие будущие даты амортизации (без финального погашения) по каждой бумаге."""
+    required_columns = {"secid", "amortdate", "data_source"}
+    if amortizations_df.empty or not required_columns.issubset(set(amortizations_df.columns)):
         return pd.DataFrame(columns=["secid", "AMORTDATE"])
 
-    amortization_dates = amortizations_df[["secid", "amortdate"]].copy()
+    amortization_dates = amortizations_df[["secid", "amortdate", "data_source"]].copy()
+    amortization_dates["data_source"] = amortization_dates["data_source"].astype(str).str.lower().str.strip()
+    amortization_dates = amortization_dates[amortization_dates["data_source"] == "amortization"]
+    if amortization_dates.empty:
+        return pd.DataFrame(columns=["secid", "AMORTDATE"])
+
     amortization_dates["AMORTDATE"] = pd.to_datetime(amortization_dates["amortdate"], errors="coerce")
     amortization_dates = amortization_dates.dropna(subset=["AMORTDATE"])
+    if amortization_dates.empty:
+        return pd.DataFrame(columns=["secid", "AMORTDATE"])
+
+    today = pd.Timestamp.today().normalize()
+    amortization_dates = amortization_dates[amortization_dates["AMORTDATE"] >= today]
     if amortization_dates.empty:
         return pd.DataFrame(columns=["secid", "AMORTDATE"])
 
