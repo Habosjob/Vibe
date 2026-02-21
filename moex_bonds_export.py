@@ -30,6 +30,13 @@ class MoexBlocks:
     offers: list[dict[str, Any]]
 
 
+@dataclass
+class FetchResult:
+    blocks: MoexBlocks
+    should_exclude_permanently: bool = False
+    exclusion_reason: str = ""
+
+
 RUSSIAN_COLUMN_NAMES = {
     "SECID": "Код бумаги",
     "BOARDID": "Код режима торгов",
@@ -466,7 +473,18 @@ def to_records(payload_block: dict[str, Any]) -> list[dict[str, Any]]:
     return [dict(zip(columns, row)) for row in payload_block.get("data", [])]
 
 
-def fetch_security_details(secid: str) -> MoexBlocks:
+def parse_structural_bond_flag(description_rows: list[dict[str, Any]]) -> bool:
+    """Проверяет, является ли бумага структурной облигацией по полю "Тип облигации"."""
+    for row in description_rows:
+        field_name = str(row.get("name") or "").strip().lower()
+        title_name = str(row.get("title") or "").strip().lower()
+        if field_name == "bondtype" or title_name == "тип облигации":
+            value = str(row.get("value") or "").strip().lower()
+            return value == "структурная облигация"
+    return False
+
+
+def fetch_security_details(secid: str) -> FetchResult:
     cache_file = cfg.CACHE_DIR / f"{secid}.json"
 
     if is_cache_valid(cache_file, cfg.CACHE_TTL_HOURS["security_details"]):
@@ -503,12 +521,90 @@ def fetch_security_details(secid: str) -> MoexBlocks:
     for row in offers:
         row["secid"] = secid
 
-    return MoexBlocks(
-        descriptions=descriptions,
-        coupons=coupons,
-        amortizations=amortizations,
-        offers=offers,
+    is_structural = cfg.FILTER_CONFIG["exclude_structural_bonds_permanently"] and parse_structural_bond_flag(description_rows)
+
+    return FetchResult(
+        blocks=MoexBlocks(
+            descriptions=descriptions,
+            coupons=coupons,
+            amortizations=amortizations,
+            offers=offers,
+        ),
+        should_exclude_permanently=is_structural,
+        exclusion_reason="Тип облигации = Структурная облигация",
     )
+
+
+def load_filter_state() -> dict[str, dict[str, Any]]:
+    """Загружает состояние фильтра исключений по SECID из кэша."""
+    if not cfg.FILTER_STATE_FILE.exists():
+        return {}
+    return json.loads(cfg.FILTER_STATE_FILE.read_text(encoding="utf-8"))
+
+
+def save_filter_state(state: dict[str, dict[str, Any]]) -> None:
+    """Сохраняет состояние фильтра исключений по SECID."""
+    cfg.FILTER_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def apply_manual_filter_rules(state: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Добавляет ручные правила исключения из конфига в состояние фильтра."""
+    now_iso = datetime.now().isoformat()
+    temp_until = (datetime.now() + timedelta(days=cfg.FILTER_CONFIG["temporary_exclusion_days"])).isoformat()
+
+    for secid in cfg.FILTER_CONFIG["manual_permanent_secids"]:
+        state[str(secid)] = {
+            "mode": "permanent",
+            "reason": "Ручное исключение из конфига",
+            "updated_at": now_iso,
+        }
+
+    for secid in cfg.FILTER_CONFIG["manual_temporary_secids"]:
+        state[str(secid)] = {
+            "mode": "temporary",
+            "reason": "Ручное временное исключение из конфига",
+            "exclude_until": temp_until,
+            "updated_at": now_iso,
+        }
+
+    return state
+
+
+def filter_secids_before_extended_load(secids: list[str]) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, int]]:
+    """Этап "Фильтр": исключает бумаги из опроса по сохраненным правилам."""
+    if not cfg.FILTER_CONFIG["enabled"]:
+        return secids, {}, {"permanent": 0, "temporary": 0}
+
+    now = datetime.now()
+    state = apply_manual_filter_rules(load_filter_state())
+    allowed: list[str] = []
+    skipped_permanent = 0
+    skipped_temporary = 0
+
+    for secid in secids:
+        rule = state.get(secid)
+        if not rule:
+            allowed.append(secid)
+            continue
+
+        mode = rule.get("mode")
+        if mode == "permanent":
+            skipped_permanent += 1
+            continue
+
+        if mode == "temporary":
+            until_raw = rule.get("exclude_until")
+            if until_raw:
+                exclude_until = datetime.fromisoformat(until_raw)
+                if now < exclude_until:
+                    skipped_temporary += 1
+                    continue
+            state.pop(secid, None)
+
+        allowed.append(secid)
+
+    save_filter_state(state)
+    return allowed, state, {"permanent": skipped_permanent, "temporary": skipped_temporary}
 
 
 def chunk_list(items: list[str], chunks: int) -> list[list[str]]:
@@ -561,7 +657,7 @@ def clear_checkpoint() -> None:
         file_path.unlink(missing_ok=True)
 
 
-def collect_extended_data(secids: list[str]) -> MoexBlocks:
+def collect_extended_data(secids: list[str], filter_state: dict[str, dict[str, Any]]) -> tuple[MoexBlocks, dict[str, dict[str, Any]]]:
     state = load_checkpoint_state()
     completed_secids = set(state.get("completed_secids", []))
     blocks = load_checkpoint_blocks()
@@ -587,11 +683,19 @@ def collect_extended_data(secids: list[str]) -> MoexBlocks:
             for index, future in enumerate(as_completed(future_map), start=1):
                 secid = future_map[future]
                 try:
-                    item = future.result()
-                    blocks.descriptions.extend(item.descriptions)
-                    blocks.coupons.extend(item.coupons)
-                    blocks.amortizations.extend(item.amortizations)
-                    blocks.offers.extend(item.offers)
+                    result = future.result()
+                    if result.should_exclude_permanently:
+                        filter_state[secid] = {
+                            "mode": "permanent",
+                            "reason": result.exclusion_reason,
+                            "updated_at": datetime.now().isoformat(),
+                        }
+                        continue
+
+                    blocks.descriptions.extend(result.blocks.descriptions)
+                    blocks.coupons.extend(result.blocks.coupons)
+                    blocks.amortizations.extend(result.blocks.amortizations)
+                    blocks.offers.extend(result.blocks.offers)
                     completed_secids.add(secid)
                 except Exception as exc:  # noqa: BLE001
                     failed_secids.add(secid)
@@ -617,18 +721,27 @@ def collect_extended_data(secids: list[str]) -> MoexBlocks:
             for future in as_completed(future_map):
                 secid = future_map[future]
                 try:
-                    item = future.result()
-                    blocks.descriptions.extend(item.descriptions)
-                    blocks.coupons.extend(item.coupons)
-                    blocks.amortizations.extend(item.amortizations)
-                    blocks.offers.extend(item.offers)
+                    result = future.result()
+                    if result.should_exclude_permanently:
+                        filter_state[secid] = {
+                            "mode": "permanent",
+                            "reason": result.exclusion_reason,
+                            "updated_at": datetime.now().isoformat(),
+                        }
+                        continue
+
+                    blocks.descriptions.extend(result.blocks.descriptions)
+                    blocks.coupons.extend(result.blocks.coupons)
+                    blocks.amortizations.extend(result.blocks.amortizations)
+                    blocks.offers.extend(result.blocks.offers)
                     completed_secids.add(secid)
                 except Exception as exc:  # noqa: BLE001
                     logging.error("Повторная попытка также завершилась ошибкой для %s: %s", secid, exc)
 
         save_checkpoint(blocks, sorted(completed_secids))
 
-    return blocks
+    save_filter_state(filter_state)
+    return blocks, filter_state
 
 
 def save_raw(df: pd.DataFrame, file_name: str) -> None:
@@ -877,7 +990,7 @@ def build_grouped_bonds_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict
         if not actual_columns:
             continue
 
-        separator_column = f"Разделитель {separator_index:02d}"
+        separator_column = f"Раздел группы: {group_name}"
         grouped_columns.append(separator_column)
         start_position = len(grouped_columns) + 1
         grouped_columns.extend(actual_columns)
@@ -896,7 +1009,7 @@ def build_grouped_bonds_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict
 
     remaining_columns = [column for column in df.columns if column not in used_columns]
     if remaining_columns:
-        separator_column = f"Разделитель {separator_index:02d}"
+        separator_column = "Раздел группы: Прочие поля"
         grouped_columns.append(separator_column)
         start_position = len(grouped_columns) + 1
         grouped_columns.extend(remaining_columns)
@@ -995,14 +1108,14 @@ def main() -> None:
     setup_environment()
     setup_logging()
 
-    print("[1/7] Загружаю список облигаций по рынку MOEX...")
+    print("[1/8] Загружаю список облигаций по рынку MOEX...")
     bonds_market_df = fetch_all_pages(
         f"{cfg.MOEX_BASE_URL}/engines/stock/markets/bonds/securities.json",
         block_name="securities",
     )
     validate_required_columns(bonds_market_df, ["SECID", "ISIN", "STATUS"], "Блок market/securities")
 
-    print("[2/7] Загружаю справочник эмитентов и торговых атрибутов...")
+    print("[2/8] Загружаю справочник эмитентов и торговых атрибутов...")
     source_secids = bonds_market_df["SECID"].dropna().astype(str).unique().tolist()
     if cfg.MAX_BONDS_TO_PROCESS:
         source_secids = source_secids[: cfg.MAX_BONDS_TO_PROCESS]
@@ -1039,10 +1152,21 @@ def main() -> None:
     traded_bonds_df = traded_bonds_df.sort_values(["EMITENT_TITLE", "SECID"], na_position="last")
 
     secids = traded_bonds_df["SECID"].dropna().astype(str).unique().tolist()
-    print(f"Найдено торгуемых облигаций: {len(secids)}")
+    print(f"Найдено торгуемых облигаций до фильтра: {len(secids)}")
 
-    print("[3/7] Загружаю расширенные данные (10 чанков + checkpoint)...")
-    blocks = collect_extended_data(secids)
+    print("[3/8] Применяю этап фильтра по бумагам...")
+    secids_before_filter = traded_bonds_df["SECID"].dropna().astype(str).unique().tolist()
+    secids_after_filter, filter_state, filter_stats = filter_secids_before_extended_load(secids_before_filter)
+    traded_bonds_df = traded_bonds_df[traded_bonds_df["SECID"].isin(secids_after_filter)].copy()
+    print(
+        f"Фильтр: исключено навсегда={filter_stats['permanent']}, временно={filter_stats['temporary']}, "
+        f"к опросу допущено={len(secids_after_filter)}"
+    )
+
+    secids = secids_after_filter
+
+    print("[4/8] Загружаю расширенные данные (10 чанков + checkpoint)...")
+    blocks, filter_state = collect_extended_data(secids, filter_state)
 
     descriptions_df = pd.DataFrame(blocks.descriptions)
     descriptions_wide_df = build_descriptions_wide_sheet(descriptions_df)
@@ -1055,7 +1179,7 @@ def main() -> None:
     merged_bonds_df = build_merged_bonds_sheet(traded_bonds_df, descriptions_wide_df)
     quality_df = build_data_quality_sheet(merged_bonds_df)
 
-    print("[4/7] Сохраняю сырые данные в raw/...")
+    print("[5/8] Сохраняю сырые данные в raw/...")
     save_raw(traded_bonds_df, "traded_bonds.json")
     save_raw(descriptions_df, "bond_descriptions_long.json")
     save_raw(descriptions_wide_df, "bond_descriptions_wide.json")
@@ -1065,10 +1189,10 @@ def main() -> None:
     save_raw(emitents_df, "emitents.json")
     save_raw(merged_bonds_df, "bonds_traded_merged.json")
 
-    print("[5/7] Формирую основной Excel (облегченный)...")
+    print("[6/8] Формирую основной Excel (облегченный)...")
     write_core_excel(merged_bonds_df, quality_df)
 
-    print("[6/7] Сохраняю справочники в быстрый формат Parquet...")
+    print("[7/8] Сохраняю справочники в быстрый формат Parquet...")
     save_parquet(emitents_df, cfg.EMITENTS_OUTPUT_FILE)
     save_parquet(coupons_df, cfg.COUPONS_OUTPUT_FILE)
     save_parquet(amortizations_df, cfg.AMORTIZATIONS_OUTPUT_FILE)
@@ -1079,7 +1203,7 @@ def main() -> None:
     enforce_cache_soft_limit()
     elapsed = time.perf_counter() - start_time
 
-    print("[7/7] Готово.")
+    print("[8/8] Готово.")
     print(f"Основной Excel сохранен: {cfg.CORE_OUTPUT_FILE}")
     print(f"Время выполнения: {elapsed:.2f} сек.")
 
