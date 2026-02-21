@@ -46,6 +46,7 @@ RUSSIAN_COLUMN_NAMES = {
     "PREVWAPRICE": "Средневзвешенная цена предыдущего дня",
     "YIELDATPREVWAPRICE": "Доходность по средневзвешенной цене",
     "NEXTCOUPON": "Дата следующего купона",
+    "AMORTDATE": "Дата амортизации",
     "ACCRUEDINT": "НКД",
     "LATNAME": "Латинское наименование",
     "NAME": "Полное наименование",
@@ -1095,12 +1096,17 @@ def remove_unwanted_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=columns_to_drop)
 
 
-def build_merged_bonds_sheet(traded_bonds_df: pd.DataFrame, descriptions_wide_df: pd.DataFrame) -> pd.DataFrame:
+def build_merged_bonds_sheet(
+    traded_bonds_df: pd.DataFrame,
+    descriptions_wide_df: pd.DataFrame,
+    amortization_dates_df: pd.DataFrame,
+) -> pd.DataFrame:
     """Объединяет торговые данные и описание облигаций в один лист без дублей."""
     merged = traded_bonds_df.copy()
     merged["secid"] = merged["SECID"]
 
     merged = merged.merge(descriptions_wide_df, how="left", on="secid")
+    merged = merged.merge(amortization_dates_df, how="left", on="secid")
 
     suffix_x_columns = [col for col in merged.columns if col.endswith("_x")]
     for column_x in suffix_x_columns:
@@ -1144,6 +1150,25 @@ def build_merged_bonds_sheet(traded_bonds_df: pd.DataFrame, descriptions_wide_df
     merged = merge_duplicate_columns(merged)
     merged = remove_unwanted_columns(merged)
     return merged
+
+
+def build_amortization_dates_sheet(amortizations_df: pd.DataFrame) -> pd.DataFrame:
+    """Готовит таблицу дат амортизации по каждой бумаге из справочника MOEX."""
+    if amortizations_df.empty or "secid" not in amortizations_df.columns or "amortdate" not in amortizations_df.columns:
+        return pd.DataFrame(columns=["secid", "AMORTDATE"])
+
+    amortization_dates = amortizations_df[["secid", "amortdate"]].copy()
+    amortization_dates["AMORTDATE"] = pd.to_datetime(amortization_dates["amortdate"], errors="coerce")
+    amortization_dates = amortization_dates.dropna(subset=["AMORTDATE"])
+    if amortization_dates.empty:
+        return pd.DataFrame(columns=["secid", "AMORTDATE"])
+
+    amortization_dates = (
+        amortization_dates.sort_values("AMORTDATE")
+        .drop_duplicates(subset=["secid"], keep="first")[["secid", "AMORTDATE"]]
+    )
+    amortization_dates["AMORTDATE"] = amortization_dates["AMORTDATE"].dt.strftime("%Y-%m-%d")
+    return amortization_dates
 
 
 def build_data_quality_sheet(merged_bonds_df: pd.DataFrame) -> pd.DataFrame:
@@ -1477,11 +1502,12 @@ def main() -> None:
     descriptions_wide_df = build_descriptions_wide_sheet(descriptions_df)
     coupons_df = pd.DataFrame(blocks.coupons)
     amortizations_df = pd.DataFrame(blocks.amortizations)
+    amortization_dates_df = build_amortization_dates_sheet(amortizations_df)
     offers_df = pd.DataFrame(blocks.offers)
     emitents_df = build_emitents_sheet(traded_bonds_df)
     update_emitents_history(emitents_df)
     emitents_df = merge_emitents_incremental(emitents_df)
-    merged_bonds_df = build_merged_bonds_sheet(traded_bonds_df, descriptions_wide_df)
+    merged_bonds_df = build_merged_bonds_sheet(traded_bonds_df, descriptions_wide_df, amortization_dates_df)
     quality_df = build_data_quality_sheet(merged_bonds_df)
 
     print("[5/8] Сохраняю сырые данные в raw/...")
