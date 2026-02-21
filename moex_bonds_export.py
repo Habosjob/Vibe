@@ -16,7 +16,8 @@ from typing import Any
 
 import pandas as pd
 import requests
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 import moex_bonds_config as cfg
 
@@ -174,6 +175,76 @@ DESCRIPTION_KEY_ALIASES = {
     "Периодичность выплаты купона в год": "Частота купона",
     "Типа инструмента": "Тип инструмента",
 }
+
+
+# Группы колонок для удобного сворачивания/разворачивания в Excel.
+# Порядок важен: именно в таком порядке группы будут показаны в листе.
+COLUMN_GROUP_DEFINITIONS: list[tuple[str, list[str]]] = [
+    (
+        "Идентификация",
+        [
+            "Код бумаги",
+            "ISIN",
+            "Краткое наименование",
+            "Полное наименование",
+            "Тип инструмента",
+            "Тип облигации",
+            "Подтип облигации",
+        ],
+    ),
+    (
+        "Эмитент",
+        [
+            "Эмитент",
+            "ИНН эмитента",
+            "Код эмитента",
+        ],
+    ),
+    (
+        "Параметры выпуска",
+        [
+            "Номинал",
+            "Валюта номинала",
+            "Объем выпуска",
+            "Объем размещения",
+            "Дата погашения",
+            "Дата оферты",
+            "Цена оферты",
+        ],
+    ),
+    (
+        "Купоны",
+        [
+            "Дата следующего купона",
+            "Ставка купона, %",
+            "Размер купона",
+            "Купонный период, дней",
+            "Частота купона",
+            "НКД",
+        ],
+    ),
+    (
+        "Торговые показатели",
+        [
+            "Доходность по средневзвешенной цене",
+            "Средневзвешенная цена предыдущего дня",
+            "Цена предыдущей сделки",
+            "Официальная цена закрытия (пред.)",
+            "Дата предыдущих торгов",
+            "Количество сделок",
+            "Объем за день",
+            "Оборот за день",
+        ],
+    ),
+]
+
+GROUP_SEPARATOR_STYLES: list[tuple[str, str]] = [
+    ("D9E1F2", "1F4E78"),
+    ("E2F0D9", "2F6B2F"),
+    ("FCE4D6", "9C5700"),
+    ("F4DFEC", "6A1B57"),
+    ("E4DFEC", "3E2F78"),
+]
 
 
 def normalize_description_key(raw_key: str | None) -> str:
@@ -785,6 +856,88 @@ def beautify_sheet(worksheet: Any) -> None:
         worksheet.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 50)
 
 
+def build_grouped_bonds_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    """Добавляет в таблицу визуальные разделители и возвращает метаданные групп для Excel."""
+    if df.empty:
+        return df.copy(), []
+
+    grouped_columns: list[str] = []
+    group_metadata: list[dict[str, Any]] = []
+    used_columns: set[str] = set()
+    separator_index = 1
+
+    for group_name, candidate_columns in COLUMN_GROUP_DEFINITIONS:
+        actual_columns = [column for column in candidate_columns if column in df.columns and column not in used_columns]
+        if not actual_columns:
+            continue
+
+        separator_column = f"Разделитель {separator_index:02d}"
+        grouped_columns.append(separator_column)
+        start_position = len(grouped_columns) + 1
+        grouped_columns.extend(actual_columns)
+        end_position = len(grouped_columns)
+
+        group_metadata.append(
+            {
+                "separator_column": separator_column,
+                "group_name": group_name,
+                "start": start_position,
+                "end": end_position,
+            }
+        )
+        used_columns.update(actual_columns)
+        separator_index += 1
+
+    remaining_columns = [column for column in df.columns if column not in used_columns]
+    if remaining_columns:
+        separator_column = f"Разделитель {separator_index:02d}"
+        grouped_columns.append(separator_column)
+        start_position = len(grouped_columns) + 1
+        grouped_columns.extend(remaining_columns)
+        end_position = len(grouped_columns)
+        group_metadata.append(
+            {
+                "separator_column": separator_column,
+                "group_name": "Прочие поля",
+                "start": start_position,
+                "end": end_position,
+            }
+        )
+
+    grouped_df = pd.DataFrame(index=df.index)
+    for meta in group_metadata:
+        grouped_df[meta["separator_column"]] = meta["group_name"]
+    for column in df.columns:
+        grouped_df[column] = df[column]
+
+    grouped_df = grouped_df[grouped_columns]
+    return grouped_df, group_metadata
+
+
+def apply_column_groups_to_sheet(worksheet: Any, group_metadata: list[dict[str, Any]]) -> None:
+    """Применяет сворачиваемые группы и цветные разделители для листа с облигациями."""
+    if worksheet.max_column < 1 or not group_metadata:
+        return
+
+    for idx, meta in enumerate(group_metadata):
+        separator_col_index = meta["start"] - 1
+        separator_col_letter = get_column_letter(separator_col_index)
+        fill_color, font_color = GROUP_SEPARATOR_STYLES[idx % len(GROUP_SEPARATOR_STYLES)]
+
+        worksheet.column_dimensions[separator_col_letter].width = 20
+        for row_idx in range(1, worksheet.max_row + 1):
+            cell = worksheet.cell(row=row_idx, column=separator_col_index)
+            cell.fill = PatternFill("solid", fgColor=fill_color)
+            cell.font = Font(color=font_color, bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            if row_idx > 1:
+                cell.value = None
+
+        start_letter = get_column_letter(meta["start"])
+        end_letter = get_column_letter(meta["end"])
+        worksheet.column_dimensions.group(start_letter, end_letter, outline_level=1, hidden=False)
+
+
 def write_excel(file_path: Path, sheet_name: str, df: pd.DataFrame) -> None:
     with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -793,11 +946,13 @@ def write_excel(file_path: Path, sheet_name: str, df: pd.DataFrame) -> None:
 
 def write_core_excel(merged_bonds_df: pd.DataFrame, quality_df: pd.DataFrame) -> None:
     dictionary_df = build_column_dictionary_sheet(merged_bonds_df.columns.tolist())
+    grouped_bonds_df, group_metadata = build_grouped_bonds_sheet(merged_bonds_df)
     with pd.ExcelWriter(cfg.CORE_OUTPUT_FILE, engine="openpyxl") as writer:
-        merged_bonds_df.to_excel(writer, sheet_name="bonds_traded", index=False)
+        grouped_bonds_df.to_excel(writer, sheet_name="bonds_traded", index=False)
         quality_df.to_excel(writer, sheet_name="data_quality", index=False)
         dictionary_df.to_excel(writer, sheet_name="column_dictionary", index=False)
         beautify_sheet(writer.book["bonds_traded"])
+        apply_column_groups_to_sheet(writer.book["bonds_traded"], group_metadata)
         beautify_sheet(writer.book["data_quality"])
         beautify_sheet(writer.book["column_dictionary"])
 
