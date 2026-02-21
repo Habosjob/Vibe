@@ -1,4 +1,4 @@
-"""Скрипт выгружает торгуемые облигации MOEX, расширенные данные по выпускам и данные по эмитентам в Excel."""
+"""Скрипт выгружает торгуемые облигации MOEX и сохраняет Excel-отчёты."""
 
 from __future__ import annotations
 
@@ -14,31 +14,14 @@ from typing import Any
 
 import pandas as pd
 import requests
+from openpyxl.styles import Font, PatternFill
 
-
-BASE_DIR = Path(__file__).resolve().parent
-LOGS_DIR = BASE_DIR / "logs"
-RAW_DIR = BASE_DIR / "raw"
-CACHE_DIR = BASE_DIR / "cache" / "moex"
-OUTPUT_DIR = BASE_DIR / "output"
-
-OUTPUT_FILE = OUTPUT_DIR / "moex_bonds_full_export.xlsx"
-LOG_FILE = LOGS_DIR / "moex_bonds_export.log"
-
-# Настройки запуска (редактируются прямо в файле, без argparse).
-MAX_WORKERS = 16
-REQUEST_TIMEOUT_SECONDS = 30
-RETRY_COUNT = 3
-CACHE_TTL_HOURS = 24
-MAX_BONDS_TO_PROCESS: int | None = None  # Например, 100 для быстрого теста; None = все облигации.
-
-MOEX_BASE_URL = "https://iss.moex.com/iss"
+import moex_bonds_config as cfg
 
 
 @dataclass
 class MoexBlocks:
     descriptions: list[dict[str, Any]]
-    boards: list[dict[str, Any]]
     coupons: list[dict[str, Any]]
     amortizations: list[dict[str, Any]]
     offers: list[dict[str, Any]]
@@ -46,17 +29,16 @@ class MoexBlocks:
 
 def setup_environment() -> None:
     """Готовит папки проекта и очищает временные данные перед запуском."""
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.RAW_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Каждый запуск затирает предыдущий лог.
-    if LOG_FILE.exists():
-        LOG_FILE.unlink()
+    if cfg.LOG_FILE.exists():
+        cfg.LOG_FILE.unlink()
 
-    # Папка raw очищается полностью перед новым отладочным запуском.
-    for item in RAW_DIR.iterdir():
+    for item in cfg.RAW_DIR.iterdir():
         if item.name == ".gitkeep":
             continue
         if item.is_dir():
@@ -70,7 +52,7 @@ def setup_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
         handlers=[
-            logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
+            logging.FileHandler(cfg.LOG_FILE, mode="w", encoding="utf-8"),
             logging.StreamHandler(),
         ],
     )
@@ -79,14 +61,14 @@ def setup_logging() -> None:
 def request_json(url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Делает HTTP-запрос к ISS MOEX c повторными попытками при временных сбоях."""
     last_exception: Exception | None = None
-    for attempt in range(1, RETRY_COUNT + 1):
+    for attempt in range(1, cfg.RETRY_COUNT + 1):
         try:
-            response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
+            response = requests.get(url, params=params, timeout=cfg.REQUEST_TIMEOUT_SECONDS)
             response.raise_for_status()
             return response.json()
         except Exception as exc:  # noqa: BLE001
             last_exception = exc
-            logging.warning("Попытка %s/%s для %s завершилась ошибкой: %s", attempt, RETRY_COUNT, url, exc)
+            logging.warning("Попытка %s/%s для %s завершилась ошибкой: %s", attempt, cfg.RETRY_COUNT, url, exc)
             time.sleep(1.5 * attempt)
 
     raise RuntimeError(f"Не удалось получить данные: {url}") from last_exception
@@ -145,25 +127,32 @@ def fetch_all_pages(url: str, block_name: str, extra_params: dict[str, Any] | No
     return pd.DataFrame(all_rows, columns=columns or [])
 
 
+def is_cache_valid(cache_file: Path, ttl_hours: int) -> bool:
+    if not cache_file.exists():
+        return False
+    max_age = timedelta(hours=ttl_hours)
+    age = datetime.now() - datetime.fromtimestamp(cache_file.stat().st_mtime)
+    return age <= max_age
+
+
 def fetch_reference_row(secid: str) -> dict[str, Any] | None:
-    """Загружает строку справочника securities по конкретному SECID через параметр q."""
-    ref_cache_dir = CACHE_DIR / "reference_rows"
+    ref_cache_dir = cfg.CACHE_DIR / "reference_rows"
     ref_cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = ref_cache_dir / f"{secid}.json"
 
-    if is_cache_valid(cache_file):
+    if is_cache_valid(cache_file, cfg.CACHE_TTL_HOURS["reference_rows"]):
         return json.loads(cache_file.read_text(encoding="utf-8"))
 
     payload = request_json(
-        f"{MOEX_BASE_URL}/securities.json",
+        f"{cfg.MOEX_BASE_URL}/securities.json",
         params={"iss.meta": "off", "engine": "stock", "market": "bonds", "q": secid},
     )
     block = payload.get("securities", {"columns": [], "data": []})
     columns = block.get("columns", [])
     rows = block.get("data", [])
 
-    target_row = None
     secid_index = columns.index("secid") if "secid" in columns else None
+    target_row = None
     if secid_index is not None:
         for row in rows:
             if str(row[secid_index]) == secid:
@@ -177,12 +166,11 @@ def fetch_reference_row(secid: str) -> dict[str, Any] | None:
 
 
 def collect_reference_data_for_secids(secids: list[str]) -> pd.DataFrame:
-    """Параллельно загружает справочные данные по списку SECID."""
     records: list[dict[str, Any]] = []
     total = len(secids)
     logging.info("Загружаю справочные данные по %s облигациям через точечные запросы", total)
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=cfg.MAX_WORKERS) as executor:
         future_map = {executor.submit(fetch_reference_row, secid): secid for secid in secids}
         for index, future in enumerate(as_completed(future_map), start=1):
             secid = future_map[future]
@@ -204,119 +192,217 @@ def to_records(payload_block: dict[str, Any]) -> list[dict[str, Any]]:
     return [dict(zip(columns, row)) for row in payload_block.get("data", [])]
 
 
-def is_cache_valid(cache_file: Path) -> bool:
-    if not cache_file.exists():
-        return False
-    max_age = timedelta(hours=CACHE_TTL_HOURS)
-    age = datetime.now() - datetime.fromtimestamp(cache_file.stat().st_mtime)
-    return age <= max_age
-
-
 def fetch_security_details(secid: str) -> MoexBlocks:
-    """Забирает расширенные данные по бумаге с кэшем на диске."""
-    cache_file = CACHE_DIR / f"{secid}.json"
+    cache_file = cfg.CACHE_DIR / f"{secid}.json"
 
-    if is_cache_valid(cache_file):
+    if is_cache_valid(cache_file, cfg.CACHE_TTL_HOURS["security_details"]):
         cached = json.loads(cache_file.read_text(encoding="utf-8"))
         details_payload = cached["details"]
         bondization_payload = cached["bondization"]
     else:
-        details_payload = request_json(f"{MOEX_BASE_URL}/securities/{secid}.json", params={"iss.meta": "off"})
-        bondization_payload = request_json(f"{MOEX_BASE_URL}/securities/{secid}/bondization.json", params={"iss.meta": "off"})
+        details_payload = request_json(f"{cfg.MOEX_BASE_URL}/securities/{secid}.json", params={"iss.meta": "off"})
+        bondization_payload = request_json(f"{cfg.MOEX_BASE_URL}/securities/{secid}/bondization.json", params={"iss.meta": "off"})
         cache_file.write_text(
             json.dumps({"details": details_payload, "bondization": bondization_payload}, ensure_ascii=False),
             encoding="utf-8",
         )
 
     description_rows = to_records(details_payload.get("description", {"columns": [], "data": []}))
-    descriptions = [{"secid": secid, "field": row.get("name"), "title": row.get("title"), "value": row.get("value")} for row in description_rows]
-
-    boards = to_records(details_payload.get("boards", {"columns": [], "data": []}))
-    for row in boards:
-        row["secid"] = secid
+    descriptions = [
+        {
+            "secid": secid,
+            "field": row.get("name"),
+            "title": row.get("title"),
+            "value": row.get("value"),
+        }
+        for row in description_rows
+    ]
 
     coupons = to_records(bondization_payload.get("coupons", {"columns": [], "data": []}))
     amortizations = to_records(bondization_payload.get("amortizations", {"columns": [], "data": []}))
     offers = to_records(bondization_payload.get("offers", {"columns": [], "data": []}))
 
+    for row in coupons:
+        row["secid"] = secid
+    for row in amortizations:
+        row["secid"] = secid
+    for row in offers:
+        row["secid"] = secid
+
     return MoexBlocks(
         descriptions=descriptions,
-        boards=boards,
         coupons=coupons,
         amortizations=amortizations,
         offers=offers,
     )
+
+
+def chunk_list(items: list[str], chunks: int) -> list[list[str]]:
+    if not items:
+        return []
+    chunk_size = max(1, len(items) // chunks + (1 if len(items) % chunks else 0))
+    return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def load_checkpoint_state() -> dict[str, Any]:
+    if not is_cache_valid(cfg.CHECKPOINT_STATE_FILE, cfg.CACHE_TTL_HOURS["checkpoint"]):
+        return {"completed_secids": []}
+    return json.loads(cfg.CHECKPOINT_STATE_FILE.read_text(encoding="utf-8"))
+
+
+def _load_checkpoint_rows(path: Path) -> list[dict[str, Any]]:
+    if not is_cache_valid(path, cfg.CACHE_TTL_HOURS["checkpoint"]):
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_checkpoint(blocks: MoexBlocks, completed_secids: list[str]) -> None:
+    cfg.CHECKPOINT_STATE_FILE.write_text(
+        json.dumps({"completed_secids": completed_secids, "updated_at": datetime.now().isoformat()}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg.CHECKPOINT_DESCRIPTIONS_FILE.write_text(json.dumps(blocks.descriptions, ensure_ascii=False), encoding="utf-8")
+    cfg.CHECKPOINT_COUPONS_FILE.write_text(json.dumps(blocks.coupons, ensure_ascii=False), encoding="utf-8")
+    cfg.CHECKPOINT_AMORTIZATIONS_FILE.write_text(json.dumps(blocks.amortizations, ensure_ascii=False), encoding="utf-8")
+    cfg.CHECKPOINT_OFFERS_FILE.write_text(json.dumps(blocks.offers, ensure_ascii=False), encoding="utf-8")
+
+
+def load_checkpoint_blocks() -> MoexBlocks:
+    return MoexBlocks(
+        descriptions=_load_checkpoint_rows(cfg.CHECKPOINT_DESCRIPTIONS_FILE),
+        coupons=_load_checkpoint_rows(cfg.CHECKPOINT_COUPONS_FILE),
+        amortizations=_load_checkpoint_rows(cfg.CHECKPOINT_AMORTIZATIONS_FILE),
+        offers=_load_checkpoint_rows(cfg.CHECKPOINT_OFFERS_FILE),
+    )
+
+
+def clear_checkpoint() -> None:
+    for file_path in [
+        cfg.CHECKPOINT_STATE_FILE,
+        cfg.CHECKPOINT_DESCRIPTIONS_FILE,
+        cfg.CHECKPOINT_COUPONS_FILE,
+        cfg.CHECKPOINT_AMORTIZATIONS_FILE,
+        cfg.CHECKPOINT_OFFERS_FILE,
+    ]:
+        file_path.unlink(missing_ok=True)
 
 
 def collect_extended_data(secids: list[str]) -> MoexBlocks:
-    """Параллельно собирает расширенные блоки по всем облигациям."""
-    descriptions: list[dict[str, Any]] = []
-    boards: list[dict[str, Any]] = []
-    coupons: list[dict[str, Any]] = []
-    amortizations: list[dict[str, Any]] = []
-    offers: list[dict[str, Any]] = []
+    state = load_checkpoint_state()
+    completed_secids = set(state.get("completed_secids", []))
+    blocks = load_checkpoint_blocks()
 
-    total = len(secids)
-    logging.info("Старт параллельной загрузки расширенных данных для %s облигаций", total)
+    if completed_secids:
+        logging.info("Найден checkpoint: пропускаю уже обработанные облигации (%s шт.)", len(completed_secids))
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_map = {executor.submit(fetch_security_details, secid): secid for secid in secids}
-        for index, future in enumerate(as_completed(future_map), start=1):
-            secid = future_map[future]
-            try:
-                blocks = future.result()
-                descriptions.extend(blocks.descriptions)
-                boards.extend(blocks.boards)
-                coupons.extend(blocks.coupons)
-                amortizations.extend(blocks.amortizations)
-                offers.extend(blocks.offers)
-            except Exception as exc:  # noqa: BLE001
-                logging.error("Ошибка при загрузке %s: %s", secid, exc)
+    secids_to_process = [secid for secid in secids if secid not in completed_secids]
+    grouped = chunk_list(secids_to_process, cfg.CHUNK_COUNT)
 
-            if index % 50 == 0 or index == total:
-                message = f"Обработано облигаций: {index}/{total}"
-                print(message)
-                logging.info(message)
-
-    return MoexBlocks(
-        descriptions=descriptions,
-        boards=boards,
-        coupons=coupons,
-        amortizations=amortizations,
-        offers=offers,
+    logging.info(
+        "Старт загрузки расширенных данных: всего=%s, осталось после checkpoint=%s, чанков=%s",
+        len(secids),
+        len(secids_to_process),
+        len(grouped),
     )
+
+    for chunk_index, secid_chunk in enumerate(grouped, start=1):
+        print(f"Обрабатываю чанк {chunk_index}/{len(grouped)} ({len(secid_chunk)} облигаций)...")
+        with ThreadPoolExecutor(max_workers=cfg.MAX_WORKERS) as executor:
+            future_map = {executor.submit(fetch_security_details, secid): secid for secid in secid_chunk}
+            for index, future in enumerate(as_completed(future_map), start=1):
+                secid = future_map[future]
+                try:
+                    item = future.result()
+                    blocks.descriptions.extend(item.descriptions)
+                    blocks.coupons.extend(item.coupons)
+                    blocks.amortizations.extend(item.amortizations)
+                    blocks.offers.extend(item.offers)
+                    completed_secids.add(secid)
+                except Exception as exc:  # noqa: BLE001
+                    logging.error("Ошибка при загрузке %s: %s", secid, exc)
+
+                if index % 50 == 0 or index == len(secid_chunk):
+                    logging.info(
+                        "Чанк %s/%s: обработано %s/%s",
+                        chunk_index,
+                        len(grouped),
+                        index,
+                        len(secid_chunk),
+                    )
+
+        save_checkpoint(blocks, sorted(completed_secids))
+        logging.info("Checkpoint сохранен после чанка %s/%s", chunk_index, len(grouped))
+
+    return blocks
 
 
 def save_raw(df: pd.DataFrame, file_name: str) -> None:
-    file_path = RAW_DIR / file_name
-    df.to_json(file_path, orient="records", force_ascii=False, indent=2)
+    (cfg.RAW_DIR / file_name).write_text(df.to_json(orient="records", force_ascii=False, indent=2), encoding="utf-8")
 
 
 def build_emitents_sheet(traded_bonds: pd.DataFrame) -> pd.DataFrame:
-    """Формирует сводный лист по эмитентам из итоговой таблицы облигаций."""
-    emitent_cols_upper = [
-        "EMITENT_ID",
-        "EMITENT_TITLE",
-        "EMITENT_INN",
-        "EMITENT_OKPO",
-    ]
+    emitent_cols_upper = ["EMITENT_ID", "EMITENT_TITLE", "EMITENT_INN", "EMITENT_OKPO"]
     existing_cols = [col for col in emitent_cols_upper if col in traded_bonds.columns]
     if not existing_cols:
         return pd.DataFrame(columns=emitent_cols_upper + ["bonds_count", "secids"])
 
     emitent_id_column = "EMITENT_ID" if "EMITENT_ID" in existing_cols else existing_cols[0]
+    emitents = traded_bonds[existing_cols + ["SECID"]].dropna(subset=[emitent_id_column], how="all").copy()
 
-    emitents = (
-        traded_bonds[existing_cols + ["SECID"]]
-        .dropna(subset=[emitent_id_column], how="all")
-        .copy()
-    )
-
-    aggregated = emitents.groupby(existing_cols, dropna=False, as_index=False).agg(
+    return emitents.groupby(existing_cols, dropna=False, as_index=False).agg(
         bonds_count=("SECID", "count"),
         secids=("SECID", lambda x: ", ".join(sorted(set(map(str, x))))),
     )
-    return aggregated
+
+
+def build_descriptions_wide_sheet(descriptions_df: pd.DataFrame) -> pd.DataFrame:
+    """Превращает длинный формат описаний в широкий (1 строка = 1 облигация)."""
+    if descriptions_df.empty:
+        return pd.DataFrame(columns=["secid"])
+
+    descriptions_df = descriptions_df.copy()
+    descriptions_df["key"] = descriptions_df["title"].fillna(descriptions_df["field"]).fillna("unknown")
+    descriptions_df = descriptions_df.drop_duplicates(subset=["secid", "key"], keep="last")
+
+    wide = descriptions_df.pivot(index="secid", columns="key", values="value").reset_index()
+    wide.columns.name = None
+    return wide
+
+
+def beautify_sheet(worksheet: Any) -> None:
+    """Улучшает читаемость листа: стиль заголовка, автофильтр, freeze pane и ширина."""
+    if worksheet.max_row < 1 or worksheet.max_column < 1:
+        return
+
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    for cell in worksheet[1]:
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.fill = header_fill
+
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+
+    for column_cells in worksheet.columns:
+        first_cell = column_cells[0]
+        col_letter = first_cell.column_letter
+        values = [str(c.value) if c.value is not None else "" for c in column_cells[:200]]
+        max_len = max((len(v) for v in values), default=10)
+        worksheet.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 50)
+
+
+def write_excel(file_path: Path, sheet_name: str, df: pd.DataFrame) -> None:
+    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+        beautify_sheet(writer.book[sheet_name])
+
+
+def write_core_excel(traded_bonds_df: pd.DataFrame, descriptions_wide_df: pd.DataFrame) -> None:
+    with pd.ExcelWriter(cfg.CORE_OUTPUT_FILE, engine="openpyxl") as writer:
+        traded_bonds_df.to_excel(writer, sheet_name="bonds_traded", index=False)
+        descriptions_wide_df.to_excel(writer, sheet_name="bond_descriptions", index=False)
+
+        beautify_sheet(writer.book["bonds_traded"])
+        beautify_sheet(writer.book["bond_descriptions"])
 
 
 def main() -> None:
@@ -324,22 +410,20 @@ def main() -> None:
     setup_environment()
     setup_logging()
 
-    print("[1/6] Загружаю список облигаций по рынку MOEX...")
+    print("[1/7] Загружаю список облигаций по рынку MOEX...")
     bonds_market_df = fetch_all_pages(
-        f"{MOEX_BASE_URL}/engines/stock/markets/bonds/securities.json",
+        f"{cfg.MOEX_BASE_URL}/engines/stock/markets/bonds/securities.json",
         block_name="securities",
     )
 
-    print("[2/6] Загружаю данные по эмитентам для найденных облигаций...")
+    print("[2/7] Загружаю справочник эмитентов и торговых атрибутов...")
     source_secids = bonds_market_df["SECID"].dropna().astype(str).unique().tolist()
-    if MAX_BONDS_TO_PROCESS:
-        source_secids = source_secids[:MAX_BONDS_TO_PROCESS]
+    if cfg.MAX_BONDS_TO_PROCESS:
+        source_secids = source_secids[: cfg.MAX_BONDS_TO_PROCESS]
         bonds_market_df = bonds_market_df[bonds_market_df["SECID"].isin(source_secids)].copy()
-        logging.warning("Для отладки ограничен список облигаций до %s штук на раннем этапе", MAX_BONDS_TO_PROCESS)
+        logging.warning("Для отладки ограничен список облигаций до %s штук", cfg.MAX_BONDS_TO_PROCESS)
 
     all_securities_df = collect_reference_data_for_secids(source_secids)
-
-    # Приводим названия столбцов к единому стилю перед merge.
     all_securities_df = all_securities_df.rename(columns=str.upper)
 
     required_reference_cols = [
@@ -359,18 +443,7 @@ def main() -> None:
             all_securities_df[column] = None
 
     merged_df = bonds_market_df.merge(
-        all_securities_df[[
-            "SECID",
-            "IS_TRADED",
-            "EMITENT_ID",
-            "EMITENT_TITLE",
-            "EMITENT_INN",
-            "EMITENT_OKPO",
-            "TYPE",
-            "GROUP",
-            "PRIMARY_BOARDID",
-            "MARKETPRICE_BOARDID",
-        ]],
+        all_securities_df[required_reference_cols],
         how="left",
         on="SECID",
     )
@@ -381,41 +454,43 @@ def main() -> None:
     secids = traded_bonds_df["SECID"].dropna().astype(str).unique().tolist()
     print(f"Найдено торгуемых облигаций: {len(secids)}")
 
-    print("[3/6] Параллельно собираю расширенные данные по каждой облигации...")
+    print("[3/7] Загружаю расширенные данные (10 чанков + checkpoint)...")
     blocks = collect_extended_data(secids)
 
     descriptions_df = pd.DataFrame(blocks.descriptions)
-    boards_df = pd.DataFrame(blocks.boards)
+    descriptions_wide_df = build_descriptions_wide_sheet(descriptions_df)
     coupons_df = pd.DataFrame(blocks.coupons)
     amortizations_df = pd.DataFrame(blocks.amortizations)
     offers_df = pd.DataFrame(blocks.offers)
     emitents_df = build_emitents_sheet(traded_bonds_df)
 
-    print("[4/6] Сохраняю сырые данные для отладки в папку raw...")
+    print("[4/7] Сохраняю сырые данные в raw/...")
     save_raw(traded_bonds_df, "traded_bonds.json")
-    save_raw(descriptions_df, "bond_descriptions.json")
-    save_raw(boards_df, "bond_boards.json")
+    save_raw(descriptions_df, "bond_descriptions_long.json")
+    save_raw(descriptions_wide_df, "bond_descriptions_wide.json")
     save_raw(coupons_df, "bond_coupons.json")
     save_raw(amortizations_df, "bond_amortizations.json")
     save_raw(offers_df, "bond_offers.json")
     save_raw(emitents_df, "emitents.json")
 
-    print("[5/6] Формирую Excel-файл...")
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
-        traded_bonds_df.to_excel(writer, sheet_name="bonds_traded", index=False)
-        emitents_df.to_excel(writer, sheet_name="emitents", index=False)
-        descriptions_df.to_excel(writer, sheet_name="bond_descriptions", index=False)
-        boards_df.to_excel(writer, sheet_name="bond_boards", index=False)
-        coupons_df.to_excel(writer, sheet_name="bond_coupons", index=False)
-        amortizations_df.to_excel(writer, sheet_name="bond_amortizations", index=False)
-        offers_df.to_excel(writer, sheet_name="bond_offers", index=False)
+    print("[5/7] Формирую основной Excel (облегченный)...")
+    write_core_excel(traded_bonds_df, descriptions_wide_df)
 
+    print("[6/7] Формирую отдельные справочники...")
+    write_excel(cfg.EMITENTS_OUTPUT_FILE, "emitents", emitents_df)
+    write_excel(cfg.COUPONS_OUTPUT_FILE, "bond_coupons", coupons_df)
+    write_excel(cfg.AMORTIZATIONS_OUTPUT_FILE, "bond_amortizations", amortizations_df)
+    write_excel(cfg.OFFERS_OUTPUT_FILE, "bond_offers", offers_df)
+
+    clear_checkpoint()
     elapsed = time.perf_counter() - start_time
-    print("[6/6] Готово.")
-    print(f"Excel сохранен: {OUTPUT_FILE}")
+
+    print("[7/7] Готово.")
+    print(f"Основной Excel сохранен: {cfg.CORE_OUTPUT_FILE}")
     print(f"Время выполнения: {elapsed:.2f} сек.")
 
-    logging.info("Excel сохранен: %s", OUTPUT_FILE)
+    logging.info("Основной Excel сохранен: %s", cfg.CORE_OUTPUT_FILE)
+    logging.info("Доп. файлы: %s, %s, %s, %s", cfg.EMITENTS_OUTPUT_FILE, cfg.COUPONS_OUTPUT_FILE, cfg.AMORTIZATIONS_OUTPUT_FILE, cfg.OFFERS_OUTPUT_FILE)
     logging.info("Время выполнения: %.2f сек.", elapsed)
 
 
