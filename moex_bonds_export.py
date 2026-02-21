@@ -7,6 +7,7 @@ import logging
 import shutil
 import time
 import zipfile
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -90,6 +91,79 @@ RUSSIAN_COLUMN_NAMES = {
     "VALTODAY": "Оборот за день",
 }
 
+OUTPUT_COLUMNS_TO_DROP = {
+    "Код режима торгов",
+    "Лот",
+    "Режим торгов",
+    "Статус",
+    "Знаков после запятой",
+    "Наименование ценной бумаги",
+    "Примечание",
+    "Код рынка",
+    "Код группы инструмента",
+    "Код сектора",
+    "Минимальный шаг цены",
+    "Латинское наименование",
+    "Регистрационный номер",
+    "Код валюты",
+    "Уровень листинга",
+    "Тип ценной бумаги",
+    "Дата расчетов",
+    "Дата расчета доходности эмитентом",
+    "Торгуется",
+    "ОКПО эмитента",
+    "Группа инструментов",
+    "Основной режим торгов",
+    "Режим цены рынка",
+    "Государственный регистрационный номер программы облигации",
+    "Дата государственной регистрации ценной бумаги",
+    "Дата начала торгов",
+    "Дата начала торгов на Московской Бирже",
+    "Дата принятия решения организатором торговли о включении ценной бумаги в Список",
+    "Допуск к вечерней дополнительной торговой сессии",
+    "Допуск к утренней дополнительной торговой сессии",
+    "ИЦБ допущена к орг. торгам по инициативе биржи",
+    "Категория квалифицированного инвестора",
+    "Код типа инструмента",
+    "Наличие проспекта",
+    "Номер государственной регистрации",
+    "Облигации размещены с целью финансирования соглашений о партнерстве",
+    "Полное наименование",
+    "Сектор компаний повышенного инвестиционного риска (ПИР)",
+    "Тип бумаги",
+    "Участник программы создания акционерной стоимости",
+    "Эмитент не соответствует требованию на текущий Список",
+    "Код эмитента",
+    "Тип инструмента",
+}
+
+COLUMN_DICTIONARY_DESCRIPTIONS = {
+    "Код бумаги": "Уникальный код облигации на бирже.",
+    "Краткое наименование": "Короткое название бумаги, чтобы быстро ее найти.",
+    "ISIN": "Международный идентификатор ценной бумаги.",
+    "Эмитент": "Название компании или организации, выпустившей облигацию.",
+    "ИНН эмитента": "Налоговый номер эмитента.",
+    "Номинал": "Базовая стоимость одной облигации.",
+    "Валюта номинала": "В какой валюте выражен номинал.",
+    "Дата погашения": "Дата, когда эмитент должен вернуть номинал.",
+    "Дата следующего купона": "Ближайшая дата выплаты купонного дохода.",
+    "Ставка купона, %": "Процентная ставка купона.",
+    "Размер купона": "Сумма одной купонной выплаты.",
+    "Купонный период, дней": "Количество дней между купонными выплатами.",
+    "Доходность по средневзвешенной цене": "Оценка доходности к цене прошлых торгов.",
+    "Средневзвешенная цена предыдущего дня": "Средняя цена бумаги за прошлый торговый день.",
+    "Цена предыдущей сделки": "Цена последней сделки из прошлой торговой сессии.",
+    "Оборот за день": "Денежный оборот по бумаге за текущий день.",
+    "Объем за день": "Количество бумаг, которое прошло в сделках за день.",
+    "Количество сделок": "Сколько сделок по бумаге было заключено за день.",
+    "Официальная цена закрытия (пред.)": "Официальная цена закрытия предыдущего торгового дня.",
+    "Дата предыдущих торгов": "Дата предыдущей торговой сессии для бумаги.",
+    "Объем выпуска": "Полный объем облигаций в выпуске.",
+    "Объем размещения": "Какая часть выпуска была фактически размещена.",
+    "Дата оферты": "Дата, когда может сработать оферта на выкуп.",
+    "Цена оферты": "Цена выкупа бумаги по оферте.",
+}
+
 DESCRIPTION_KEY_ALIASES = {
     "ISIN код": "ISIN",
     "Код ценной бумаги": "Код бумаги",
@@ -131,6 +205,43 @@ def setup_environment() -> None:
             shutil.rmtree(item, ignore_errors=True)
         else:
             item.unlink(missing_ok=True)
+
+
+def validate_required_columns(df: pd.DataFrame, required_columns: list[str], context: str) -> None:
+    """Проверяет, что в таблице есть обязательные колонки; иначе прерывает запуск."""
+    missing = [column for column in required_columns if column not in df.columns]
+    if missing:
+        missing_list = ", ".join(missing)
+        raise RuntimeError(f"{context}: отсутствуют обязательные колонки: {missing_list}")
+
+
+def enforce_cache_soft_limit() -> None:
+    """Ограничивает разрастание кэша, удаляя самые старые файлы при превышении лимита."""
+    limit_bytes = cfg.CACHE_SOFT_LIMIT_MB * 1024 * 1024
+    if limit_bytes <= 0 or not cfg.CACHE_DIR.exists():
+        return
+
+    all_files = [path for path in cfg.CACHE_DIR.rglob("*") if path.is_file()]
+    total_size = sum(path.stat().st_size for path in all_files)
+    if total_size <= limit_bytes:
+        return
+
+    target_size = int(limit_bytes * 0.9)
+    removed_files = 0
+    for file_path in sorted(all_files, key=lambda p: p.stat().st_mtime):
+        file_size = file_path.stat().st_size
+        file_path.unlink(missing_ok=True)
+        total_size -= file_size
+        removed_files += 1
+        if total_size <= target_size:
+            break
+
+    logging.warning(
+        "Кэш превысил лимит %s МБ, удалено %s старых файлов. Текущий размер: %.2f МБ",
+        cfg.CACHE_SOFT_LIMIT_MB,
+        removed_files,
+        total_size / (1024 * 1024),
+    )
 
 
 def setup_logging() -> None:
@@ -506,24 +617,52 @@ def build_descriptions_wide_sheet(descriptions_df: pd.DataFrame) -> pd.DataFrame
 
 
 def merge_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Склеивает дубли столбцов по одинаковому названию, заполняя пропуски справа налево."""
-    merged_df = df.copy()
-    unique_order = list(dict.fromkeys(merged_df.columns))
+    """Устраняет дубли названий колонок (с учетом пробелов/регистра) без потери значений."""
 
-    for column in unique_order:
-        duplicated_mask = merged_df.columns == column
-        duplicated_columns = merged_df.loc[:, duplicated_mask]
-        if duplicated_columns.shape[1] <= 1:
-            continue
+    def normalize_column_label(column_name: Any) -> str:
+        return " ".join(str(column_name).strip().lower().split())
 
-        combined = duplicated_columns.iloc[:, 0]
-        for idx in range(1, duplicated_columns.shape[1]):
-            combined = combined.combine_first(duplicated_columns.iloc[:, idx])
+    groups: dict[str, list[int]] = defaultdict(list)
+    first_name_by_group: dict[str, Any] = {}
+    for index, column_name in enumerate(df.columns):
+        normalized = normalize_column_label(column_name)
+        groups[normalized].append(index)
+        first_name_by_group.setdefault(normalized, column_name)
 
-        merged_df = merged_df.drop(columns=column)
-        merged_df[column] = combined
+    merged_data: dict[Any, pd.Series] = {}
+    column_order: list[Any] = []
+    for normalized_name, indexes in groups.items():
+        first_column_name = first_name_by_group[normalized_name]
+        combined = df.iloc[:, indexes[0]].copy()
+        for index in indexes[1:]:
+            right = df.iloc[:, index]
+            combined = combined.where(combined.notna(), right)
+        merged_data[first_column_name] = combined
+        column_order.append(first_column_name)
 
-    return merged_df
+    return pd.DataFrame(merged_data, columns=column_order)
+
+
+def build_column_dictionary_sheet(columns: list[str]) -> pd.DataFrame:
+    """Формирует словарь колонок прямо внутри Excel для пользователей без техподготовки."""
+    rows = []
+    for column in columns:
+        rows.append(
+            {
+                "Колонка": column,
+                "Описание": COLUMN_DICTIONARY_DESCRIPTIONS.get(column, "Техническое поле из выгрузки MOEX."),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def remove_unwanted_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Удаляет лишние столбцы из итогового листа по списку бизнес-требований."""
+    columns_to_drop = [column for column in OUTPUT_COLUMNS_TO_DROP if column in df.columns]
+    if not columns_to_drop:
+        return df
+    logging.info("Удаляю из итогового листа %s столбцов по бизнес-правилам", len(columns_to_drop))
+    return df.drop(columns=columns_to_drop)
 
 
 def build_merged_bonds_sheet(traded_bonds_df: pd.DataFrame, descriptions_wide_df: pd.DataFrame) -> pd.DataFrame:
@@ -573,6 +712,7 @@ def build_merged_bonds_sheet(traded_bonds_df: pd.DataFrame, descriptions_wide_df
     renamed_columns = {col: RUSSIAN_COLUMN_NAMES[col] for col in merged.columns if col in RUSSIAN_COLUMN_NAMES}
     merged = merged.rename(columns=renamed_columns)
     merged = merge_duplicate_columns(merged)
+    merged = remove_unwanted_columns(merged)
     return merged
 
 
@@ -652,11 +792,41 @@ def write_excel(file_path: Path, sheet_name: str, df: pd.DataFrame) -> None:
 
 
 def write_core_excel(merged_bonds_df: pd.DataFrame, quality_df: pd.DataFrame) -> None:
+    dictionary_df = build_column_dictionary_sheet(merged_bonds_df.columns.tolist())
     with pd.ExcelWriter(cfg.CORE_OUTPUT_FILE, engine="openpyxl") as writer:
         merged_bonds_df.to_excel(writer, sheet_name="bonds_traded", index=False)
         quality_df.to_excel(writer, sheet_name="data_quality", index=False)
+        dictionary_df.to_excel(writer, sheet_name="column_dictionary", index=False)
         beautify_sheet(writer.book["bonds_traded"])
         beautify_sheet(writer.book["data_quality"])
+        beautify_sheet(writer.book["column_dictionary"])
+
+
+def update_emitents_history(new_emitents_df: pd.DataFrame) -> None:
+    """Ведет историю появления новых эмитентов (дата первого обнаружения + идентификатор)."""
+    if "EMITENT_ID" not in new_emitents_df.columns:
+        return
+
+    history_file = cfg.OUTPUT_DIR / "moex_emitents_history.csv"
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    snapshot = new_emitents_df[["EMITENT_ID", "EMITENT_TITLE"]].dropna(subset=["EMITENT_ID"]).copy()
+    snapshot["EMITENT_ID"] = snapshot["EMITENT_ID"].astype(str)
+    snapshot = snapshot.drop_duplicates(subset=["EMITENT_ID"], keep="last")
+
+    if history_file.exists():
+        history_df = pd.read_csv(history_file)
+    else:
+        history_df = pd.DataFrame(columns=["first_seen", "EMITENT_ID", "EMITENT_TITLE"])
+
+    known_ids = set(history_df["EMITENT_ID"].dropna().astype(str)) if not history_df.empty else set()
+    new_rows = snapshot[~snapshot["EMITENT_ID"].isin(known_ids)].copy()
+    if new_rows.empty:
+        return
+
+    new_rows.insert(0, "first_seen", current_date)
+    updated_history = pd.concat([history_df, new_rows], ignore_index=True)
+    updated_history = updated_history.sort_values(["first_seen", "EMITENT_TITLE"], na_position="last")
+    updated_history.to_csv(history_file, index=False, encoding="utf-8")
 
 
 def main() -> None:
@@ -669,6 +839,7 @@ def main() -> None:
         f"{cfg.MOEX_BASE_URL}/engines/stock/markets/bonds/securities.json",
         block_name="securities",
     )
+    validate_required_columns(bonds_market_df, ["SECID", "ISIN", "STATUS"], "Блок market/securities")
 
     print("[2/7] Загружаю справочник эмитентов и торговых атрибутов...")
     source_secids = bonds_market_df["SECID"].dropna().astype(str).unique().tolist()
@@ -679,6 +850,7 @@ def main() -> None:
 
     all_securities_df = collect_reference_data_for_secids(source_secids)
     all_securities_df = all_securities_df.rename(columns=str.upper)
+    validate_required_columns(all_securities_df, ["SECID"], "Справочник /iss/securities?q=<SECID>")
 
     required_reference_cols = [
         "SECID",
@@ -717,6 +889,7 @@ def main() -> None:
     amortizations_df = pd.DataFrame(blocks.amortizations)
     offers_df = pd.DataFrame(blocks.offers)
     emitents_df = build_emitents_sheet(traded_bonds_df)
+    update_emitents_history(emitents_df)
     emitents_df = merge_emitents_incremental(emitents_df)
     merged_bonds_df = build_merged_bonds_sheet(traded_bonds_df, descriptions_wide_df)
     quality_df = build_data_quality_sheet(merged_bonds_df)
@@ -742,6 +915,7 @@ def main() -> None:
 
     archive_raw_data()
     clear_checkpoint()
+    enforce_cache_soft_limit()
     elapsed = time.perf_counter() - start_time
 
     print("[7/7] Готово.")

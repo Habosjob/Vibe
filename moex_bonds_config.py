@@ -53,6 +53,10 @@ CACHE_TTL_HOURS = {
     "checkpoint": 72,
 }
 
+# Мягкий лимит размера кэша в мегабайтах.
+# Когда лимит превышен, самые старые файлы кэша автоматически удаляются.
+CACHE_SOFT_LIMIT_MB = 1024
+
 # Служебные пути checkpoint-механизма.
 CHECKPOINT_DIR = CACHE_DIR / "checkpoints"
 CHECKPOINT_STATE_FILE = CHECKPOINT_DIR / "extended_data_checkpoint.json"
