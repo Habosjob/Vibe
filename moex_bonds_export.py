@@ -539,7 +539,23 @@ def load_filter_state() -> dict[str, dict[str, Any]]:
     """Загружает состояние фильтра исключений по SECID из кэша."""
     if not cfg.FILTER_STATE_FILE.exists():
         return {}
-    return json.loads(cfg.FILTER_STATE_FILE.read_text(encoding="utf-8"))
+
+    try:
+        raw_state = json.loads(cfg.FILTER_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Не удалось прочитать состояние фильтра (%s). Создаю новое.", exc)
+        return {}
+
+    if not isinstance(raw_state, dict):
+        logging.warning("Некорректный формат состояния фильтра: ожидается объект JSON.")
+        return {}
+
+    normalized_state: dict[str, dict[str, Any]] = {}
+    for secid, payload in raw_state.items():
+        if isinstance(payload, dict):
+            normalized_state[str(secid)] = payload
+
+    return normalized_state
 
 
 def save_filter_state(state: dict[str, dict[str, Any]]) -> None:
@@ -550,7 +566,6 @@ def save_filter_state(state: dict[str, dict[str, Any]]) -> None:
 def apply_manual_filter_rules(state: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Добавляет ручные правила исключения из конфига в состояние фильтра."""
     now_iso = datetime.now().isoformat()
-    temp_until = (datetime.now() + timedelta(days=cfg.FILTER_CONFIG["temporary_exclusion_days"])).isoformat()
 
     for secid in cfg.FILTER_CONFIG["manual_permanent_secids"]:
         state[str(secid)] = {
@@ -560,12 +575,26 @@ def apply_manual_filter_rules(state: dict[str, dict[str, Any]]) -> dict[str, dic
         }
 
     for secid in cfg.FILTER_CONFIG["manual_temporary_secids"]:
-        state[str(secid)] = {
-            "mode": "temporary",
-            "reason": "Ручное временное исключение из конфига",
-            "exclude_until": temp_until,
-            "updated_at": now_iso,
-        }
+        secid_key = str(secid)
+        existing_rule = state.get(secid_key, {})
+
+        # Временное исключение обновляем только когда его нет или оно уже просрочено.
+        should_refresh = True
+        existing_until_raw = existing_rule.get("exclude_until")
+        if isinstance(existing_until_raw, str):
+            try:
+                should_refresh = datetime.now() >= datetime.fromisoformat(existing_until_raw)
+            except ValueError:
+                should_refresh = True
+
+        if should_refresh:
+            temp_until = (datetime.now() + timedelta(days=cfg.FILTER_CONFIG["temporary_exclusion_days"])).isoformat()
+            state[secid_key] = {
+                "mode": "temporary",
+                "reason": "Ручное временное исключение из конфига",
+                "exclude_until": temp_until,
+                "updated_at": now_iso,
+            }
 
     return state
 
@@ -595,10 +624,18 @@ def filter_secids_before_extended_load(secids: list[str]) -> tuple[list[str], di
         if mode == "temporary":
             until_raw = rule.get("exclude_until")
             if until_raw:
-                exclude_until = datetime.fromisoformat(until_raw)
+                try:
+                    exclude_until = datetime.fromisoformat(until_raw)
+                except ValueError:
+                    logging.warning("Некорректная дата exclude_until для %s: %s", secid, until_raw)
+                    state.pop(secid, None)
+                    allowed.append(secid)
+                    continue
+
                 if now < exclude_until:
                     skipped_temporary += 1
                     continue
+
             state.pop(secid, None)
 
         allowed.append(secid)
