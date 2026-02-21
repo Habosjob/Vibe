@@ -188,7 +188,7 @@ DESCRIPTION_KEY_ALIASES = {
 # Порядок важен: именно в таком порядке группы будут показаны в листе.
 COLUMN_GROUP_DEFINITIONS: list[tuple[str, list[str]]] = [
     (
-        "1) Идентификация выпуска",
+        "Идентификация выпуска",
         [
             "Код бумаги",
             "ISIN",
@@ -200,7 +200,7 @@ COLUMN_GROUP_DEFINITIONS: list[tuple[str, list[str]]] = [
         ],
     ),
     (
-        "2) Эмитент",
+        "Эмитент",
         [
             "Эмитент",
             "ИНН эмитента",
@@ -208,7 +208,7 @@ COLUMN_GROUP_DEFINITIONS: list[tuple[str, list[str]]] = [
         ],
     ),
     (
-        "3) Параметры выпуска и номинала",
+        "Параметры выпуска и номинала",
         [
             "Номинал",
             "Валюта номинала",
@@ -217,7 +217,7 @@ COLUMN_GROUP_DEFINITIONS: list[tuple[str, list[str]]] = [
         ],
     ),
     (
-        "4) Купонный доход",
+        "Купонный доход",
         [
             "Частота купона",
             "Купонный период, дней",
@@ -228,7 +228,7 @@ COLUMN_GROUP_DEFINITIONS: list[tuple[str, list[str]]] = [
         ],
     ),
     (
-        "5) Погашение и оферты",
+        "Погашение и оферты",
         [
             "Дата погашения",
             "Дата оферты",
@@ -236,7 +236,7 @@ COLUMN_GROUP_DEFINITIONS: list[tuple[str, list[str]]] = [
         ],
     ),
     (
-        "6) Рыночные данные и ликвидность",
+        "Рыночные данные и ликвидность",
         [
             "Доходность по средневзвешенной цене",
             "Средневзвешенная цена предыдущего дня",
@@ -475,10 +475,12 @@ def to_records(payload_block: dict[str, Any]) -> list[dict[str, Any]]:
 
 def parse_structural_bond_flag(description_rows: list[dict[str, Any]]) -> bool:
     """Проверяет, является ли бумага структурной облигацией по полю "Тип облигации"."""
+    structural_fields = {"bondtype", "bond_type", "secsubtype", "sec_subtype"}
+    structural_titles = {"тип облигации", "вид облигации", "подтип облигации", "подвид облигации"}
     for row in description_rows:
         field_name = str(row.get("name") or "").strip().lower()
         title_name = str(row.get("title") or "").strip().lower()
-        if field_name == "bondtype" or title_name == "тип облигации":
+        if field_name in structural_fields or title_name in structural_titles:
             value = str(row.get("value") or "").strip().lower().replace("ё", "е")
             # Значение с MOEX может приходить как полное, так и сокращенное (например, "Структурная об...").
             return "структур" in value
@@ -1059,7 +1061,7 @@ def build_grouped_bonds_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict
         if not actual_columns:
             continue
 
-        separator_column = f"Раздел группы: {group_name}"
+        separator_column = group_name
         grouped_columns.append(separator_column)
         start_position = len(grouped_columns) + 1
         grouped_columns.extend(actual_columns)
@@ -1078,7 +1080,7 @@ def build_grouped_bonds_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict
 
     remaining_columns = [column for column in df.columns if column not in used_columns]
     if remaining_columns:
-        separator_column = "Раздел группы: Прочие поля"
+        separator_column = "Прочие поля"
         grouped_columns.append(separator_column)
         start_position = len(grouped_columns) + 1
         grouped_columns.extend(remaining_columns)
