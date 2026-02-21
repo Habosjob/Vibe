@@ -30,7 +30,12 @@ class MoexBlocks:
 
 RUSSIAN_COLUMN_NAMES = {
     "SECID": "Код бумаги",
+    "BOARDID": "Код режима торгов",
     "SHORTNAME": "Краткое наименование",
+    "PREVWAPRICE": "Средневзвешенная цена предыдущего дня",
+    "YIELDATPREVWAPRICE": "Доходность по средневзвешенной цене",
+    "NEXTCOUPON": "Дата следующего купона",
+    "ACCRUEDINT": "НКД",
     "LATNAME": "Латинское наименование",
     "NAME": "Полное наименование",
     "ISIN": "ISIN",
@@ -40,10 +45,34 @@ RUSSIAN_COLUMN_NAMES = {
     "PREVPRICE": "Цена предыдущей сделки",
     "LOTSIZE": "Лот",
     "FACEVALUE": "Номинал",
+    "BOARDNAME": "Режим торгов",
     "MATDATE": "Дата погашения",
+    "DECIMALS": "Знаков после запятой",
+    "COUPONPERIOD": "Купонный период, дней",
+    "ISSUESIZE": "Объем выпуска",
+    "PREVLEGALCLOSEPRICE": "Официальная цена закрытия (пред.)",
+    "PREVDATE": "Дата предыдущих торгов",
+    "SECNAME": "Наименование ценной бумаги",
+    "REMARKS": "Примечание",
+    "MARKETCODE": "Код рынка",
+    "INSTRID": "Код группы инструмента",
+    "SECTORID": "Код сектора",
+    "MINSTEP": "Минимальный шаг цены",
     "COUPONFREQUENCY": "Частота купона",
     "COUPONPERCENT": "Ставка купона, %",
     "COUPONVALUE": "Размер купона",
+    "CURRENCYID": "Код валюты",
+    "ISSUESIZEPLACED": "Объем размещения",
+    "SECTYPE": "Тип ценной бумаги",
+    "OFFERDATE": "Дата оферты (описание)",
+    "SETTLEDATE": "Дата расчетов",
+    "LOTVALUE": "Стоимость лота",
+    "FACEVALUEONSETTLEDATE": "Номинал на дату расчетов",
+    "CALLOPTIONDATE": "Дата call-оферты",
+    "PUTOPTIONDATE": "Дата put-оферты",
+    "DATEYIELDFROMISSUER": "Дата расчета доходности эмитентом",
+    "BONDTYPE": "Тип облигации",
+    "BONDSUBTYPE": "Подтип облигации",
     "BUYBACKPRICE": "Цена оферты",
     "BUYBACKDATE": "Дата оферты",
     "EMITENT_ID": "Код эмитента",
@@ -60,6 +89,27 @@ RUSSIAN_COLUMN_NAMES = {
     "VOLTODAY": "Объем за день",
     "VALTODAY": "Оборот за день",
 }
+
+DESCRIPTION_KEY_ALIASES = {
+    "ISIN код": "ISIN",
+    "Код ценной бумаги": "Код бумаги",
+    "Наименование ценной бумаги": "Краткое наименование",
+    "Английское наименование": "Латинское наименование",
+    "Номинальная стоимость": "Номинал",
+    "Сумма купона, в валюте номинала": "Размер купона",
+    "Периодичность выплаты купона в год": "Частота купона",
+    "Типа инструмента": "Тип инструмента",
+}
+
+
+def normalize_description_key(raw_key: str | None) -> str:
+    """Возвращает каноническое имя поля из карточки облигации."""
+    if raw_key is None:
+        return "unknown"
+    key = str(raw_key).strip()
+    if not key:
+        return "unknown"
+    return DESCRIPTION_KEY_ALIASES.get(key, key)
 
 
 def setup_environment() -> None:
@@ -447,12 +497,33 @@ def build_descriptions_wide_sheet(descriptions_df: pd.DataFrame) -> pd.DataFrame
         return pd.DataFrame(columns=["secid"])
 
     descriptions_df = descriptions_df.copy()
-    descriptions_df["key"] = descriptions_df["title"].fillna(descriptions_df["field"]).fillna("unknown")
+    descriptions_df["key"] = descriptions_df["title"].fillna(descriptions_df["field"]).map(normalize_description_key)
     descriptions_df = descriptions_df.drop_duplicates(subset=["secid", "key"], keep="last")
 
     wide = descriptions_df.pivot(index="secid", columns="key", values="value").reset_index()
     wide.columns.name = None
     return wide
+
+
+def merge_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Склеивает дубли столбцов по одинаковому названию, заполняя пропуски справа налево."""
+    merged_df = df.copy()
+    unique_order = list(dict.fromkeys(merged_df.columns))
+
+    for column in unique_order:
+        duplicated_mask = merged_df.columns == column
+        duplicated_columns = merged_df.loc[:, duplicated_mask]
+        if duplicated_columns.shape[1] <= 1:
+            continue
+
+        combined = duplicated_columns.iloc[:, 0]
+        for idx in range(1, duplicated_columns.shape[1]):
+            combined = combined.combine_first(duplicated_columns.iloc[:, idx])
+
+        merged_df = merged_df.drop(columns=column)
+        merged_df[column] = combined
+
+    return merged_df
 
 
 def build_merged_bonds_sheet(traded_bonds_df: pd.DataFrame, descriptions_wide_df: pd.DataFrame) -> pd.DataFrame:
@@ -462,32 +533,46 @@ def build_merged_bonds_sheet(traded_bonds_df: pd.DataFrame, descriptions_wide_df
 
     merged = merged.merge(descriptions_wide_df, how="left", on="secid")
 
-    duplicate_pairs = {
-        "SECID": "secid",
-        "SHORTNAME": "Краткое наименование",
-        "LATNAME": "Латинское наименование",
-        "NAME": "Полное наименование",
-        "ISIN": "ISIN",
-        "REGNUMBER": "Регистрационный номер",
-        "LISTLEVEL": "Уровень листинга",
-        "FACEUNIT": "Валюта номинала",
-        "PREVPRICE": "Цена предыдущей сделки",
-        "LOTSIZE": "Лот",
-        "FACEVALUE": "Номинал",
-        "MATDATE": "Дата погашения",
-        "COUPONFREQUENCY": "Частота купона",
-        "COUPONPERCENT": "Ставка купона, %",
-        "COUPONVALUE": "Размер купона",
-        "BUYBACKPRICE": "Цена оферты",
-        "BUYBACKDATE": "Дата оферты",
-    }
-    drop_columns = [desc_col for src_col, desc_col in duplicate_pairs.items() if src_col in merged.columns and desc_col in merged.columns]
+    suffix_x_columns = [col for col in merged.columns if col.endswith("_x")]
+    for column_x in suffix_x_columns:
+        base_name = column_x[:-2]
+        column_y = f"{base_name}_y"
+        if column_y in merged.columns:
+            merged[base_name] = merged[column_x].combine_first(merged[column_y])
+            merged = merged.drop(columns=[column_x, column_y])
+
+    duplicate_pairs = [
+        ("SECID", "secid"),
+        ("SECID", "Код ценной бумаги"),
+        ("SHORTNAME", "Краткое наименование"),
+        ("SHORTNAME", "Наименование ценной бумаги"),
+        ("LATNAME", "Латинское наименование"),
+        ("LATNAME", "Английское наименование"),
+        ("NAME", "Полное наименование"),
+        ("ISIN", "ISIN код"),
+        ("REGNUMBER", "Регистрационный номер"),
+        ("LISTLEVEL", "Уровень листинга"),
+        ("FACEUNIT", "Валюта номинала"),
+        ("PREVPRICE", "Цена предыдущей сделки"),
+        ("LOTSIZE", "Лот"),
+        ("FACEVALUE", "Номинал"),
+        ("FACEVALUE", "Номинальная стоимость"),
+        ("MATDATE", "Дата погашения"),
+        ("COUPONFREQUENCY", "Частота купона"),
+        ("COUPONFREQUENCY", "Периодичность выплаты купона в год"),
+        ("COUPONPERCENT", "Ставка купона, %"),
+        ("COUPONVALUE", "Размер купона"),
+        ("COUPONVALUE", "Сумма купона, в валюте номинала"),
+        ("BUYBACKPRICE", "Цена оферты"),
+        ("BUYBACKDATE", "Дата оферты"),
+    ]
+    drop_columns = [desc_col for src_col, desc_col in duplicate_pairs if src_col in merged.columns and desc_col in merged.columns]
     if drop_columns:
         merged = merged.drop(columns=drop_columns)
 
     renamed_columns = {col: RUSSIAN_COLUMN_NAMES[col] for col in merged.columns if col in RUSSIAN_COLUMN_NAMES}
     merged = merged.rename(columns=renamed_columns)
-    merged = merged.loc[:, ~merged.columns.duplicated()]
+    merged = merge_duplicate_columns(merged)
     return merged
 
 
