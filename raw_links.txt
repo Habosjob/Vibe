@@ -49,6 +49,7 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bond_coupons.pa
 https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bond_offers.parquet
 https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_bonds_full_export.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_emitents.parquet
+https://raw.githubusercontent.com/Habosjob/Vibe/main/output/moex_emitents_history.csv
 
 ------------------------------------------------------------
 Директория: raw/
@@ -69,6 +70,8 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/traded_bonds.json
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_archive/raw_20260221_130250.zip
 https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_archive/raw_20260221_132346.zip
+https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_archive/raw_20260221_135001.zip
+https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_archive/raw_20260221_140314.zip
 
   ----------------------------------------------------------
   Директория: cache/moex/
