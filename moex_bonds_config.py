@@ -22,11 +22,11 @@ OUTPUT_DIR = BASE_DIR / "output"
 # содержит только торгуемые облигации + читабельное описание выпусков.
 CORE_OUTPUT_FILE = OUTPUT_DIR / "moex_bonds_full_export.xlsx"
 
-# Отдельные справочники, чтобы не раздувать основной Excel.
-EMITENTS_OUTPUT_FILE = OUTPUT_DIR / "moex_emitents.xlsx"
-COUPONS_OUTPUT_FILE = OUTPUT_DIR / "moex_bond_coupons.xlsx"
-AMORTIZATIONS_OUTPUT_FILE = OUTPUT_DIR / "moex_bond_amortizations.xlsx"
-OFFERS_OUTPUT_FILE = OUTPUT_DIR / "moex_bond_offers.xlsx"
+# Отдельные справочники в формате Parquet для быстрого машинного чтения.
+EMITENTS_OUTPUT_FILE = OUTPUT_DIR / "moex_emitents.parquet"
+COUPONS_OUTPUT_FILE = OUTPUT_DIR / "moex_bond_coupons.parquet"
+AMORTIZATIONS_OUTPUT_FILE = OUTPUT_DIR / "moex_bond_amortizations.parquet"
+OFFERS_OUTPUT_FILE = OUTPUT_DIR / "moex_bond_offers.parquet"
 
 # Файл лога (перезаписывается на каждом запуске).
 LOG_FILE = LOGS_DIR / "moex_bonds_export.log"
@@ -60,6 +60,11 @@ CHECKPOINT_DESCRIPTIONS_FILE = CHECKPOINT_DIR / "descriptions.json"
 CHECKPOINT_COUPONS_FILE = CHECKPOINT_DIR / "coupons.json"
 CHECKPOINT_AMORTIZATIONS_FILE = CHECKPOINT_DIR / "amortizations.json"
 CHECKPOINT_OFFERS_FILE = CHECKPOINT_DIR / "offers.json"
+
+
+# Настройки архивации raw-данных после успешного запуска.
+RAW_ARCHIVE_DIR = BASE_DIR / "raw_archive"
+RAW_ARCHIVE_KEEP_LAST = 5
 
 # URL API MOEX ISS.
 MOEX_BASE_URL = "https://iss.moex.com/iss"

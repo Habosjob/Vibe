@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -27,6 +28,40 @@ class MoexBlocks:
     offers: list[dict[str, Any]]
 
 
+RUSSIAN_COLUMN_NAMES = {
+    "SECID": "Код бумаги",
+    "SHORTNAME": "Краткое наименование",
+    "LATNAME": "Латинское наименование",
+    "NAME": "Полное наименование",
+    "ISIN": "ISIN",
+    "REGNUMBER": "Регистрационный номер",
+    "LISTLEVEL": "Уровень листинга",
+    "FACEUNIT": "Валюта номинала",
+    "PREVPRICE": "Цена предыдущей сделки",
+    "LOTSIZE": "Лот",
+    "FACEVALUE": "Номинал",
+    "MATDATE": "Дата погашения",
+    "COUPONFREQUENCY": "Частота купона",
+    "COUPONPERCENT": "Ставка купона, %",
+    "COUPONVALUE": "Размер купона",
+    "BUYBACKPRICE": "Цена оферты",
+    "BUYBACKDATE": "Дата оферты",
+    "EMITENT_ID": "Код эмитента",
+    "EMITENT_TITLE": "Эмитент",
+    "EMITENT_INN": "ИНН эмитента",
+    "EMITENT_OKPO": "ОКПО эмитента",
+    "TYPE": "Тип инструмента",
+    "GROUP": "Группа инструментов",
+    "PRIMARY_BOARDID": "Основной режим торгов",
+    "MARKETPRICE_BOARDID": "Режим цены рынка",
+    "STATUS": "Статус",
+    "IS_TRADED": "Торгуется",
+    "NUMTRADES": "Количество сделок",
+    "VOLTODAY": "Объем за день",
+    "VALTODAY": "Оборот за день",
+}
+
+
 def setup_environment() -> None:
     """Готовит папки проекта и очищает временные данные перед запуском."""
     cfg.LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -34,6 +69,7 @@ def setup_environment() -> None:
     cfg.CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cfg.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.RAW_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
     if cfg.LOG_FILE.exists():
         cfg.LOG_FILE.unlink()
@@ -305,6 +341,7 @@ def collect_extended_data(secids: list[str]) -> MoexBlocks:
         len(grouped),
     )
 
+    failed_secids: set[str] = set()
     for chunk_index, secid_chunk in enumerate(grouped, start=1):
         print(f"Обрабатываю чанк {chunk_index}/{len(grouped)} ({len(secid_chunk)} облигаций)...")
         with ThreadPoolExecutor(max_workers=cfg.MAX_WORKERS) as executor:
@@ -319,6 +356,7 @@ def collect_extended_data(secids: list[str]) -> MoexBlocks:
                     blocks.offers.extend(item.offers)
                     completed_secids.add(secid)
                 except Exception as exc:  # noqa: BLE001
+                    failed_secids.add(secid)
                     logging.error("Ошибка при загрузке %s: %s", secid, exc)
 
                 if index % 50 == 0 or index == len(secid_chunk):
@@ -333,11 +371,35 @@ def collect_extended_data(secids: list[str]) -> MoexBlocks:
         save_checkpoint(blocks, sorted(completed_secids))
         logging.info("Checkpoint сохранен после чанка %s/%s", chunk_index, len(grouped))
 
+    if failed_secids:
+        print(f"Дополнительная попытка для проблемных бумаг: {len(failed_secids)} шт.")
+        logging.warning("Запускаю повторную загрузку проблемных SECID: %s шт.", len(failed_secids))
+        with ThreadPoolExecutor(max_workers=cfg.MAX_WORKERS) as executor:
+            future_map = {executor.submit(fetch_security_details, secid): secid for secid in sorted(failed_secids)}
+            for future in as_completed(future_map):
+                secid = future_map[future]
+                try:
+                    item = future.result()
+                    blocks.descriptions.extend(item.descriptions)
+                    blocks.coupons.extend(item.coupons)
+                    blocks.amortizations.extend(item.amortizations)
+                    blocks.offers.extend(item.offers)
+                    completed_secids.add(secid)
+                except Exception as exc:  # noqa: BLE001
+                    logging.error("Повторная попытка также завершилась ошибкой для %s: %s", secid, exc)
+
+        save_checkpoint(blocks, sorted(completed_secids))
+
     return blocks
 
 
 def save_raw(df: pd.DataFrame, file_name: str) -> None:
     (cfg.RAW_DIR / file_name).write_text(df.to_json(orient="records", force_ascii=False, indent=2), encoding="utf-8")
+
+
+def save_parquet(df: pd.DataFrame, file_path: Path) -> None:
+    """Сохраняет таблицу в Parquet для быстрого машинного чтения."""
+    df.to_parquet(file_path, index=False)
 
 
 def build_emitents_sheet(traded_bonds: pd.DataFrame) -> pd.DataFrame:
@@ -355,6 +417,30 @@ def build_emitents_sheet(traded_bonds: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def merge_emitents_incremental(new_emitents: pd.DataFrame) -> pd.DataFrame:
+    """Добавляет только новых эмитентов к существующему справочнику."""
+    if "EMITENT_ID" not in new_emitents.columns:
+        return new_emitents
+
+    if not cfg.EMITENTS_OUTPUT_FILE.exists():
+        return new_emitents.sort_values("EMITENT_TITLE", na_position="last").reset_index(drop=True)
+
+    existing_emitents = pd.read_parquet(cfg.EMITENTS_OUTPUT_FILE)
+    if "EMITENT_ID" not in existing_emitents.columns:
+        return new_emitents.sort_values("EMITENT_TITLE", na_position="last").reset_index(drop=True)
+
+    existing_ids = set(existing_emitents["EMITENT_ID"].dropna().astype(str))
+    candidates = new_emitents.copy()
+    candidates["EMITENT_ID"] = candidates["EMITENT_ID"].astype(str)
+    new_only = candidates[~candidates["EMITENT_ID"].isin(existing_ids)]
+
+    if new_only.empty:
+        return existing_emitents.sort_values("EMITENT_TITLE", na_position="last").reset_index(drop=True)
+
+    merged_emitents = pd.concat([existing_emitents, new_only], ignore_index=True)
+    return merged_emitents.sort_values("EMITENT_TITLE", na_position="last").reset_index(drop=True)
+
+
 def build_descriptions_wide_sheet(descriptions_df: pd.DataFrame) -> pd.DataFrame:
     """Превращает длинный формат описаний в широкий (1 строка = 1 облигация)."""
     if descriptions_df.empty:
@@ -367,6 +453,90 @@ def build_descriptions_wide_sheet(descriptions_df: pd.DataFrame) -> pd.DataFrame
     wide = descriptions_df.pivot(index="secid", columns="key", values="value").reset_index()
     wide.columns.name = None
     return wide
+
+
+def build_merged_bonds_sheet(traded_bonds_df: pd.DataFrame, descriptions_wide_df: pd.DataFrame) -> pd.DataFrame:
+    """Объединяет торговые данные и описание облигаций в один лист без дублей."""
+    merged = traded_bonds_df.copy()
+    merged["secid"] = merged["SECID"]
+
+    merged = merged.merge(descriptions_wide_df, how="left", on="secid")
+
+    duplicate_pairs = {
+        "SECID": "secid",
+        "SHORTNAME": "Краткое наименование",
+        "LATNAME": "Латинское наименование",
+        "NAME": "Полное наименование",
+        "ISIN": "ISIN",
+        "REGNUMBER": "Регистрационный номер",
+        "LISTLEVEL": "Уровень листинга",
+        "FACEUNIT": "Валюта номинала",
+        "PREVPRICE": "Цена предыдущей сделки",
+        "LOTSIZE": "Лот",
+        "FACEVALUE": "Номинал",
+        "MATDATE": "Дата погашения",
+        "COUPONFREQUENCY": "Частота купона",
+        "COUPONPERCENT": "Ставка купона, %",
+        "COUPONVALUE": "Размер купона",
+        "BUYBACKPRICE": "Цена оферты",
+        "BUYBACKDATE": "Дата оферты",
+    }
+    drop_columns = [desc_col for src_col, desc_col in duplicate_pairs.items() if src_col in merged.columns and desc_col in merged.columns]
+    if drop_columns:
+        merged = merged.drop(columns=drop_columns)
+
+    renamed_columns = {col: RUSSIAN_COLUMN_NAMES[col] for col in merged.columns if col in RUSSIAN_COLUMN_NAMES}
+    merged = merged.rename(columns=renamed_columns)
+    merged = merged.loc[:, ~merged.columns.duplicated()]
+    return merged
+
+
+def build_data_quality_sheet(merged_bonds_df: pd.DataFrame) -> pd.DataFrame:
+    """Формирует простой отчет по заполненности ключевых полей."""
+    important_columns = [
+        "Код бумаги",
+        "ISIN",
+        "Код эмитента",
+        "Эмитент",
+        "Торгуется",
+        "Статус",
+    ]
+    rows: list[dict[str, Any]] = []
+    total = len(merged_bonds_df)
+    for column in important_columns:
+        if column in merged_bonds_df.columns:
+            column_data = merged_bonds_df[column]
+            if isinstance(column_data, pd.DataFrame):
+                empty_count = int(column_data.isna().all(axis=1).sum())
+            else:
+                empty_count = int(column_data.isna().sum())
+        else:
+            empty_count = total
+        fill_rate = 0.0 if total == 0 else round((1 - empty_count / total) * 100, 2)
+        rows.append({
+            "Поле": column,
+            "Всего строк": total,
+            "Пустых значений": empty_count,
+            "Заполнено, %": fill_rate,
+        })
+    return pd.DataFrame(rows)
+
+
+def archive_raw_data() -> None:
+    """Архивирует raw JSON после успешного запуска и удаляет старые архивы."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_file = cfg.RAW_ARCHIVE_DIR / f"raw_{timestamp}.zip"
+    raw_files = sorted(cfg.RAW_DIR.glob("*.json"))
+    if not raw_files:
+        return
+
+    with zipfile.ZipFile(archive_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for file_path in raw_files:
+            zf.write(file_path, arcname=file_path.name)
+
+    old_archives = sorted(cfg.RAW_ARCHIVE_DIR.glob("raw_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for stale_archive in old_archives[cfg.RAW_ARCHIVE_KEEP_LAST :]:
+        stale_archive.unlink(missing_ok=True)
 
 
 def beautify_sheet(worksheet: Any) -> None:
@@ -396,13 +566,12 @@ def write_excel(file_path: Path, sheet_name: str, df: pd.DataFrame) -> None:
         beautify_sheet(writer.book[sheet_name])
 
 
-def write_core_excel(traded_bonds_df: pd.DataFrame, descriptions_wide_df: pd.DataFrame) -> None:
+def write_core_excel(merged_bonds_df: pd.DataFrame, quality_df: pd.DataFrame) -> None:
     with pd.ExcelWriter(cfg.CORE_OUTPUT_FILE, engine="openpyxl") as writer:
-        traded_bonds_df.to_excel(writer, sheet_name="bonds_traded", index=False)
-        descriptions_wide_df.to_excel(writer, sheet_name="bond_descriptions", index=False)
-
+        merged_bonds_df.to_excel(writer, sheet_name="bonds_traded", index=False)
+        quality_df.to_excel(writer, sheet_name="data_quality", index=False)
         beautify_sheet(writer.book["bonds_traded"])
-        beautify_sheet(writer.book["bond_descriptions"])
+        beautify_sheet(writer.book["data_quality"])
 
 
 def main() -> None:
@@ -463,6 +632,9 @@ def main() -> None:
     amortizations_df = pd.DataFrame(blocks.amortizations)
     offers_df = pd.DataFrame(blocks.offers)
     emitents_df = build_emitents_sheet(traded_bonds_df)
+    emitents_df = merge_emitents_incremental(emitents_df)
+    merged_bonds_df = build_merged_bonds_sheet(traded_bonds_df, descriptions_wide_df)
+    quality_df = build_data_quality_sheet(merged_bonds_df)
 
     print("[4/7] Сохраняю сырые данные в raw/...")
     save_raw(traded_bonds_df, "traded_bonds.json")
@@ -472,16 +644,18 @@ def main() -> None:
     save_raw(amortizations_df, "bond_amortizations.json")
     save_raw(offers_df, "bond_offers.json")
     save_raw(emitents_df, "emitents.json")
+    save_raw(merged_bonds_df, "bonds_traded_merged.json")
 
     print("[5/7] Формирую основной Excel (облегченный)...")
-    write_core_excel(traded_bonds_df, descriptions_wide_df)
+    write_core_excel(merged_bonds_df, quality_df)
 
-    print("[6/7] Формирую отдельные справочники...")
-    write_excel(cfg.EMITENTS_OUTPUT_FILE, "emitents", emitents_df)
-    write_excel(cfg.COUPONS_OUTPUT_FILE, "bond_coupons", coupons_df)
-    write_excel(cfg.AMORTIZATIONS_OUTPUT_FILE, "bond_amortizations", amortizations_df)
-    write_excel(cfg.OFFERS_OUTPUT_FILE, "bond_offers", offers_df)
+    print("[6/7] Сохраняю справочники в быстрый формат Parquet...")
+    save_parquet(emitents_df, cfg.EMITENTS_OUTPUT_FILE)
+    save_parquet(coupons_df, cfg.COUPONS_OUTPUT_FILE)
+    save_parquet(amortizations_df, cfg.AMORTIZATIONS_OUTPUT_FILE)
+    save_parquet(offers_df, cfg.OFFERS_OUTPUT_FILE)
 
+    archive_raw_data()
     clear_checkpoint()
     elapsed = time.perf_counter() - start_time
 
@@ -490,7 +664,13 @@ def main() -> None:
     print(f"Время выполнения: {elapsed:.2f} сек.")
 
     logging.info("Основной Excel сохранен: %s", cfg.CORE_OUTPUT_FILE)
-    logging.info("Доп. файлы: %s, %s, %s, %s", cfg.EMITENTS_OUTPUT_FILE, cfg.COUPONS_OUTPUT_FILE, cfg.AMORTIZATIONS_OUTPUT_FILE, cfg.OFFERS_OUTPUT_FILE)
+    logging.info(
+        "Доп. файлы (Parquet): %s, %s, %s, %s",
+        cfg.EMITENTS_OUTPUT_FILE,
+        cfg.COUPONS_OUTPUT_FILE,
+        cfg.AMORTIZATIONS_OUTPUT_FILE,
+        cfg.OFFERS_OUTPUT_FILE,
+    )
     logging.info("Время выполнения: %.2f сек.", elapsed)
 
 
