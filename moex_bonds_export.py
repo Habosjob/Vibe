@@ -143,7 +143,37 @@ OUTPUT_COLUMNS_TO_DROP = {
     "Эмитент не соответствует требованию на текущий Список",
     "Код эмитента",
     "Тип инструмента",
+    "Подтип облигации",
+    "Объем размещения",
+    "Частота купона",
+    "Цена оферты",
+    "Дата предыдущих торгов",
+    "Дата оферты",
+    "Стоимость лота",
+    "Номинал на дату расчетов",
+    "Дата call-оферты",
+    "Дата put-оферты",
+    "Вид облигации",
+    "Вид/категория ценной бумаги",
+    "Возможен досрочный выкуп",
+    "Дата выплаты купона",
+    "Дата к которой рассчитывается доходность",
+    "Подвид облигации",
 }
+
+FORCED_COLUMN_WIDTHS = {
+    "ИНН эмитента": 21.5,  # ≈150px в Excel.
+}
+
+NUMBER_FORMAT_COLUMNS = {
+    "Номинал": "# ##0.########",
+    "Объем выпуска": "# ##0.########",
+    "Размер купона": "# ##0.########",
+    "НКД": "# ##0.########",
+}
+
+EXCEL_DATE_FORMAT = "DD.MM.YYYY"
+DATE_PLACEHOLDER_VALUES = {"0000-00-00", "0000-00-00 00:00:00", "0000-00-00T00:00:00"}
 
 COLUMN_DICTIONARY_DESCRIPTIONS = {
     "Код бумаги": "Уникальный код облигации на бирже.",
@@ -231,6 +261,8 @@ COLUMN_GROUP_DEFINITIONS: list[tuple[str, list[str]]] = [
         "Погашение и оферты",
         [
             "Дата погашения",
+            "Дата оферты (описание)",
+            "Дней до погашения",
             "Дата оферты",
             "Цена оферты",
         ],
@@ -1038,12 +1070,54 @@ def beautify_sheet(worksheet: Any) -> None:
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = worksheet.dimensions
 
+    for col_idx in range(1, worksheet.max_column + 1):
+        header = worksheet.cell(row=1, column=col_idx).value
+        header_text = str(header).strip() if header is not None else ""
+        is_date_column = "Дата" in header_text
+        numeric_pattern = NUMBER_FORMAT_COLUMNS.get(header_text)
+
+        for row_idx in range(2, worksheet.max_row + 1):
+            cell = worksheet.cell(row=row_idx, column=col_idx)
+            value = cell.value
+
+            if isinstance(value, str):
+                raw_value = value.strip()
+                if raw_value in DATE_PLACEHOLDER_VALUES:
+                    cell.value = None
+                    continue
+
+                if is_date_column:
+                    parsed_date: datetime | None = None
+                    for pattern in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                        try:
+                            parsed_date = datetime.strptime(raw_value, pattern)
+                            break
+                        except ValueError:
+                            continue
+                    if parsed_date is not None:
+                        cell.value = parsed_date
+                        cell.number_format = EXCEL_DATE_FORMAT
+
+            if is_date_column and isinstance(cell.value, datetime):
+                cell.number_format = EXCEL_DATE_FORMAT
+
+            if numeric_pattern and isinstance(cell.value, (int, float)):
+                cell.number_format = numeric_pattern
+
     for column_cells in worksheet.columns:
         first_cell = column_cells[0]
         col_letter = first_cell.column_letter
         values = [str(c.value) if c.value is not None else "" for c in column_cells[:200]]
         max_len = max((len(v) for v in values), default=10)
-        worksheet.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 50)
+        worksheet.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 35)
+
+    for col_idx in range(1, worksheet.max_column + 1):
+        header = worksheet.cell(row=1, column=col_idx).value
+        header_text = str(header).strip() if header is not None else ""
+        forced_width = FORCED_COLUMN_WIDTHS.get(header_text)
+        if forced_width is not None:
+            col_letter = get_column_letter(col_idx)
+            worksheet.column_dimensions[col_letter].width = forced_width
 
 
 def build_grouped_bonds_sheet(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
@@ -1126,6 +1200,14 @@ def apply_column_groups_to_sheet(worksheet: Any, group_metadata: list[dict[str, 
         start_letter = get_column_letter(meta["start"])
         end_letter = get_column_letter(meta["end"])
         worksheet.column_dimensions.group(start_letter, end_letter, outline_level=1, hidden=False)
+
+    for col_idx in range(1, worksheet.max_column + 1):
+        header = worksheet.cell(row=1, column=col_idx).value
+        header_text = str(header).strip() if header is not None else ""
+        forced_width = FORCED_COLUMN_WIDTHS.get(header_text)
+        if forced_width is not None:
+            col_letter = get_column_letter(col_idx)
+            worksheet.column_dimensions[col_letter].width = forced_width
 
 
 def write_excel(file_path: Path, sheet_name: str, df: pd.DataFrame) -> None:
