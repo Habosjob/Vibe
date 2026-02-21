@@ -479,9 +479,41 @@ def parse_structural_bond_flag(description_rows: list[dict[str, Any]]) -> bool:
         field_name = str(row.get("name") or "").strip().lower()
         title_name = str(row.get("title") or "").strip().lower()
         if field_name == "bondtype" or title_name == "тип облигации":
-            value = str(row.get("value") or "").strip().lower()
-            return value == "структурная облигация"
+            value = str(row.get("value") or "").strip().lower().replace("ё", "е")
+            # Значение с MOEX может приходить как полное, так и сокращенное (например, "Структурная об...").
+            return "структур" in value
     return False
+
+
+def filter_dataframe_by_filter_state(df: pd.DataFrame, filter_state: dict[str, dict[str, Any]]) -> tuple[pd.DataFrame, int]:
+    """Удаляет из DataFrame бумаги, которые в текущем состоянии фильтра исключены из опроса."""
+    if df.empty or "SECID" not in df.columns:
+        return df, 0
+
+    now = datetime.now()
+    excluded_secids: set[str] = set()
+    for secid, rule in filter_state.items():
+        mode = rule.get("mode")
+        if mode == "permanent":
+            excluded_secids.add(str(secid))
+            continue
+
+        if mode == "temporary":
+            until_raw = rule.get("exclude_until")
+            if isinstance(until_raw, str):
+                try:
+                    if now < datetime.fromisoformat(until_raw):
+                        excluded_secids.add(str(secid))
+                except ValueError:
+                    continue
+
+    if not excluded_secids:
+        return df, 0
+
+    before = len(df)
+    filtered = df[~df["SECID"].astype(str).isin(excluded_secids)].copy()
+    removed = before - len(filtered)
+    return filtered, removed
 
 
 def fetch_security_details(secid: str) -> FetchResult:
@@ -1204,6 +1236,13 @@ def main() -> None:
 
     print("[4/8] Загружаю расширенные данные (10 чанков + checkpoint)...")
     blocks, filter_state = collect_extended_data(secids, filter_state)
+
+    # Важно: структурные облигации могут определиться только после чтения карточки выпуска.
+    # Поэтому повторно отфильтровываем торговую таблицу уже по обновленному состоянию фильтра.
+    traded_bonds_df, removed_after_extended = filter_dataframe_by_filter_state(traded_bonds_df, filter_state)
+    if removed_after_extended:
+        print(f"Доп. фильтрация после расширенных данных: исключено бумаг={removed_after_extended}")
+        logging.info("Доп. фильтрация после расширенных данных: исключено бумаг=%s", removed_after_extended)
 
     descriptions_df = pd.DataFrame(blocks.descriptions)
     descriptions_wide_df = build_descriptions_wide_sheet(descriptions_df)
