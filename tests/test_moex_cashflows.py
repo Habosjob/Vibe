@@ -5,13 +5,17 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from bond_screener.db import Cashflow, InstrumentField, init_db, make_session_factory
+from bond_screener.db import Cashflow, InstrumentField, Offer, init_db, make_session_factory
 from bond_screener.providers.moex_cashflows import (
+    apply_offer_fields,
     CashflowRecord,
+    OfferRecord,
     derive_fields,
     parse_cashflows_payload,
+    parse_offers_payload,
     save_cashflows_to_db,
     save_derived_fields_to_db,
+    save_offers_to_db,
 )
 
 
@@ -31,17 +35,33 @@ def test_parse_cashflows_payload_and_derive_fields() -> None:
                 ["2028-01-01", 100.0, 1000.0],
             ],
         },
+        "offers": {
+            "columns": ["offerdate", "offertype", "price"],
+            "data": [["2026-04-10", "put", 100.0]],
+        },
     }
 
     rows = parse_cashflows_payload(payload, isin="RU000A000001")
+    offers = parse_offers_payload(payload, isin="RU000A000001")
 
     assert [row.kind for row in rows] == ["coupon", "coupon", "amort", "redemption"]
+    assert offers[0].offer_date == date(2026, 4, 10)
 
-    derived = derive_fields(rows, today=date(2026, 1, 1))
+    derived = apply_offer_fields(derive_fields(rows, today=date(2026, 1, 1)), offers, today=date(2026, 1, 1))
     assert derived.maturity_date == date(2028, 1, 1)
     assert derived.next_coupon_date == date(2026, 5, 15)
+    assert derived.next_offer_date == date(2026, 4, 10)
     assert derived.amort_start_date == date(2027, 1, 1)
     assert derived.has_amortization is True
+
+
+def test_derive_fields_uses_amortization_for_maturity() -> None:
+    rows = [
+        CashflowRecord(isin="RU000A000001", date=date(2025, 8, 28), kind="amort", amount=50.0, rate=5.0),
+        CashflowRecord(isin="RU000A000001", date=date(2033, 11, 1), kind="coupon", amount=20.0, rate=8.0),
+    ]
+    derived = derive_fields(rows, today=date(2025, 1, 1))
+    assert derived.maturity_date == date(2025, 8, 28)
 
 
 def test_save_cashflows_and_derived_fields(tmp_path: Path) -> None:
@@ -53,26 +73,37 @@ def test_save_cashflows_and_derived_fields(tmp_path: Path) -> None:
         CashflowRecord(isin="RU000A000001", date=date(2026, 5, 1), kind="coupon", amount=20.0, rate=8.0),
         CashflowRecord(isin="RU000A000001", date=date(2027, 5, 1), kind="redemption", amount=1000.0, rate=100.0),
     ]
+    offers = [OfferRecord(isin="RU000A000001", offer_date=date(2026, 4, 15), offer_type="put", offer_price=100.0)]
 
     saved = save_cashflows_to_db(session_factory, isin="RU000A000001", cashflows=cashflows, source="moex")
     assert saved == 2
+    offers_saved = save_offers_to_db(
+        session_factory,
+        isin="RU000A000001",
+        offers=offers,
+        source="moex",
+    )
+    assert offers_saved == 1
 
-    derived = derive_fields(cashflows, today=date(2026, 1, 1))
+    derived = apply_offer_fields(derive_fields(cashflows, today=date(2026, 1, 1)), offers, today=date(2026, 1, 1))
     fields_saved = save_derived_fields_to_db(
         session_factory,
         isin="RU000A000001",
         derived=derived,
         source="derived",
     )
-    assert fields_saved == 4
+    assert fields_saved == 5
 
     with session_factory() as session:
         db_cashflows = session.execute(select(Cashflow).where(Cashflow.isin == "RU000A000001")).scalars().all()
         db_fields = session.execute(select(InstrumentField).where(InstrumentField.isin == "RU000A000001")).scalars().all()
+        db_offers = session.execute(select(Offer).where(Offer.isin == "RU000A000001")).scalars().all()
 
     assert len(db_cashflows) == 2
+    assert len(db_offers) == 1
     by_field = {item.field: item.value for item in db_fields}
     assert by_field["maturity_date"] == "2027-05-01"
     assert by_field["next_coupon_date"] == "2026-05-01"
+    assert by_field["next_offer_date"] == "2026-04-15"
     assert by_field["amort_start_date"] is None
     assert by_field["has_amortization"] == "0"
