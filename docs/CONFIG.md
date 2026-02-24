@@ -14,7 +14,8 @@
 - `logging.file` — путь к логу (`logs/latest.log`).
 - `raw.enabled` — включение raw-дампов (безопасный дефолт: `true`).
 - `raw.ttl_days` — TTL очистки папки `raw/` в днях (по умолчанию `7`).
-- `output.excel_file` — путь к Excel-результату (пока заглушка: `out/bond_screener.xlsx`).
+- `output.excel_file` — путь к Excel-результату общего запуска (`out/bond_screener.xlsx`).
+- `output.screen_basic_excel` — путь к Excel-результату базового скрининга (`out/screen_basic.xlsx`).
 - `database.path` — путь к SQLite базе (по умолчанию `data/bond_screener.sqlite`).
 - `providers.moex_iss.limit` — размер страницы ISS (по умолчанию `100`).
 - `providers.moex_iss.q` — поисковая строка ISS (`null` = без фильтра).
