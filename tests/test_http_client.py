@@ -1,4 +1,5 @@
 import asyncio
+import gzip
 from pathlib import Path
 
 import httpx
@@ -60,3 +61,32 @@ async def test_per_domain_max_concurrency_limit(tmp_path: Path) -> None:
         )
 
     assert peak <= 2
+
+
+@pytest.mark.asyncio
+async def test_cache_ignores_content_encoding_for_decoded_body(tmp_path: Path) -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        compressed = gzip.compress(b'{"ok": true}')
+        return httpx.Response(
+            200,
+            headers={"content-encoding": "gzip", "content-length": str(len(compressed))},
+            content=compressed,
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async with AsyncHttpClient(
+        cache_db_path=tmp_path / "cache.sqlite",
+        cache_ttl_seconds=60,
+        transport=transport,
+    ) as client:
+        first = await client.request("GET", "https://example.com/compressed")
+        second = await client.request("GET", "https://example.com/compressed")
+
+    assert first.json()["ok"] is True
+    assert second.json()["ok"] is True
+    assert calls == 1

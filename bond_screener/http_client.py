@@ -173,7 +173,12 @@ class AsyncHttpClient:
         cached = self.cache.get(cache_key)
         if cached:
             status_code, cached_headers, cached_body = cached
-            return httpx.Response(status_code=status_code, headers=cached_headers, content=cached_body, request=httpx.Request(method, url))
+            return httpx.Response(
+                status_code=status_code,
+                headers=self._headers_for_cached_response(cached_headers),
+                content=cached_body,
+                request=httpx.Request(method, url),
+            )
 
         domain = urlparse(url).netloc
         guard = self._guards.setdefault(domain, _DomainGuard(self.domain_policies.get(domain, self.default_policy)))
@@ -192,7 +197,13 @@ class AsyncHttpClient:
 
         ttl = self.cache_ttl_seconds if cache_ttl_seconds is None else cache_ttl_seconds
         if ttl > 0 and response.status_code < 500:
-            self.cache.set(cache_key, response.status_code, dict(response.headers), response.content, ttl)
+            self.cache.set(
+                cache_key,
+                response.status_code,
+                self._headers_for_cached_response(dict(response.headers)),
+                response.content,
+                ttl,
+            )
 
         if self.debug_raw_enabled:
             self._dump_raw(provider=provider, url=url, body=response.content)
@@ -259,3 +270,12 @@ class AsyncHttpClient:
         body_hash = hashlib.sha256(payload).hexdigest()
         normalized = f"{method.upper()}::{url}::{serialized_params}::{body_hash}"
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _headers_for_cached_response(headers: dict[str, str]) -> dict[str, str]:
+        sanitized = {k: v for k, v in headers.items()}
+        # Мы кэшируем уже декодированное тело response.content.
+        # Поэтому удаляем заголовки, которые описывают исходное wire-представление.
+        for key in ["content-encoding", "content-length", "transfer-encoding"]:
+            sanitized.pop(key, None)
+        return sanitized
