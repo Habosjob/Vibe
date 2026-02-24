@@ -16,7 +16,10 @@ class Instrument(Base):
 
     isin: Mapped[str] = mapped_column(String(12), primary_key=True)
     secid: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    shortname: Mapped[str | None] = mapped_column(String(512), nullable=True)
     name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    primary_boardid: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    board: Mapped[str | None] = mapped_column(String(64), nullable=True)
     currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
     issuer_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
