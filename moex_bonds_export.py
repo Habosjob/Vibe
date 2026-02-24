@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -482,14 +483,83 @@ def fetch_reference_row(secid: str) -> dict[str, Any] | None:
     return target_row
 
 
+def build_reference_checkpoint_signature(secids: list[str]) -> str:
+    """Возвращает подпись набора SECID для безопасного восстановления чекпоинта этапа 2."""
+    payload = "\n".join(sorted(secids)).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def load_reference_checkpoint(secids: list[str]) -> tuple[list[dict[str, Any]], set[str]]:
+    """Загружает чекпоинт справочника только если он относится к текущему набору бумаг."""
+    expected_signature = build_reference_checkpoint_signature(secids)
+    if not is_cache_valid(cfg.REFERENCE_CHECKPOINT_STATE_FILE, cfg.CACHE_TTL_HOURS["checkpoint"]):
+        return [], set()
+    if not cfg.REFERENCE_CHECKPOINT_ROWS_FILE.exists():
+        return [], set()
+
+    state = json.loads(cfg.REFERENCE_CHECKPOINT_STATE_FILE.read_text(encoding="utf-8"))
+    rows = json.loads(cfg.REFERENCE_CHECKPOINT_ROWS_FILE.read_text(encoding="utf-8"))
+
+    if not state:
+        return [], set()
+
+    if state.get("signature") != expected_signature:
+        logging.info("Чекпоинт этапа 2 найден, но набор SECID изменился — начинаю заново")
+        return [], set()
+
+    completed = set(state.get("completed_secids", []))
+    if not completed:
+        return [], set()
+
+    logging.info(
+        "Найден checkpoint этапа 2: восстановлено %s SECID и %s строк справочника",
+        len(completed),
+        len(rows),
+    )
+    return rows, completed
+
+
+def save_reference_checkpoint(secids: list[str], records: list[dict[str, Any]], completed_secids: set[str]) -> None:
+    """Сохраняет промежуточный прогресс этапа 2, чтобы можно было продолжить после сбоя."""
+    cfg.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    state = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "signature": build_reference_checkpoint_signature(secids),
+        "completed_secids": sorted(completed_secids),
+    }
+    cfg.REFERENCE_CHECKPOINT_STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg.REFERENCE_CHECKPOINT_ROWS_FILE.write_text(
+        json.dumps(records, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def clear_reference_checkpoint() -> None:
+    """Удаляет служебные файлы checkpoint этапа 2 после успешного завершения."""
+    for path in (cfg.REFERENCE_CHECKPOINT_STATE_FILE, cfg.REFERENCE_CHECKPOINT_ROWS_FILE):
+        if path.exists():
+            path.unlink()
+
+
 def collect_reference_data_for_secids(secids: list[str]) -> pd.DataFrame:
-    records: list[dict[str, Any]] = []
+    records, completed_secids = load_reference_checkpoint(secids)
     total = len(secids)
-    logging.info("Загружаю справочные данные по %s облигациям через точечные запросы", total)
+    remaining_secids = [secid for secid in secids if secid not in completed_secids]
+
+    logging.info(
+        "Загружаю справочные данные по %s облигациям через точечные запросы (осталось=%s)",
+        total,
+        len(remaining_secids),
+    )
+
+    processed_total = len(completed_secids)
 
     with ThreadPoolExecutor(max_workers=cfg.MAX_WORKERS) as executor:
-        future_map = {executor.submit(fetch_reference_row, secid): secid for secid in secids}
-        for index, future in enumerate(as_completed(future_map), start=1):
+        future_map = {executor.submit(fetch_reference_row, secid): secid for secid in remaining_secids}
+        for future in as_completed(future_map):
             secid = future_map[future]
             try:
                 row = future.result()
@@ -497,10 +567,15 @@ def collect_reference_data_for_secids(secids: list[str]) -> pd.DataFrame:
                     records.append(row)
             except Exception as exc:  # noqa: BLE001
                 logging.error("Ошибка загрузки справочника для %s: %s", secid, exc)
+            finally:
+                completed_secids.add(secid)
+                processed_total += 1
 
-            if index % 200 == 0 or index == total:
-                logging.info("Справочник: обработано %s/%s", index, total)
+            if processed_total % 200 == 0 or processed_total == total:
+                logging.info("Справочник: обработано %s/%s", processed_total, total)
+                save_reference_checkpoint(secids, records, completed_secids)
 
+    clear_reference_checkpoint()
     return pd.DataFrame(records)
 
 

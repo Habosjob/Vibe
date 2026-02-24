@@ -64,6 +64,8 @@ CHECKPOINT_DESCRIPTIONS_FILE = CHECKPOINT_DIR / "descriptions.json"
 CHECKPOINT_COUPONS_FILE = CHECKPOINT_DIR / "coupons.json"
 CHECKPOINT_AMORTIZATIONS_FILE = CHECKPOINT_DIR / "amortizations.json"
 CHECKPOINT_OFFERS_FILE = CHECKPOINT_DIR / "offers.json"
+REFERENCE_CHECKPOINT_STATE_FILE = CHECKPOINT_DIR / "reference_checkpoint.json"
+REFERENCE_CHECKPOINT_ROWS_FILE = CHECKPOINT_DIR / "reference_rows.json"
 
 # Файл состояния этапа фильтрации бумаг (кого и до какого срока исключать из опроса).
 FILTER_STATE_FILE = CACHE_DIR / "filter_state.json"
