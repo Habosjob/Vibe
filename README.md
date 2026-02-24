@@ -42,3 +42,14 @@
 ```bash
 pytest
 ```
+
+
+## SQLite БД
+
+- Схема БД описана в `bond_screener/db.py` (SQLAlchemy, SQLite).
+- Инициализация таблиц: используйте `init_db(...)` или `make_session_factory(...)`.
+- Быстрая проверка наполнения таблиц:
+  ```bash
+  python scripts/db_inspect.py
+  ```
+- Подробности в `docs/DB.md`.
