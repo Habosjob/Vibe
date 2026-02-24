@@ -20,9 +20,9 @@ from bond_screener.providers.moex_cashflows import (
     MoexCashflowProvider,
     apply_offer_fields,
     derive_fields,
-    save_cashflows_to_db,
-    save_derived_fields_to_db,
-    save_offers_to_db,
+    save_cashflows_batch_to_db,
+    save_derived_fields_batch_to_db,
+    save_offers_batch_to_db,
 )
 from bond_screener.runtime import ensure_default_configs, ensure_runtime_dirs, load_config, setup_logging
 
@@ -63,8 +63,7 @@ async def _run_sync(base_dir: Path, logger: logging.Logger) -> tuple[int, int, i
             security_id = (secid or isin).strip()
             try:
                 async with semaphore:
-                    rows = await provider.fetch_cashflows(secid=security_id, isin=isin)
-                    offer_rows = await provider.fetch_offers(secid=security_id, isin=isin)
+                    rows, offer_rows = await provider.fetch_cashflows_and_offers(secid=security_id, isin=isin)
                 collected[isin] = rows
                 collected_offers[isin] = offer_rows
             except Exception:
@@ -78,19 +77,17 @@ async def _run_sync(base_dir: Path, logger: logging.Logger) -> tuple[int, int, i
         await asyncio.gather(*(worker(isin, secid) for isin, secid in instruments))
 
     logger.info("Этап 3/4: сохранение cashflows и derived полей в SQLite")
-    saved_cashflows = 0
-    saved_derived = 0
-    saved_offers = 0
-    for isin, rows in collected.items():
-        offers = collected_offers.get(isin, [])
-        saved_cashflows += save_cashflows_to_db(session_factory, isin=isin, cashflows=rows, source="moex_iss")
-        saved_offers += save_offers_to_db(session_factory, isin=isin, offers=offers, source="moex_iss")
-        saved_derived += save_derived_fields_to_db(
-            session_factory,
-            isin=isin,
-            derived=apply_offer_fields(derive_fields(rows), offers),
-            source="derived_from_moex_cashflows",
-        )
+    saved_cashflows = save_cashflows_batch_to_db(session_factory, cashflows_by_isin=collected, source="moex_iss")
+    saved_offers = save_offers_batch_to_db(session_factory, offers_by_isin=collected_offers, source="moex_iss")
+    derived_by_isin = {
+        isin: apply_offer_fields(derive_fields(rows), collected_offers.get(isin, [])) for isin, rows in collected.items()
+    }
+    saved_derived = save_derived_fields_batch_to_db(
+        session_factory,
+        derived_by_isin=derived_by_isin,
+        source="derived_from_moex_cashflows",
+    )
+    logger.info("Сохранено: cashflows=%s offers=%s derived=%s", saved_cashflows, saved_offers, saved_derived)
 
     logger.info("Этап 4/4: формирование sample Excel-файлов")
     sample_isins = sorted(collected.keys())
