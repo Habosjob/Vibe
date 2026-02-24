@@ -15,6 +15,10 @@
 - `raw.enabled` — включение raw-дампов (безопасный дефолт: `true`).
 - `raw.ttl_days` — TTL очистки папки `raw/` в днях (по умолчанию `7`).
 - `output.excel_file` — путь к Excel-результату (пока заглушка: `out/bond_screener.xlsx`).
+- `database.path` — путь к SQLite базе (по умолчанию `data/bond_screener.sqlite`).
+- `providers.moex_iss.limit` — размер страницы ISS (по умолчанию `100`).
+- `providers.moex_iss.q` — поисковая строка ISS (`null` = без фильтра).
+- `providers.moex_iss.cache_ttl_seconds` — TTL HTTP-кэша для ISS-запросов.
 
 ## `config/scenarios.yml`
 
@@ -45,4 +49,3 @@
 - По умолчанию инспектор БД использует файл `data/bond_screener.sqlite`.
 - Если файла нет, таблицы создаются автоматически при первом вызове `init_db(...)` или `python scripts/db_inspect.py`.
 - Для смены пути БД измените путь в вызывающем коде (или константу `DEFAULT_DB_PATH` в `scripts/db_inspect.py`).
-

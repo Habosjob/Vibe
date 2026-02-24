@@ -13,6 +13,7 @@
 ## Что на выходе
 
 - создаётся файл SQLite (например `data/bond_screener.sqlite`);
+- при `init_db(...)` выполняется безопасная авто-миграция старых БД (например, добавляются недостающие колонки `instruments.shortname`, `instruments.primary_boardid`, `instruments.board`);
 - в нём создаются таблицы:
   - `instruments`
   - `instrument_fields`

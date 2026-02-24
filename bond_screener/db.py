@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 
-from sqlalchemy import Date, DateTime, Float, PrimaryKeyConstraint, String, Text, create_engine
+from sqlalchemy import Date, DateTime, Float, PrimaryKeyConstraint, String, Text, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -16,7 +16,10 @@ class Instrument(Base):
 
     isin: Mapped[str] = mapped_column(String(12), primary_key=True)
     secid: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    shortname: Mapped[str | None] = mapped_column(String(512), nullable=True)
     name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    primary_boardid: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    board: Mapped[str | None] = mapped_column(String(64), nullable=True)
     currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
     issuer_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -127,6 +130,31 @@ def create_sqlite_engine(db_path: Path | str):
 def init_db(db_path: Path | str) -> None:
     engine = create_sqlite_engine(db_path)
     Base.metadata.create_all(engine)
+    _migrate_sqlite_schema(engine)
+
+
+def _migrate_sqlite_schema(engine) -> None:
+    """Лёгкие миграции для уже существующих SQLite-файлов без Alembic."""
+    with engine.begin() as conn:
+        table_exists = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='instruments'")
+        ).fetchone()
+        if not table_exists:
+            return
+
+        rows = conn.execute(text("PRAGMA table_info(instruments)")).fetchall()
+        existing_columns = {str(row[1]) for row in rows}
+
+        missing_column_defs = {
+            "shortname": "VARCHAR(512)",
+            "primary_boardid": "VARCHAR(64)",
+            "board": "VARCHAR(64)",
+        }
+
+        for column, sql_type in missing_column_defs.items():
+            if column in existing_columns:
+                continue
+            conn.execute(text(f"ALTER TABLE instruments ADD COLUMN {column} {sql_type}"))
 
 
 def make_session_factory(db_path: Path | str) -> sessionmaker:
