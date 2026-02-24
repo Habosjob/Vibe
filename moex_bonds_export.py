@@ -1492,7 +1492,24 @@ def main() -> None:
         bonds_market_df = bonds_market_df[bonds_market_df["SECID"].isin(source_secids)].copy()
         logging.warning("Для отладки ограничен список облигаций до %s штук", cfg.MAX_BONDS_TO_PROCESS)
 
-    all_securities_df = collect_reference_data_for_secids(source_secids)
+    # Оптимизация: не тратим точечные запросы на бумаги, которые уже исключены
+    # по сохраненному состоянию фильтра (бессрочно или на активный временный период).
+    secids_for_reference, _, prefilter_stats = filter_secids_before_extended_load(source_secids)
+    skipped_for_reference = len(source_secids) - len(secids_for_reference)
+    if skipped_for_reference:
+        print(
+            "Предфильтр перед точечными запросами: "
+            f"пропущено={skipped_for_reference} (навсегда={prefilter_stats['permanent']}, "
+            f"временно={prefilter_stats['temporary']})"
+        )
+        logging.info(
+            "Предфильтр перед загрузкой справочника: skipped=%s, permanent=%s, temporary=%s",
+            skipped_for_reference,
+            prefilter_stats["permanent"],
+            prefilter_stats["temporary"],
+        )
+
+    all_securities_df = collect_reference_data_for_secids(secids_for_reference)
     all_securities_df = all_securities_df.rename(columns=str.upper)
     validate_required_columns(all_securities_df, ["SECID"], "Справочник /iss/securities?q=<SECID>")
 
