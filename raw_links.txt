@@ -1,0 +1,8 @@
+
+============================================================
+КОРНЕВАЯ ДИРЕКТОРИЯ:
+============================================================
+
+https://raw.githubusercontent.com/Habosjob/Vibe/main/Git_auto.bat
+https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
+https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
