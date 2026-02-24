@@ -39,6 +39,16 @@ def default_configs() -> dict[str, dict[str, Any]]:
             "output": {
                 "excel_file": "out/bond_screener.xlsx",
             },
+            "database": {
+                "path": "data/bond_screener.sqlite",
+            },
+            "providers": {
+                "moex_iss": {
+                    "limit": 100,
+                    "q": None,
+                    "cache_ttl_seconds": 1800,
+                }
+            },
         },
         "scenarios.yml": {
             "default": {

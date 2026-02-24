@@ -1,19 +1,40 @@
 # DATA_SOURCES
 
-Пока реализованы только заглушки этапов. Планируется подключение источников MOEX/эмитентов.
+## MOEX ISS (реализовано)
+
+Для загрузки торгового универсума облигаций используется провайдер `moex_iss`:
+
+- Endpoint: `https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json`.
+- Формат ответа: JSON-блок `securities` (`columns` + `data`).
+- Параметр `q` — поиск по коду/названию/ISIN.
+- Параметры `start` и `limit` — пагинация (страничный обход всего списка).
+
+Скрипт `scripts/sync_moex_universe.py`:
+
+- запускается без аргументов (берет конфиг из `config/config.yml`);
+- выгружает `out/universe.xlsx` и `out/universe.csv`;
+- сохраняет инструменты в таблицу `instruments` SQLite;
+- показывает этапы и прогресс загрузки.
 
 ## Модуль/скрипт
-- `bond_screener/runtime.py`: выводит этап «Загрузка источников (заглушка)».
+- `bond_screener/providers/moex_iss.py`: загрузка облигаций через ISS, пагинация и нормализация полей.
+- `scripts/sync_moex_universe.py`: синхронизация универсума в файлы `out/` и SQLite.
 
 ## Входные данные
 - Конфиги из `config/`.
 
 ## Выходные данные
-- Лог этапа в `logs/latest.log`.
-- В будущем — raw-дампы в `raw/`.
+- Лог этапов в `logs/latest.log`.
+- Файлы `out/universe.xlsx` и `out/universe.csv`.
+- Записи `instruments` в SQLite.
+- В debug-режиме — raw-дампы в `raw/moex_iss/<date>/...`.
 
 ## Как менять
-- Изменяйте параметры в `config/config.yml` (блок `raw`).
+- Изменяйте параметры в `config/config.yml`:
+  - `providers.moex_iss.limit`;
+  - `providers.moex_iss.q`;
+  - `providers.moex_iss.cache_ttl_seconds`;
+  - `database.path`.
 
 ## Как мы бережем сайты
 - Используем `bond_screener/http_client.py` с `httpx.AsyncClient` и connection pooling: меньше лишних TCP-соединений.
