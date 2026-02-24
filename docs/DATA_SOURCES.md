@@ -14,3 +14,10 @@
 
 ## Как менять
 - Изменяйте параметры в `config/config.yml` (блок `raw`).
+
+## Как мы бережем сайты
+- Используем `bond_screener/http_client.py` с `httpx.AsyncClient` и connection pooling: меньше лишних TCP-соединений.
+- На каждый домен действует ограничение `max_concurrency` и `rate_limit_per_sec`, чтобы не создавать избыточную нагрузку.
+- Для временных сбоев включены ретраи (timeout, HTTP 429 и 5xx) с экспоненциальным backoff и jitter.
+- Ответы кэшируются в SQLite (`cache/http_cache.sqlite` или другой путь из конфигурации) по ключу `method + url + params + body_hash` с TTL.
+- В debug-режиме можно сохранять raw-ответы в `raw/<provider>/<date>/...` для диагностики, в обычном режиме это отключается.
