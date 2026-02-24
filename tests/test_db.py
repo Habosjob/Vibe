@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 
@@ -130,3 +131,40 @@ def test_db_create_insert_read(tmp_path: Path) -> None:
     assert rating.agency == "ACRA"
     assert snapshot is not None
     assert snapshot.computed_fields_json == '{"ytm": 12.3}'
+
+
+def test_init_db_migrates_legacy_instruments_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE instruments (
+            isin VARCHAR(12) PRIMARY KEY,
+            secid VARCHAR(64),
+            name VARCHAR(512),
+            currency VARCHAR(16),
+            issuer_key VARCHAR(128),
+            tags_json TEXT,
+            updated_at DATETIME
+        )
+        """
+    )
+    conn.execute("INSERT INTO instruments(isin, secid, name) VALUES ('RU000A000999', 'OLD', 'legacy')")
+    conn.commit()
+    conn.close()
+
+    init_db(db_path)
+
+    conn = sqlite3.connect(db_path)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(instruments)").fetchall()}
+    conn.close()
+
+    assert "shortname" in columns
+    assert "primary_boardid" in columns
+    assert "board" in columns
+
+    session_factory = make_session_factory(db_path)
+    with session_factory() as session:
+        existing = session.scalar(select(Instrument).where(Instrument.isin == "RU000A000999"))
+
+    assert existing is not None
