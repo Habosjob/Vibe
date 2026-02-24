@@ -16,27 +16,58 @@
 - сохраняет инструменты в таблицу `instruments` SQLite;
 - показывает этапы и прогресс загрузки.
 
-## Модуль/скрипт
+## MOEX ISS bondization (реализовано)
+
+Для расписания выплат по бумаге используется endpoint:
+
+- `https://iss.moex.com/iss/securities/{SECID}/bondization.json`.
+
+Скрипт `scripts/sync_moex_cashflows.py`:
+
+- запускается без аргументов;
+- читает бумаги из таблицы `instruments`;
+- загружает доступные блоки `coupons`/`amortizations`/`redemptions`;
+- сохраняет cashflows в `cashflows` с типами `coupon` / `amort` / `redemption`;
+- сохраняет cashflows и derived-поля батчами (одной транзакцией), чтобы ускорить запись больших объемов;
+- вычисляет и сохраняет в `instrument_fields`:
+  - `maturity_date`;
+  - `next_coupon_date`;
+  - `amort_start_date`;
+  - `has_amortization`.
+
+## Модули/скрипты
+
 - `bond_screener/providers/moex_iss.py`: загрузка облигаций через ISS, пагинация и нормализация полей.
+- `bond_screener/providers/moex_cashflows.py`: загрузка и нормализация расписания выплат, расчет derived-полей.
 - `scripts/sync_moex_universe.py`: синхронизация универсума в файлы `out/` и SQLite.
+- `scripts/sync_moex_cashflows.py`: синхронизация cashflows и derived-полей в SQLite + sample Excel.
 
 ## Входные данные
+
 - Конфиги из `config/`.
+- Таблица `instruments` (для `sync_moex_cashflows.py`).
 
 ## Выходные данные
+
 - Лог этапов в `logs/latest.log`.
-- Файлы `out/universe.xlsx` и `out/universe.csv`.
-- Записи `instruments` в SQLite.
-- В debug-режиме — raw-дампы в `raw/moex_iss/<date>/...`.
+- Файлы `out/universe.xlsx` и `out/universe.csv` (universe sync).
+- Файлы `out/cashflows_sample.xlsx` и `out/derived_sample.xlsx` (cashflows sync).
+- Записи `instruments`, `cashflows`, `instrument_fields` в SQLite.
+- В debug-режиме — raw-дампы в `raw/<provider>/<date>/...`.
 
 ## Как менять
+
 - Изменяйте параметры в `config/config.yml`:
   - `providers.moex_iss.limit`;
   - `providers.moex_iss.q`;
   - `providers.moex_iss.cache_ttl_seconds`;
+  - `providers.moex_iss.cashflows_cache_ttl_seconds`;
+  - `providers.moex_iss.cashflows_concurrency`;
+  - `providers.moex_iss.rate_limit_per_sec`;
   - `database.path`.
 
 ## Как мы бережем сайты
+
 - Используем `bond_screener/http_client.py` с `httpx.AsyncClient` и connection pooling: меньше лишних TCP-соединений.
 - На каждый домен действует ограничение `max_concurrency` и `rate_limit_per_sec`, чтобы не создавать избыточную нагрузку.
 - Для временных сбоев включены ретраи (timeout, HTTP 429 и 5xx) с экспоненциальным backoff и jitter.

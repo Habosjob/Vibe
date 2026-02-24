@@ -47,6 +47,9 @@ def default_configs() -> dict[str, dict[str, Any]]:
                     "limit": 100,
                     "q": None,
                     "cache_ttl_seconds": 1800,
+                    "cashflows_cache_ttl_seconds": 86400,
+                    "cashflows_concurrency": 12,
+                    "rate_limit_per_sec": 15.0,
                 }
             },
         },
