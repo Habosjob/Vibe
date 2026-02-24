@@ -132,18 +132,28 @@ def _split_amort_and_redemption(amort_rows: list[CashflowRecord]) -> list[Cashfl
     if not amort_rows:
         return []
 
-    max_date = max(row.date for row in amort_rows)
     result: list[CashflowRecord] = []
     for row in amort_rows:
-        inferred_kind = "redemption" if row.date == max_date else "amort"
+        inferred_kind = "redemption" if _looks_like_redemption(row) else "amort"
         result.append(CashflowRecord(isin=row.isin, date=row.date, kind=inferred_kind, amount=row.amount, rate=row.rate))
+
+    # Если не удалось определить погашение по признакам и есть несколько записей,
+    # считаем последнюю запись погашением.
+    if len(result) > 1 and all(item.kind != "redemption" for item in result):
+        last_idx = max(range(len(result)), key=lambda i: result[i].date)
+        last = result[last_idx]
+        result[last_idx] = CashflowRecord(
+            isin=last.isin,
+            date=last.date,
+            kind="redemption",
+            amount=last.amount,
+            rate=last.rate,
+        )
     return result
 
 
 def _looks_like_redemption(row: CashflowRecord) -> bool:
     if row.rate is not None and abs(row.rate - 100.0) < 1e-6:
-        return True
-    if row.amount is not None and row.amount >= 90:
         return True
     return False
 
@@ -289,7 +299,7 @@ def _parse_date(item: dict[str, Any], keys: list[str]) -> date | None:
         if value in (None, ""):
             continue
         text = str(value).strip()
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y"):
             try:
                 return datetime.strptime(text, fmt).date()
             except ValueError:

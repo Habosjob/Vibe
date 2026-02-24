@@ -66,8 +66,8 @@ def detect_ofz_variant(
     if _has_any(tags, {"ofz-pk", "floating_coupon", "float_coupon", "плавающий"}):
         return "OFZ-PK"
 
-    # Эвристика по SECID для старых ОФЗ-ПК выпусков.
-    if re.match(r"^SU\d{5,}RMFS", normalized_secid):
+    # Эвристика по SECID для ОФЗ-ПК: в большинстве случаев это серия SU29***.
+    if re.match(r"^SU29\d{3}RMFS\d$", normalized_secid):
         return "OFZ-PK"
 
     return "OFZ"
@@ -100,10 +100,12 @@ def build_screen_rows(session_factory: sessionmaker, today: date | None = None) 
             _upsert_bond_class_field(session, instrument.isin, bond_class)
 
             maturity_date = _parse_date(fields.get("maturity_date"))
-            offer_date = _parse_date(fields.get("offer_date"))
-            amort_date = _parse_date(fields.get("amort_date"))
+            offer_date = _parse_date(fields.get("offer_date") or fields.get("next_offer_date"))
+            amort_date = _parse_date(fields.get("amort_date") or fields.get("amort_start_date"))
 
             reasons: list[str] = []
+            if maturity_date and maturity_date < as_of:
+                reasons.append("maturity_in_past")
             if maturity_date and (maturity_date - as_of).days < 365:
                 reasons.append("maturity_lt_365")
             if offer_date and (offer_date - as_of).days < 365:
@@ -226,7 +228,7 @@ def _parse_date(value: str | None) -> date | None:
     cleaned = value.strip()
     if not cleaned:
         return None
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y"):
         try:
             return datetime.strptime(cleaned, fmt).date()
         except ValueError:

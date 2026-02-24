@@ -152,3 +152,32 @@ def test_save_cashflows_and_derived_fields(tmp_path: Path) -> None:
     assert by_field["next_offer_date"] == "2026-04-15"
     assert by_field["amort_start_date"] is None
     assert by_field["has_amortization"] == "0"
+
+
+def test_parse_cashflows_payload_keeps_single_partial_amortization() -> None:
+    payload = {
+        "amortizations": {
+            "columns": ["amortdate", "valueprc", "value"],
+            "data": [["2026-02-25", 5.0, 50.0]],
+        }
+    }
+
+    rows = parse_cashflows_payload(payload, isin="RU000A0ZYAP9")
+    assert len(rows) == 1
+    assert rows[0].kind == "amort"
+
+    derived = derive_fields(rows, today=date(2026, 1, 1))
+    assert derived.amort_start_date == date(2026, 2, 25)
+    assert derived.has_amortization is True
+
+
+def test_parse_offers_payload_supports_datetime_format() -> None:
+    payload = {
+        "offers": {
+            "columns": ["offerdate", "offertype", "price"],
+            "data": [["2026-04-10 00:00:00", "put", 100.0]],
+        }
+    }
+
+    offers = parse_offers_payload(payload, isin="RU000A000001")
+    assert offers[0].offer_date == date(2026, 4, 10)

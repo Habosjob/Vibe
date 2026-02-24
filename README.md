@@ -12,7 +12,7 @@
    ```
 3. Запустите проект:
    ```bash
-   python scripts/run.py
+   python run.py
    ```
 
 ## Что происходит при запуске без аргументов
@@ -24,8 +24,8 @@
   - `config/allowlist.yml`
   - `config/issuer_links.yml`
   - `config/portfolio.yml`
-- печатаются этапы выполнения (пока заглушки);
-- выполняется очистка `raw/` по TTL;
+- выполняется полный пайплайн: `sync_moex_universe` → `sync_moex_cashflows` → `screen_basic`;
+- на каждом этапе печатается прогресс и итог;
 - перезаписывается `logs/latest.log`;
 - печатается итоговая сводка и время выполнения.
 

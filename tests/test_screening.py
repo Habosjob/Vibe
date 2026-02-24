@@ -50,8 +50,8 @@ def test_build_screen_rows_excludes_ofz_pk_and_short_dates(tmp_path: Path) -> No
                 InstrumentField(isin="RU000A000001", field="maturity_date", value="2026-12-31"),
                 InstrumentField(isin="RU000A000002", field="maturity_date", value="2028-01-01"),
                 InstrumentField(isin="RU000A000003", field="maturity_date", value="2026-04-01"),
-                InstrumentField(isin="RU000A000003", field="offer_date", value="2026-03-01"),
-                InstrumentField(isin="RU000A000003", field="amort_date", value="2026-02-15"),
+                InstrumentField(isin="RU000A000003", field="next_offer_date", value="2026-03-01"),
+                InstrumentField(isin="RU000A000003", field="amort_start_date", value="2026-02-15"),
             ]
         )
         session.commit()
@@ -78,3 +78,46 @@ def test_export_screen_to_excel_creates_sheets(tmp_path: Path) -> None:
 
     wb = openpyxl.load_workbook(output)
     assert wb.sheetnames == ["screen_pass", "screen_drop"]
+
+
+def test_build_screen_rows_marks_maturity_in_past(tmp_path: Path) -> None:
+    db_path = tmp_path / "test.sqlite"
+    init_db(db_path)
+    session_factory = make_session_factory(db_path)
+
+    with session_factory() as session:
+        session.add(
+            Instrument(
+                isin="RU000A000010",
+                secid="CORP10",
+                name="ПАО Тест 1P10",
+                tags_json='["corp"]',
+            )
+        )
+        session.add(InstrumentField(isin="RU000A000010", field="maturity_date", value="2024-01-01"))
+        session.commit()
+
+    _, drop_rows = build_screen_rows(session_factory, today=date(2026, 1, 1))
+    assert drop_rows[0].reasons == ["maturity_in_past", "maturity_lt_365"]
+
+
+def test_non_pk_ofz_is_not_excluded_by_secid_pattern(tmp_path: Path) -> None:
+    db_path = tmp_path / "test.sqlite"
+    init_db(db_path)
+    session_factory = make_session_factory(db_path)
+
+    with session_factory() as session:
+        session.add(
+            Instrument(
+                isin="RU000A000020",
+                secid="SU26207RMFS9",
+                name="ОФЗ 26207",
+                tags_json='["ofz"]',
+            )
+        )
+        session.add(InstrumentField(isin="RU000A000020", field="maturity_date", value="2030-01-01"))
+        session.commit()
+
+    pass_rows, drop_rows = build_screen_rows(session_factory, today=date(2026, 1, 1))
+    assert [row.isin for row in pass_rows] == ["RU000A000020"]
+    assert drop_rows == []
