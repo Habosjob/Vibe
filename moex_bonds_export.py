@@ -1111,6 +1111,19 @@ def save_parquet(df: pd.DataFrame, file_path: Path) -> None:
     df.to_parquet(file_path, index=False)
 
 
+def normalize_emitent_id(series: pd.Series) -> pd.Series:
+    """Приводит идентификатор эмитента к стабильному строковому виду без `.0`."""
+    normalized = series.copy()
+    numeric_mask = pd.to_numeric(normalized, errors="coerce").notna()
+
+    if numeric_mask.any():
+        numeric_values = pd.to_numeric(normalized[numeric_mask], errors="coerce")
+        normalized.loc[numeric_mask] = numeric_values.astype("Int64").astype(str)
+
+    normalized = normalized.astype("string").str.strip()
+    return normalized.replace({"": pd.NA, "<NA>": pd.NA, "nan": pd.NA, "None": pd.NA})
+
+
 def build_emitents_sheet(traded_bonds: pd.DataFrame) -> pd.DataFrame:
     emitent_cols_upper = ["EMITENT_ID", "EMITENT_TITLE", "EMITENT_INN", "EMITENT_OKPO"]
     existing_cols = [col for col in emitent_cols_upper if col in traded_bonds.columns]
@@ -1119,6 +1132,8 @@ def build_emitents_sheet(traded_bonds: pd.DataFrame) -> pd.DataFrame:
 
     emitent_id_column = "EMITENT_ID" if "EMITENT_ID" in existing_cols else existing_cols[0]
     emitents = traded_bonds[existing_cols + ["SECID"]].dropna(subset=[emitent_id_column], how="all").copy()
+    emitents[emitent_id_column] = normalize_emitent_id(emitents[emitent_id_column])
+    emitents = emitents.dropna(subset=[emitent_id_column])
 
     return emitents.groupby(existing_cols, dropna=False, as_index=False).agg(
         bonds_count=("SECID", "count"),
@@ -1138,9 +1153,9 @@ def merge_emitents_incremental(new_emitents: pd.DataFrame) -> pd.DataFrame:
     if "EMITENT_ID" not in existing_emitents.columns:
         return new_emitents.sort_values("EMITENT_TITLE", na_position="last").reset_index(drop=True)
 
-    existing_ids = set(existing_emitents["EMITENT_ID"].dropna().astype(str))
+    existing_ids = set(normalize_emitent_id(existing_emitents["EMITENT_ID"]).dropna())
     candidates = new_emitents.copy()
-    candidates["EMITENT_ID"] = candidates["EMITENT_ID"].astype(str)
+    candidates["EMITENT_ID"] = normalize_emitent_id(candidates["EMITENT_ID"])
     new_only = candidates[~candidates["EMITENT_ID"].isin(existing_ids)]
 
     if new_only.empty:
@@ -1529,7 +1544,8 @@ def update_emitents_history(new_emitents_df: pd.DataFrame) -> None:
     history_file = cfg.OUTPUT_DIR / "moex_emitents_history.csv"
     current_date = datetime.now().strftime("%Y-%m-%d")
     snapshot = new_emitents_df[["EMITENT_ID", "EMITENT_TITLE"]].dropna(subset=["EMITENT_ID"]).copy()
-    snapshot["EMITENT_ID"] = snapshot["EMITENT_ID"].astype(str)
+    snapshot["EMITENT_ID"] = normalize_emitent_id(snapshot["EMITENT_ID"])
+    snapshot = snapshot.dropna(subset=["EMITENT_ID"])
     snapshot = snapshot.drop_duplicates(subset=["EMITENT_ID"], keep="last")
 
     if history_file.exists():
@@ -1537,7 +1553,7 @@ def update_emitents_history(new_emitents_df: pd.DataFrame) -> None:
     else:
         history_df = pd.DataFrame(columns=["first_seen", "EMITENT_ID", "EMITENT_TITLE"])
 
-    known_ids = set(history_df["EMITENT_ID"].dropna().astype(str)) if not history_df.empty else set()
+    known_ids = set(normalize_emitent_id(history_df["EMITENT_ID"]).dropna()) if not history_df.empty else set()
     new_rows = snapshot[~snapshot["EMITENT_ID"].isin(known_ids)].copy()
     if new_rows.empty:
         return
