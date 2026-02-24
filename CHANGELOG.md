@@ -1,6 +1,9 @@
 # CHANGELOG
 
 ## 2026-02-24
+- Исправлен расчет `maturity_date`: теперь приоритет у дат погашения/амортизации, а купоны не сдвигают дату погашения на дальние годы.
+- Добавлен парсинг оферт MOEX (`offers`/`putoffers`) с сохранением в таблицу `offers` и derived-полем `next_offer_date`.
+- В `sync_moex_cashflows.py` добавлена выгрузка `out/offers_sample.xlsx` и сохранение оферт в БД.
 - Добавлен sync cashflows из MOEX bondization: сохранение `coupon`/`amort`/`redemption` в таблицу `cashflows`.
 - Добавлен расчет и сохранение derived-полей (`maturity_date`, `next_coupon_date`, `amort_start_date`, `has_amortization`) в `instrument_fields`.
 - Добавлен скрипт `scripts/sync_moex_cashflows.py` с параллелизмом из конфига, кэшем 24 часа и выгрузкой sample-файлов `out/cashflows_sample.xlsx`, `out/derived_sample.xlsx`.

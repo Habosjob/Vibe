@@ -14,13 +14,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from bond_screener.db import Cashflow, Instrument, InstrumentField, init_db, make_session_factory
+from bond_screener.db import Cashflow, Instrument, InstrumentField, Offer, init_db, make_session_factory
 from bond_screener.http_client import AsyncHttpClient, DomainPolicy
 from bond_screener.providers.moex_cashflows import (
     MoexCashflowProvider,
+    apply_offer_fields,
     derive_fields,
     save_cashflows_to_db,
     save_derived_fields_to_db,
+    save_offers_to_db,
 )
 from bond_screener.runtime import ensure_default_configs, ensure_runtime_dirs, load_config, setup_logging
 
@@ -41,6 +43,7 @@ async def _run_sync(base_dir: Path, logger: logging.Logger) -> tuple[int, int, i
     rate_limit = float(provider_cfg.get("rate_limit_per_sec", 2.0))
 
     collected: dict[str, list] = {}
+    collected_offers: dict[str, list] = {}
     errors = 0
     processed = 0
 
@@ -61,7 +64,9 @@ async def _run_sync(base_dir: Path, logger: logging.Logger) -> tuple[int, int, i
             try:
                 async with semaphore:
                     rows = await provider.fetch_cashflows(secid=security_id, isin=isin)
+                    offer_rows = await provider.fetch_offers(secid=security_id, isin=isin)
                 collected[isin] = rows
+                collected_offers[isin] = offer_rows
             except Exception:
                 errors += 1
                 logger.exception("Ошибка загрузки cashflows: isin=%s secid=%s", isin, security_id)
@@ -75,12 +80,15 @@ async def _run_sync(base_dir: Path, logger: logging.Logger) -> tuple[int, int, i
     logger.info("Этап 3/4: сохранение cashflows и derived полей в SQLite")
     saved_cashflows = 0
     saved_derived = 0
+    saved_offers = 0
     for isin, rows in collected.items():
+        offers = collected_offers.get(isin, [])
         saved_cashflows += save_cashflows_to_db(session_factory, isin=isin, cashflows=rows, source="moex_iss")
+        saved_offers += save_offers_to_db(session_factory, isin=isin, offers=offers, source="moex_iss")
         saved_derived += save_derived_fields_to_db(
             session_factory,
             isin=isin,
-            derived=derive_fields(rows),
+            derived=apply_offer_fields(derive_fields(rows), offers),
             source="derived_from_moex_cashflows",
         )
 
@@ -109,16 +117,31 @@ async def _run_sync(base_dir: Path, logger: logging.Logger) -> tuple[int, int, i
             .where(InstrumentField.isin.in_(sample_isins), InstrumentField.field.in_([
                 "maturity_date",
                 "next_coupon_date",
+                "next_offer_date",
                 "amort_start_date",
                 "has_amortization",
             ]))
             .order_by(InstrumentField.isin, InstrumentField.field)
         ).scalars()
         derived_records = [{"isin": r.isin, "field": r.field, "value": r.value, "source": r.source} for r in derived_rows]
+        offer_rows = session.execute(
+            select(Offer).where(Offer.isin.in_(sample_isins)).order_by(Offer.isin, Offer.offer_date, Offer.offer_type)
+        ).scalars()
+        offer_records = [
+            {
+                "isin": row.isin,
+                "offer_date": row.offer_date.isoformat(),
+                "offer_type": row.offer_type,
+                "offer_price": row.offer_price,
+                "source": row.source,
+            }
+            for row in offer_rows
+        ]
 
     (base_dir / "out").mkdir(parents=True, exist_ok=True)
     pd.DataFrame(cashflow_records).to_excel(base_dir / "out" / "cashflows_sample.xlsx", index=False)
     pd.DataFrame(derived_records).to_excel(base_dir / "out" / "derived_sample.xlsx", index=False)
+    pd.DataFrame(offer_records).to_excel(base_dir / "out" / "offers_sample.xlsx", index=False)
 
     return len(instruments), saved_cashflows, errors
 

@@ -26,11 +26,12 @@
 
 - запускается без аргументов;
 - читает бумаги из таблицы `instruments`;
-- загружает доступные блоки `coupons`/`amortizations`/`redemptions`;
+- загружает доступные блоки `coupons`/`amortizations`/`redemptions` и оферты (`offers`/`putoffers`);
 - сохраняет cashflows в `cashflows` с типами `coupon` / `amort` / `redemption`;
 - вычисляет и сохраняет в `instrument_fields`:
   - `maturity_date`;
   - `next_coupon_date`;
+  - `next_offer_date`;
   - `amort_start_date`;
   - `has_amortization`.
 
@@ -50,8 +51,8 @@
 
 - Лог этапов в `logs/latest.log`.
 - Файлы `out/universe.xlsx` и `out/universe.csv` (universe sync).
-- Файлы `out/cashflows_sample.xlsx` и `out/derived_sample.xlsx` (cashflows sync).
-- Записи `instruments`, `cashflows`, `instrument_fields` в SQLite.
+- Файлы `out/cashflows_sample.xlsx`, `out/derived_sample.xlsx` и `out/offers_sample.xlsx` (cashflows sync).
+- Записи `instruments`, `cashflows`, `offers`, `instrument_fields` в SQLite.
 - В debug-режиме — raw-дампы в `raw/<provider>/<date>/...`.
 
 ## Как менять
