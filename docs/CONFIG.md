@@ -19,6 +19,9 @@
 - `providers.moex_iss.limit` — размер страницы ISS (по умолчанию `100`).
 - `providers.moex_iss.q` — поисковая строка ISS (`null` = без фильтра).
 - `providers.moex_iss.cache_ttl_seconds` — TTL HTTP-кэша для ISS-запросов.
+- `providers.moex_iss.cashflows_cache_ttl_seconds` — TTL кэша запросов расписания выплат (по умолчанию `86400`, 24 часа).
+- `providers.moex_iss.cashflows_concurrency` — параллельность загрузки расписаний выплат.
+- `providers.moex_iss.rate_limit_per_sec` — ограничение частоты запросов к `iss.moex.com`.
 
 ## `config/scenarios.yml`
 
