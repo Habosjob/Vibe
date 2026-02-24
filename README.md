@@ -32,7 +32,7 @@
 ## Структура
 
 - `bond_screener/` — пакет с основной логикой запуска.
-- `scripts/` — исполняемые скрипты (`run.py`, `sync_moex_universe.py`, `sync_moex_cashflows.py`).
+- `scripts/` — исполняемые скрипты (`run.py`, `sync_moex_universe.py`, `sync_moex_cashflows.py`, `screen_basic.py`).
 - `docs/` — документация по конфигам, источникам, скорингу и мониторингу.
 - `tests/` — pytest-тесты.
 - `config/`, `out/`, `logs/`, `raw/` — рабочие папки, создаются автоматически.
@@ -53,3 +53,12 @@ pytest
   python scripts/db_inspect.py
   ```
 - Подробности в `docs/DB.md`.
+
+
+## Базовый скрининг (Excel)
+
+```bash
+python scripts/screen_basic.py
+```
+
+Скрипт читает derived-поля из SQLite (`instrument_fields`), записывает минимальную классификацию `bond_class` и формирует `out/screen_basic.xlsx` с листами `screen_pass` и `screen_drop`.

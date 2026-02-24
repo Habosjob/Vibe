@@ -38,6 +38,7 @@ def default_configs() -> dict[str, dict[str, Any]]:
             },
             "output": {
                 "excel_file": "out/bond_screener.xlsx",
+                "screen_basic_excel": "out/screen_basic.xlsx",
             },
             "database": {
                 "path": "data/bond_screener.sqlite",
