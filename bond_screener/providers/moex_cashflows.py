@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 from sqlalchemy.orm import sessionmaker
 
 from bond_screener.db import Cashflow, InstrumentField, Offer
@@ -50,6 +50,10 @@ class MoexCashflowProvider:
     async def fetch_offers(self, *, secid: str, isin: str) -> list[OfferRecord]:
         payload = await self._fetch_bondization_payload(secid=secid)
         return parse_offers_payload(payload, isin=isin)
+
+    async def fetch_cashflows_and_offers(self, *, secid: str, isin: str) -> tuple[list[CashflowRecord], list[OfferRecord]]:
+        payload = await self._fetch_bondization_payload(secid=secid)
+        return parse_cashflows_payload(payload, isin=isin), parse_offers_payload(payload, isin=isin)
 
     async def _fetch_bondization_payload(self, *, secid: str) -> dict[str, Any]:
         response = await self.http_client.request(
@@ -173,11 +177,21 @@ def apply_offer_fields(derived: DerivedFields, offers: list[OfferRecord], *, tod
 
 
 def save_cashflows_to_db(session_factory: sessionmaker, *, isin: str, cashflows: list[CashflowRecord], source: str) -> int:
+    return save_cashflows_batch_to_db(session_factory, cashflows_by_isin={isin: cashflows}, source=source)
+
+
+def save_cashflows_batch_to_db(
+    session_factory: sessionmaker, *, cashflows_by_isin: dict[str, list[CashflowRecord]], source: str
+) -> int:
     now = datetime.utcnow()
-    with session_factory() as session:
-        session.execute(delete(Cashflow).where(Cashflow.isin == isin))
+    isins = list(cashflows_by_isin.keys())
+    if not isins:
+        return 0
+
+    rows_to_insert: list[Cashflow] = []
+    for isin, cashflows in cashflows_by_isin.items():
         for row in cashflows:
-            session.add(
+            rows_to_insert.append(
                 Cashflow(
                     isin=row.isin,
                     date=row.date,
@@ -188,43 +202,70 @@ def save_cashflows_to_db(session_factory: sessionmaker, *, isin: str, cashflows:
                     fetched_at=now,
                 )
             )
+
+    with session_factory() as session:
+        session.execute(delete(Cashflow).where(Cashflow.isin.in_(isins)))
+        session.add_all(rows_to_insert)
         session.commit()
-    return len(cashflows)
+    return len(rows_to_insert)
 
 
 def save_derived_fields_to_db(session_factory: sessionmaker, *, isin: str, derived: DerivedFields, source: str) -> int:
+    return save_derived_fields_batch_to_db(session_factory, derived_by_isin={isin: derived}, source=source)
+
+
+def save_derived_fields_batch_to_db(
+    session_factory: sessionmaker, *, derived_by_isin: dict[str, DerivedFields], source: str
+) -> int:
     now = datetime.utcnow()
-    payload = {
-        "maturity_date": derived.maturity_date.isoformat() if derived.maturity_date else None,
-        "next_coupon_date": derived.next_coupon_date.isoformat() if derived.next_coupon_date else None,
-        "next_offer_date": derived.next_offer_date.isoformat() if derived.next_offer_date else None,
-        "amort_start_date": derived.amort_start_date.isoformat() if derived.amort_start_date else None,
-        "has_amortization": "1" if derived.has_amortization else "0",
-    }
+    if not derived_by_isin:
+        return 0
+
+    isins = list(derived_by_isin.keys())
+    fields = ("maturity_date", "next_coupon_date", "next_offer_date", "amort_start_date", "has_amortization")
+    rows_to_insert: list[InstrumentField] = []
+    for isin, derived in derived_by_isin.items():
+        payload = {
+            "maturity_date": derived.maturity_date.isoformat() if derived.maturity_date else None,
+            "next_coupon_date": derived.next_coupon_date.isoformat() if derived.next_coupon_date else None,
+            "next_offer_date": derived.next_offer_date.isoformat() if derived.next_offer_date else None,
+            "amort_start_date": derived.amort_start_date.isoformat() if derived.amort_start_date else None,
+            "has_amortization": "1" if derived.has_amortization else "0",
+        }
+        for field, value in payload.items():
+            rows_to_insert.append(
+                InstrumentField(
+                    isin=isin,
+                    field=field,
+                    value=value,
+                    source=source,
+                    confidence=1.0,
+                    fetched_at=now,
+                )
+            )
 
     with session_factory() as session:
-        for field, value in payload.items():
-            db_obj = session.scalar(
-                select(InstrumentField).where(InstrumentField.isin == isin, InstrumentField.field == field)
-            )
-            if db_obj is None:
-                db_obj = InstrumentField(isin=isin, field=field)
-                session.add(db_obj)
-            db_obj.value = value
-            db_obj.source = source
-            db_obj.confidence = 1.0
-            db_obj.fetched_at = now
+        session.execute(delete(InstrumentField).where(InstrumentField.isin.in_(isins), InstrumentField.field.in_(fields)))
+        session.add_all(rows_to_insert)
         session.commit()
 
-    return len(payload)
+    return len(rows_to_insert)
 
 
 def save_offers_to_db(session_factory: sessionmaker, *, isin: str, offers: list[OfferRecord], source: str) -> int:
+    return save_offers_batch_to_db(session_factory, offers_by_isin={isin: offers}, source=source)
+
+
+def save_offers_batch_to_db(session_factory: sessionmaker, *, offers_by_isin: dict[str, list[OfferRecord]], source: str) -> int:
     now = datetime.utcnow()
-    with session_factory() as session:
-        session.execute(delete(Offer).where(Offer.isin == isin))
+    isins = list(offers_by_isin.keys())
+    if not isins:
+        return 0
+
+    rows_to_insert: list[Offer] = []
+    for isin, offers in offers_by_isin.items():
         for row in offers:
-            session.add(
+            rows_to_insert.append(
                 Offer(
                     isin=row.isin,
                     offer_date=row.offer_date,
@@ -234,8 +275,12 @@ def save_offers_to_db(session_factory: sessionmaker, *, isin: str, offers: list[
                     fetched_at=now,
                 )
             )
+
+    with session_factory() as session:
+        session.execute(delete(Offer).where(Offer.isin.in_(isins)))
+        session.add_all(rows_to_insert)
         session.commit()
-    return len(offers)
+    return len(rows_to_insert)
 
 
 def _parse_date(item: dict[str, Any], keys: list[str]) -> date | None:

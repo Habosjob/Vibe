@@ -13,8 +13,11 @@ from bond_screener.providers.moex_cashflows import (
     derive_fields,
     parse_cashflows_payload,
     parse_offers_payload,
+    save_cashflows_batch_to_db,
     save_cashflows_to_db,
+    save_derived_fields_batch_to_db,
     save_derived_fields_to_db,
+    save_offers_batch_to_db,
     save_offers_to_db,
 )
 
@@ -63,6 +66,48 @@ def test_derive_fields_uses_amortization_for_maturity() -> None:
     derived = derive_fields(rows, today=date(2025, 1, 1))
     assert derived.maturity_date == date(2025, 8, 28)
 
+
+
+def test_save_batch_cashflows_and_derived_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "bond.sqlite"
+    init_db(db_path)
+    session_factory = make_session_factory(db_path)
+
+    cashflows_by_isin = {
+        "RU000A000001": [
+            CashflowRecord(isin="RU000A000001", date=date(2026, 5, 1), kind="coupon", amount=20.0, rate=8.0),
+            CashflowRecord(isin="RU000A000001", date=date(2027, 5, 1), kind="redemption", amount=1000.0, rate=100.0),
+        ],
+        "RU000A000002": [
+            CashflowRecord(isin="RU000A000002", date=date(2026, 6, 1), kind="coupon", amount=22.0, rate=8.2),
+        ],
+    }
+    offers_by_isin = {
+        "RU000A000001": [OfferRecord(isin="RU000A000001", offer_date=date(2026, 4, 15), offer_type="put", offer_price=100.0)],
+        "RU000A000002": [],
+    }
+
+    saved = save_cashflows_batch_to_db(session_factory, cashflows_by_isin=cashflows_by_isin, source="moex")
+    offers_saved = save_offers_batch_to_db(session_factory, offers_by_isin=offers_by_isin, source="moex")
+    derived_by_isin = {
+        isin: apply_offer_fields(derive_fields(rows, today=date(2026, 1, 1)), offers_by_isin.get(isin, []), today=date(2026, 1, 1))
+        for isin, rows in cashflows_by_isin.items()
+    }
+    fields_saved = save_derived_fields_batch_to_db(session_factory, derived_by_isin=derived_by_isin, source="derived")
+
+    assert saved == 3
+    assert offers_saved == 1
+    assert fields_saved == 10
+
+    # Повторный запуск с теми же данными не должен размножать строки.
+    save_cashflows_batch_to_db(session_factory, cashflows_by_isin=cashflows_by_isin, source="moex")
+    save_offers_batch_to_db(session_factory, offers_by_isin=offers_by_isin, source="moex")
+    save_derived_fields_batch_to_db(session_factory, derived_by_isin=derived_by_isin, source="derived")
+
+    with session_factory() as session:
+        assert len(session.execute(select(Cashflow)).scalars().all()) == 3
+        assert len(session.execute(select(Offer)).scalars().all()) == 1
+        assert len(session.execute(select(InstrumentField)).scalars().all()) == 10
 
 def test_save_cashflows_and_derived_fields(tmp_path: Path) -> None:
     db_path = tmp_path / "bond.sqlite"
