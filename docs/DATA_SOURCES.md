@@ -10,4 +10,4 @@
 - `output/moex_bonds.csv` — опциональный CSV (с UTF-8 BOM для корректного открытия в Excel).
 - `raw/*.json` — отладочные сырые ответы (если включено).
 
-- Дополнительная точка для обогащения амортизацией: `https://iss.moex.com/iss/securities/{SECID}/bondization.json` (`iss.only=amortizations`) — используется для поля `Amortization_start_date` (первая дата амортизации).
+- Дополнительная точка для обогащения амортизацией: `https://iss.moex.com/iss/securities/{SECID}/bondization.json` (`iss.only=amortizations`) — используется для поля `Amortization_start_date`; одиночное полное погашение (`VALUEPRC=100`) и запись в дату `MATDATE` не считаются амортизацией.
