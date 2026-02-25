@@ -8,7 +8,7 @@ from typing import Any
 from moex_bond_screener.config import load_config
 from moex_bond_screener.exclusion_rules import BondExclusionFilter
 from moex_bond_screener.logging_utils import setup_logging
-from moex_bond_screener.moex_client import MoexClient
+from moex_bond_screener.moex_client import AMORTIZATION_CHECKPOINT_VERSION, MoexClient
 from moex_bond_screener.progress import PipelineProgress
 from moex_bond_screener.raw_store import RawStore
 from moex_bond_screener.state_store import ScreenerStateStore
@@ -31,7 +31,12 @@ def main() -> None:
     state_store = ScreenerStateStore(config.exclusions_state_dir)
     previous_exclusions = state_store.load_exclusions()
     bonds_checkpoint = state_store.load_checkpoint("bonds_fetch")
-    amortization_checkpoint = state_store.load_checkpoint("amortization")
+    raw_amortization_checkpoint = state_store.load_checkpoint("amortization")
+    amortization_checkpoint, amortization_checkpoint_invalidated = _prepare_amortization_checkpoint(
+        raw_amortization_checkpoint
+    )
+    if amortization_checkpoint_invalidated:
+        state_store.clear_checkpoint("amortization")
 
     progress.start_stage(4, "Загрузка облигаций с MOEX")
     client = MoexClient(config=config, logger=logger, raw_store=raw_store)
@@ -52,7 +57,9 @@ def main() -> None:
     exclusion_result = exclusion_filter.apply(bonds=bonds, previous_exclusions=previous_exclusions)
 
     progress.start_stage(6, "Обогащение датой начала амортизации")
-    if amortization_checkpoint and not amortization_checkpoint.get("completed", False):
+    if amortization_checkpoint_invalidated:
+        progress.tick("Найден устаревший чекпоинт амортизации — старый кэш сброшен, пересчитываем этап")
+    elif amortization_checkpoint and not amortization_checkpoint.get("completed", False):
         progress.tick("Найден чекпоинт амортизации — пропускаем уже обработанные SECID")
 
     amortization_errors = client.enrich_amortization_start_dates(
@@ -103,6 +110,26 @@ def main() -> None:
     if not fetch_completed:
         print("[Внимание] Загрузка MOEX завершилась с ошибкой сети. Чекпоинт сохранен, следующий запуск продолжит с места остановки.")
     print(f"Время выполнения: {elapsed:.2f} сек")
+
+
+def _prepare_amortization_checkpoint(checkpoint: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    if not checkpoint:
+        return {}, False
+
+    version = checkpoint.get("version")
+    if version != AMORTIZATION_CHECKPOINT_VERSION:
+        return {}, True
+
+    processed = checkpoint.get("processed")
+    if not isinstance(processed, dict):
+        return {}, True
+
+    normalized = {str(secid): str(value or "") for secid, value in processed.items() if str(secid).strip()}
+    return {
+        "version": AMORTIZATION_CHECKPOINT_VERSION,
+        "processed": normalized,
+        "completed": bool(checkpoint.get("completed", False)),
+    }, False
 
 
 def _print_fetch_progress(data: dict[str, Any], progress: PipelineProgress) -> None:

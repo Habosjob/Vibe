@@ -17,6 +17,8 @@ from .raw_store import RawStore
 ProgressCallback = Callable[[dict[str, Any]], None]
 CheckpointSaver = Callable[[dict[str, Any]], None]
 
+AMORTIZATION_CHECKPOINT_VERSION = 2
+
 
 class MoexClient:
     def __init__(self, config: AppConfig, logger: logging.Logger, raw_store: RawStore | None = None) -> None:
@@ -197,13 +199,14 @@ class MoexClient:
                         date_value, request_errors = "", 1
 
                     errors += request_errors
-                    processed[secid] = date_value
+                    if request_errors == 0:
+                        processed[secid] = date_value
                     for idx in secid_to_indices.get(secid, []):
                         bonds[idx]["Amortization_start_date"] = date_value
                     progress_processed += len(secid_to_indices.get(secid, []))
 
                     if checkpoint_saver:
-                        checkpoint_saver({"processed": processed, "completed": False})
+                        checkpoint_saver({"version": AMORTIZATION_CHECKPOINT_VERSION, "processed": processed, "completed": False})
 
                     if progress_callback:
                         progress_callback(
@@ -217,7 +220,7 @@ class MoexClient:
                         )
 
         if checkpoint_saver:
-            checkpoint_saver({"processed": processed, "completed": True})
+            checkpoint_saver({"version": AMORTIZATION_CHECKPOINT_VERSION, "processed": processed, "completed": True})
 
         return errors
 
@@ -324,7 +327,6 @@ class MoexClient:
                 parsed_date = datetime.strptime(raw_date, "%Y-%m-%d")
             except ValueError:
                 continue
-            parsed_dates.append(parsed_date)
 
             value_prc: float | None = None
             if value_prc_idx is not None and len(row) > value_prc_idx:
@@ -333,47 +335,6 @@ class MoexClient:
                     value_prc = float(raw_value_prc)
                 except (TypeError, ValueError):
                     value_prc = None
-
-            if value_prc is None or value_prc < 99.999:
-                non_full_redemption_dates.append(parsed_date)
-
-        if non_full_redemption_dates:
-            return min(non_full_redemption_dates).strftime("%Y-%m-%d")
-
-            value_prc: float | None = None
-            if value_prc_idx is not None and len(row) > value_prc_idx:
-                raw_value_prc = row[value_prc_idx]
-                try:
-                    value_prc = float(raw_value_prc)
-                except (TypeError, ValueError):
-                    value_prc = None
-
-            parsed_items.append((parsed_date, value_prc))
-            if value_prc is None or value_prc < 99.999:
-                partial_dates.append(parsed_date)
-
-        if partial_dates:
-            return min(partial_dates).strftime("%Y-%m-%d")
-
-        if not parsed_items:
-            return None
-
-        if len(parsed_items) == 1:
-            only_date, only_value_prc = parsed_items[0]
-            only_date_str = only_date.strftime("%Y-%m-%d")
-            is_full_redemption = only_value_prc is not None and only_value_prc >= 99.999
-            if is_full_redemption or (matdate and only_date_str == matdate):
-                return None
-            return only_date_str
-
-            value_prc: float | None = None
-            if value_prc_idx is not None and len(row) > value_prc_idx:
-                raw_value_prc = row[value_prc_idx]
-                try:
-                    value_prc = float(raw_value_prc)
-                except (TypeError, ValueError):
-                    value_prc = None
-
             parsed_items.append((parsed_date, value_prc))
             if value_prc is None or value_prc < 99.999:
                 partial_dates.append(parsed_date)

@@ -5,7 +5,7 @@ import logging
 import requests
 
 from moex_bond_screener.config import AppConfig
-from moex_bond_screener.moex_client import MoexClient
+from moex_bond_screener.moex_client import AMORTIZATION_CHECKPOINT_VERSION, MoexClient
 
 
 class DummyResponse:
@@ -268,6 +268,19 @@ def test_extract_earliest_amortization_date_single_partial_valueprc_is_amortizat
     assert result == "2029-02-01"
 
 
+def test_extract_earliest_amortization_date_multiple_rows_no_name_error_regression():
+    payload = {
+        "amortizations": {
+            "columns": ["amortdate", "valueprc"],
+            "data": [["2028-04-01", 25], ["2030-05-01", 100]],
+        }
+    }
+
+    result = MoexClient._extract_earliest_amortization_date(payload, matdate="2030-05-01")
+
+    assert result == "2028-04-01"
+
+
 def test_client_uses_separate_delays_for_pages_and_amortizations(monkeypatch):
     config = AppConfig(
         retries=1,
@@ -362,3 +375,28 @@ def test_enrich_amortization_uses_checkpoint_without_requests(monkeypatch):
 
     assert errors == 0
     assert bonds[0]["Amortization_start_date"] == "2025-06-01"
+
+
+def test_enrich_amortization_checkpoint_saves_only_successful_secids(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0, amortization_request_delay_seconds=0, amortization_workers=2)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    def fake_fetch(secid: str, matdate: str = ""):
+        if secid == "B":
+            return "", 1
+        return "2026-01-01", 0
+
+    monkeypatch.setattr(client, "_fetch_amortization_start_date", fake_fetch)
+
+    saved_payloads: list[dict] = []
+    bonds = [{"SECID": "A"}, {"SECID": "B"}]
+    errors = client.enrich_amortization_start_dates(
+        bonds,
+        checkpoint_saver=lambda payload: saved_payloads.append(payload),
+    )
+
+    assert errors == 1
+    assert bonds[0]["Amortization_start_date"] == "2026-01-01"
+    assert bonds[1]["Amortization_start_date"] == ""
+    assert saved_payloads[-1]["version"] == AMORTIZATION_CHECKPOINT_VERSION
+    assert saved_payloads[-1]["processed"] == {"A": "2026-01-01"}
