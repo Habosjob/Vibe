@@ -198,10 +198,7 @@ class DohodEnricher:
 
     @staticmethod
     def _resolve_bond_identifier(bond: dict[str, Any]) -> str:
-        isin = str(bond.get("ISIN") or "").strip()
-        if isin:
-            return isin
-        return str(bond.get("SECID") or "").strip()
+        return str(bond.get("ISIN") or "").strip()
 
     @staticmethod
     def _resolve_secondary_identifier(bond: dict[str, Any], primary_identifier: str) -> str:
@@ -364,18 +361,14 @@ def _extract_label_map(html: str) -> dict[str, str]:
         "Событие в ближ. дату",
         "Дата, к которой рассчит. YTM",
     ]
-    normalized_targets = {_normalize_label(label): label for label in labels}
     result: dict[str, str] = {}
 
     for row_html in ROW_RE.findall(html):
         cells = CELL_RE.findall(row_html)
         if len(cells) < 2:
             continue
-        normalized_label = _normalize_label(_strip_html(cells[0]))
-        target_label = normalized_targets.get(normalized_label)
-        if not target_label:
-            continue
-        if target_label in result:
+        target_label = _match_target_label(_strip_html(cells[0]))
+        if not target_label or target_label in result:
             continue
         result[target_label] = _strip_html(cells[1])
 
@@ -401,6 +394,23 @@ def _normalize_label(raw: str) -> str:
     return normalized
 
 
+def _match_target_label(raw_label: str) -> str:
+    normalized = _normalize_label(raw_label)
+    condensed = normalized.replace(".", "").replace(":", "").replace(",", "")
+
+    if "цена" in condensed and "last" in condensed and "bid" in condensed and "ask" in condensed:
+        return "Цена (last/bid/ask)"
+    if "привязка" in condensed and "индекс" in condensed:
+        return "Привязка к индексу"
+    if "описание" in condensed and "формул" in condensed and "купон" in condensed:
+        return "Описание формулы изменяемого купона/номинала"
+    if "событие" in condensed and "ближ" in condensed:
+        return "Событие в ближ. дату"
+    if "дата" in condensed and "ytm" in condensed:
+        return "Дата, к которой рассчит. YTM"
+    return ""
+
+
 def _strip_html(raw: str) -> str:
     clean = re.sub(r"<[^>]+>", " ", raw)
     clean = unescape(clean)
@@ -412,10 +422,12 @@ def _parse_ask_price(raw: str) -> float | None:
     if not raw:
         return None
     parts = re.findall(NUMBER_RE, raw)
-    if len(parts) < 3:
+    if not parts:
         return None
+    # обычно формат last/bid/ask (берем ask), но на некоторых карточках доступно только одно-два числа
+    candidate = parts[2] if len(parts) >= 3 else parts[-1]
     try:
-        return float(parts[2].replace(",", "."))
+        return float(candidate.replace(",", "."))
     except ValueError:
         return None
 
@@ -453,14 +465,6 @@ def _to_iso_date(raw: str) -> str:
     except ValueError:
         return ""
 
-
-def _is_payload_empty(payload: DohodBondPayload) -> bool:
-    return (
-        payload.ask_price is None
-        and not payload.index_name
-        and not payload.event_name
-        and not payload.ytm_date
-    )
 
 
 def _as_float_or_none(value: Any) -> float | None:
