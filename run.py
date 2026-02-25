@@ -8,7 +8,7 @@ from moex_bond_screener.config import load_config
 from moex_bond_screener.logging_utils import setup_logging
 from moex_bond_screener.moex_client import MoexClient
 from moex_bond_screener.raw_store import RawStore
-from moex_bond_screener.writer import save_bonds_csv
+from moex_bond_screener.writer import save_bonds_file
 
 
 def main() -> None:
@@ -26,8 +26,8 @@ def main() -> None:
     client = MoexClient(config=config, logger=logger, raw_store=raw_store)
     bonds, errors = client.fetch_all_bonds()
 
-    print("[Этап] Сохранение CSV...")
-    save_bonds_csv(config.output_file, bonds)
+    print("[Этап] Сохранение итогового файла...")
+    save_bonds_file(config.output_file, bonds)
 
     elapsed = time.time() - started
     filtered = 0
