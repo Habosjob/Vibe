@@ -13,3 +13,6 @@ raw_max_size_mb: 50
 exclusions_state_dir: "state"
 exclusion_window_days: 365
 amortization_workers: 8
+
+storage_backend: "json"
+sqlite_db_path: "screener_state.db"

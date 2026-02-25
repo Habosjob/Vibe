@@ -21,6 +21,8 @@
 - `exclusions_state_dir` — папка состояния сортировщика и инкрементального кэша (`state/` по умолчанию).
 - `exclusion_window_days` — окно исключения по датам (по умолчанию `365`, т.е. < 1 года до события).
 - `amortization_workers` — число параллельных воркеров для загрузки амортизаций (`bondization`), по умолчанию `8`.
+- `storage_backend` — бэкенд хранения состояния: `json` (по умолчанию) или `sqlite`.
+- `sqlite_db_path` — имя файла SQLite-базы внутри `exclusions_state_dir` (по умолчанию `screener_state.db`).
 - Чекпоинты выполнения сохраняются автоматически в `state/checkpoints/*.json` и позволяют продолжить запуск после сетевого сбоя.
 
 ## Сортировщик и исключения
@@ -40,6 +42,7 @@
 - `state/checkpoints/amortization.json` — кэш уже обогащенных `SECID` по полю `Amortization_start_date` (версионируется полем `version` и меткой времени `updated_at`).
 - `state/emitents_registry.json` — статичный справочник эмитентов (`full_name`, `inn`), обновляется только для новых `EMITTER_ID`.
 - `state/secid_to_emitter.json` — кэш сопоставления `SECID -> EMITTER_ID` для бумаг без идентификатора эмитента в `eligible_bonds`; ускоряет повторные запуски этапа эмитентов.
+- `state/checkpoints/market_cache_bonds.json` и `state/checkpoints/market_cache_shares.json` — кэш рыночных инструментов для этапа эмитентов (TTL 24 часа).
 - Если найден старый формат чекпоинта (без `version`), он автоматически сбрасывается и этап амортизаций пересчитывается целиком, чтобы очистить ошибочный кэш.
 - Кэш амортизаций хранится между запусками и переиспользуется до 24 часов: в этот период повторные запросы делаются только для новых `SECID`.
 - В амортизациях одиночная запись с датой, совпадающей с `MATDATE`, и/или `VALUEPRC=100` считается финальным погашением без амортизации и в `Amortization_start_date` сохраняется пустое значение.
@@ -49,8 +52,11 @@
 - На каждом запуске считается дельта: сколько бумаг добавлено, обновлено, не изменилось и удалено.
 - В итоговый Excel/CSV пишутся только бумаги, прошедшие фильтрацию.
 
+## SQLite режим
+Если `storage_backend: sqlite`, состояние хранится в `state/screener_state.db` (или путь из `sqlite_db_path`). Дополнительно ведётся таблица `runs` с метриками запусков: время старта/окончания, длительность, число обработанных/отфильтрованных бумаг и ошибки.
+
 ## Безопасные дефолты
-По умолчанию `output_file=output/moex_bonds.xlsx`, `emitents_output_file=output/emitents.xlsx`, `raw_dump_enabled=false`, `exclusion_window_days=365`.
+По умолчанию `output_file=output/moex_bonds.xlsx`, `emitents_output_file=output/emitents.xlsx`, `raw_dump_enabled=false`, `exclusion_window_days=365`, `storage_backend=json`.
 
 ## Секреты
 Секреты храните в ENV-переменных или `secrets.yml` (не коммитится).

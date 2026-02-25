@@ -206,3 +206,31 @@ def test_build_emitents_reference_fills_stage_timers(monkeypatch, tmp_path):
         "emitents_market_shares_seconds",
     }
     assert all(value >= 0 for value in result.stage_durations.values())
+
+
+def test_build_emitents_reference_reuses_market_cache(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    eligible_bonds = [{"SECID": "BOND1", "EMITTER_ID": "111"}]
+    monkeypatch.setattr(
+        client,
+        "fetch_security_description",
+        lambda secid: ({"EMITTER_ID": "111", "EMITTER_FULL_NAME": "Первый", "EMITTER_INN": "7701111111"}, 0),
+    )
+
+    market_calls: list[str] = []
+
+    def fake_market(market: str):
+        market_calls.append(market)
+        return ([{"EMITTER_ID": "111", "ISIN": "RU000000011", "SECID": "S111"}], 0)
+
+    monkeypatch.setattr(client, "fetch_market_securities", fake_market)
+
+    first = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+    second = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+
+    assert first.processed_emitters == 1
+    assert second.processed_emitters == 1
+    assert market_calls == ["bonds", "shares"]

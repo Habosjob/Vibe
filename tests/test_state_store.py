@@ -60,3 +60,49 @@ def test_state_store_secid_to_emitter_roundtrip(tmp_path) -> None:
     store.save_secid_to_emitter_map({"BOND1": "111", "BOND2": "222"})
 
     assert store.load_secid_to_emitter_map() == {"BOND1": "111", "BOND2": "222"}
+
+
+def test_state_store_sqlite_roundtrip_all_core_entities(tmp_path) -> None:
+    store = ScreenerStateStore(str(tmp_path / "state"), storage_backend="sqlite")
+
+    store.save_exclusions({"SU1": {"rule": "mat_lt_1y", "exclude_until": "2026-10-10"}})
+    assert store.load_exclusions() == {"SU1": {"rule": "mat_lt_1y", "exclude_until": "2026-10-10"}}
+
+    store.update_eligible_bonds([{"SECID": "A", "MATDATE": "2030-01-01"}])
+    assert store.load_eligible_bonds() == [{"SECID": "A", "MATDATE": "2030-01-01"}]
+
+    store.save_checkpoint("bonds_fetch", {"next_start": 100})
+    assert store.load_checkpoint("bonds_fetch") == {"next_start": 100}
+
+    store.save_emitents_registry({"10": {"full_name": "Эмитент", "inn": "7701234567"}})
+    assert store.load_emitents_registry() == {"10": {"full_name": "Эмитент", "inn": "7701234567"}}
+
+    store.save_secid_to_emitter_map({"BOND1": "111"})
+    assert store.load_secid_to_emitter_map() == {"BOND1": "111"}
+
+
+def test_state_store_sqlite_saves_run_metrics(tmp_path) -> None:
+    store = ScreenerStateStore(str(tmp_path / "state"), storage_backend="sqlite")
+
+    store.save_run_metrics(
+        {
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T00:00:05+00:00",
+            "elapsed_seconds": 5.0,
+            "bonds_processed": 100,
+            "bonds_filtered": 30,
+            "errors_count": 1,
+            "backend": "sqlite",
+            "notes": {"new_emitters": 2},
+        }
+    )
+
+    import sqlite3
+
+    db = tmp_path / "state" / "screener_state.db"
+    with sqlite3.connect(db) as conn:
+        row = conn.execute(
+            "SELECT elapsed_seconds, bonds_processed, bonds_filtered, errors_count, backend FROM runs"
+        ).fetchone()
+
+    assert row == (5.0, 100, 30, 1, "sqlite")
