@@ -113,3 +113,20 @@ def test_print_emitents_progress_reports_emitter_profiles() -> None:
 
     assert progress.ticks == ["Загрузка карточек эмитентов по EMITTER_ID"]
     assert progress.fractions == [(8, 324, "обработано профилей эмитентов")]
+
+
+def test_print_emitents_progress_reports_market_descriptions() -> None:
+    progress = _DummyProgress()
+
+    _print_emitents_progress(
+        {
+            "phase": "market_descriptions",
+            "processed": 15,
+            "total": 120,
+            "message": "Запрашиваем description для market SECID без EMITTER_ID",
+        },
+        progress,
+    )
+
+    assert progress.ticks == ["Запрашиваем description для market SECID без EMITTER_ID"]
+    assert progress.fractions == [(15, 120, "обработано market-description карточек")]
