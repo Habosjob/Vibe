@@ -345,6 +345,50 @@ class MoexClient:
 
         return {}, 1
 
+    def fetch_emitter_details(self, emitter_id: str) -> tuple[dict[str, str], int]:
+        """Возвращает карточку эмитента по EMITTER_ID (TITLE, INN и др.)."""
+        safe_emitter_id = str(emitter_id).strip()
+        if not safe_emitter_id:
+            return {}, 0
+
+        url = f"https://iss.moex.com/iss/emitters/{safe_emitter_id}.json"
+        params = {"iss.meta": "off", "iss.only": "emitter"}
+
+        for attempt in range(1, self.config.retries + 1):
+            try:
+                response = self._get_with_rate_limit(
+                    url,
+                    params=params,
+                    timeout=self.config.timeout_seconds,
+                    delay_seconds=self.config.request_delay_seconds,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                emitter = payload.get("emitter") or {}
+                columns = emitter.get("columns") or []
+                rows = emitter.get("data") or []
+                if not columns or not rows:
+                    return {}, 0
+
+                first_row = rows[0]
+                parsed = {
+                    str(column).strip().upper(): "" if value is None else str(value).strip()
+                    for column, value in zip(columns, first_row, strict=False)
+                    if str(column).strip()
+                }
+
+                if self.raw_store and self.config.raw_dump_enabled:
+                    self.raw_store.dump_json(f"emitter_{safe_emitter_id}.json", response.text)
+
+                return parsed, 0
+            except requests.RequestException as error:
+                self.logger.warning("Ошибка запроса emitter emitter_id=%s попытка=%s: %s", safe_emitter_id, attempt, error)
+                if attempt == self.config.retries:
+                    return {}, 1
+                time.sleep(self.config.request_delay_seconds * attempt)
+
+        return {}, 1
+
     def fetch_market_securities(self, market: str) -> tuple[list[dict[str, Any]], int]:
         """Загружает инструменты по рынку MOEX (например, bonds/shares)."""
         url = f"https://iss.moex.com/iss/engines/stock/markets/{market}/securities.json"
