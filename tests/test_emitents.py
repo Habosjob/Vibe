@@ -329,3 +329,53 @@ def test_build_emitents_reference_keeps_old_emitters_when_no_new_bonds(monkeypat
             "Флаг качества": "ok",
         }
     ]
+
+
+def test_build_emitents_reference_uses_issuer_id_for_market_maps(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    eligible_bonds = [{"SECID": "BOND1", "ISSUER_ID": "111", "ISIN": "RU000A"}]
+
+    monkeypatch.setattr(client, "fetch_security_description", lambda secid: ({}, 0))
+    monkeypatch.setattr(client, "fetch_emitter_details", lambda emitter_id: ({"TITLE": "Эмитент", "INN": "7701111111"}, 0))
+
+    def fake_market(market: str):
+        if market == "shares":
+            return ([{"ISSUER_ID": "111", "SECID": "S111"}], 0)
+        return ([], 0)
+
+    monkeypatch.setattr(client, "fetch_market_securities", fake_market)
+
+    result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+
+    assert result.errors == 0
+    assert len(result.rows) == 1
+    assert result.rows[0]["Тикеры акций"] == "S111"
+    assert result.rows[0]["ISIN облигаций"] == "RU000A"
+
+
+def test_build_emitents_reference_skips_bonds_market_when_emitters_known(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    eligible_bonds = [{"SECID": "BOND1", "EMITTER_ID": "111", "ISIN": "RU000B"}]
+
+    monkeypatch.setattr(client, "fetch_security_description", lambda secid: ({}, 0))
+    monkeypatch.setattr(client, "fetch_emitter_details", lambda emitter_id: ({"TITLE": "Эмитент", "INN": "7701111111"}, 0))
+
+    market_calls: list[str] = []
+
+    def fake_market(market: str):
+        market_calls.append(market)
+        return ([{"EMITTER_ID": "111", "SECID": "S111", "ISIN": "RU000B"}], 0)
+
+    monkeypatch.setattr(client, "fetch_market_securities", fake_market)
+
+    result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+
+    assert result.errors == 0
+    assert market_calls == ["shares"]
+    assert result.rows[0]["ISIN облигаций"] == "RU000B"

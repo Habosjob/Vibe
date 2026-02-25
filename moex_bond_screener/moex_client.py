@@ -404,6 +404,7 @@ class MoexClient:
                 "iss.only": "securities",
                 "start": start,
                 "limit": self.config.page_size,
+                "securities.columns": "SECID,ISIN,EMITTER_ID,ISSUER_ID,REGNUMBER",
             }
             page, page_errors, failed = self._fetch_generic_securities_page(url=url, params=params)
             errors += page_errors
