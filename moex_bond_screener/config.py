@@ -18,7 +18,7 @@ class AppConfig:
     request_delay_seconds: float = 0.15
     retries: int = 3
     page_size: int = 100
-    output_file: str = "output/moex_bonds.csv"
+    output_file: str = "output/moex_bonds.xlsx"
     raw_dump_enabled: bool = False
     raw_ttl_hours: int = 24
     raw_max_size_mb: int = 50

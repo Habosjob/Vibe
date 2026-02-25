@@ -12,13 +12,13 @@
 - `request_delay_seconds` — задержка между запросами (rate-limit).
 - `retries` — количество повторов при ошибке.
 - `page_size` — размер страницы API.
-- `output_file` — путь к итоговому CSV.
+- `output_file` — путь к итоговому файлу (`.xlsx` по умолчанию, опционально `.csv`).
 - `raw_dump_enabled` — сохранять сырые JSON-ответы в `raw/`.
 - `raw_ttl_hours` — TTL для raw-файлов.
 - `raw_max_size_mb` — ограничение размера `raw/`.
 
 ## Безопасные дефолты
-По умолчанию `raw_dump_enabled=false`, чтобы не захламлять диск.
+По умолчанию `output_file=output/moex_bonds.xlsx` и `raw_dump_enabled=false`, чтобы результат корректно открывался в Excel и диск не захламлялся raw-дампами.
 
 ## Секреты
 Секреты храните в ENV-переменных или `secrets.yml` (не коммитится).

@@ -3,7 +3,7 @@
 ## `run.py`
 - Назначение: запуск полного сценария без аргументов.
 - Вход: `config.yml` (опционально), сеть.
-- Выход: `output/moex_bonds.csv`, `logs/latest.log`, опционально `raw/*.json`.
+- Выход: `output/moex_bonds.xlsx`, `logs/latest.log`, опционально `raw/*.json`.
 - Как менять конфиг: правьте `config.yml` (см. `docs/CONFIG.md`).
 
 ## `moex_bond_screener/config.py`
@@ -22,9 +22,9 @@
 - Выход: файлы `raw/*.json`.
 
 ## `moex_bond_screener/writer.py`
-- Назначение: запись итогового CSV.
+- Назначение: запись итогового Excel (`.xlsx`) или CSV (`.csv`).
 - Вход: список словарей с облигациями.
-- Выход: CSV-файл.
+- Выход: Excel/CSV-файл.
 
 ## `moex_bond_screener/logging_utils.py`
 - Назначение: настраивает логирование в файл и консоль.
