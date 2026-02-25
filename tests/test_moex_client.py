@@ -186,6 +186,7 @@ def test_enrich_amortization_start_dates_sets_empty_if_no_data(monkeypatch):
         return DummyResponse({"amortizations": {"columns": ["amortdate"], "data": []}})
 
     monkeypatch.setattr(client.session, "get", fake_get)
+    monkeypatch.setattr(client, "_get_thread_session", lambda: client.session)
     bonds = [{"SECID": "SU26218RMFS6", "SHORTNAME": "ОФЗ 26218"}]
 
     errors = client.enrich_amortization_start_dates(bonds)
