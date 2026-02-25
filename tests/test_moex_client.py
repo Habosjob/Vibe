@@ -417,6 +417,30 @@ def test_enrich_amortization_checkpoint_contains_updated_at(monkeypatch):
 
     assert errors == 0
     assert isinstance(saved_payloads[-1].get("updated_at"), str)
+    assert saved_payloads[-1]["cache_stats"]["hits"] == 0
+    assert saved_payloads[-1]["cache_stats"]["misses"] == 1
+
+
+def test_enrich_amortization_checkpoint_tracks_cache_hits(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0, amortization_request_delay_seconds=0, amortization_workers=1)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    def should_not_fetch(*args, **kwargs):
+        raise AssertionError("Не должен идти запрос по cache hit")
+
+    monkeypatch.setattr(client, "_fetch_amortization_start_date", should_not_fetch)
+
+    saved_payloads: list[dict] = []
+    bonds = [{"SECID": "A"}]
+    errors = client.enrich_amortization_start_dates(
+        bonds,
+        checkpoint_data={"processed": {"A": "2025-01-01"}},
+        checkpoint_saver=lambda payload: saved_payloads.append(payload),
+    )
+
+    assert errors == 0
+    assert saved_payloads[-1]["cache_stats"]["hits"] == 1
+    assert saved_payloads[-1]["cache_stats"]["misses"] == 0
 
 
 def test_fetch_market_securities_stops_when_pagination_repeats_data(monkeypatch):

@@ -39,9 +39,11 @@
 
 ## Чекпоинты
 - `state/checkpoints/bonds_fetch.json` — последняя успешная позиция пагинации MOEX и уже загруженные бумаги.
-- `state/checkpoints/amortization.json` — кэш уже обогащенных `SECID` по полю `Amortization_start_date` (версионируется полем `version` и меткой времени `updated_at`).
+- `state/checkpoints/amortization.json` — кэш уже обогащенных `SECID` по полю `Amortization_start_date` (версионируется полем `version` и меткой времени `updated_at`), включая `cache_stats` (`hits`/`misses`) со сбросом по UTC-дню.
 - `state/emitents_registry.json` — статичный справочник эмитентов (`full_name`, `inn`), обновляется только для новых `EMITTER_ID`.
 - `state/secid_to_emitter.json` — кэш сопоставления `SECID -> EMITTER_ID` для бумаг без идентификатора эмитента в `eligible_bonds`; ускоряет повторные запуски этапа эмитентов.
+- `state/exclusions_history.json` — история исключений: дата первого исключения и последняя причина по каждому `SECID`.
+- `state/checkpoints/amortization_rebuild.lock` — lock-файл безопасного режима: при наличии `run.py` выполняет только полный пересбор кэша амортизаций и удаляет lock после завершения.
 - `state/checkpoints/market_cache_bonds.json` и `state/checkpoints/market_cache_shares.json` — кэш рыночных инструментов для этапа эмитентов (TTL 24 часа).
 - Если найден старый формат чекпоинта (без `version`), он автоматически сбрасывается и этап амортизаций пересчитывается целиком, чтобы очистить ошибочный кэш.
 - Кэш амортизаций хранится между запусками и переиспользуется до 24 часов: в этот период повторные запросы делаются только для новых `SECID`.

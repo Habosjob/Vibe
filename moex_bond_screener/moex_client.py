@@ -17,7 +17,7 @@ from .raw_store import RawStore
 ProgressCallback = Callable[[dict[str, Any]], None]
 CheckpointSaver = Callable[[dict[str, Any]], None]
 
-AMORTIZATION_CHECKPOINT_VERSION = 3
+AMORTIZATION_CHECKPOINT_VERSION = 4
 
 
 class MoexClient:
@@ -141,6 +141,15 @@ class MoexClient:
 
         errors = 0
         processed: dict[str, str] = dict(checkpoint_data.get("processed", {})) if checkpoint_data else {}
+        cache_stats_raw = checkpoint_data.get("cache_stats", {}) if checkpoint_data else {}
+        today_key = datetime.now(timezone.utc).date().isoformat()
+        if isinstance(cache_stats_raw, dict) and str(cache_stats_raw.get("date") or "") == today_key:
+            cache_hits = int(cache_stats_raw.get("hits") or 0)
+            cache_misses = int(cache_stats_raw.get("misses") or 0)
+        else:
+            cache_hits = 0
+            cache_misses = 0
+
         total = len(bonds)
         secid_to_indices: dict[str, list[int]] = {}
 
@@ -162,6 +171,7 @@ class MoexClient:
                 value = str(processed.get(secid) or "")
                 for idx in indices:
                     bonds[idx]["Amortization_start_date"] = value
+                cache_hits += 1
                 progress_processed += len(indices)
                 if progress_callback:
                     progress_callback(
@@ -192,6 +202,7 @@ class MoexClient:
                 }
                 for future in as_completed(futures):
                     secid = futures[future]
+                    cache_misses += 1
                     try:
                         date_value, request_errors = future.result()
                     except Exception as error:  # noqa: BLE001
@@ -210,6 +221,11 @@ class MoexClient:
                             {
                                 "version": AMORTIZATION_CHECKPOINT_VERSION,
                                 "processed": processed,
+                                "cache_stats": {
+                                    "date": today_key,
+                                    "hits": cache_hits,
+                                    "misses": cache_misses,
+                                },
                                 "completed": False,
                                 "updated_at": datetime.now(timezone.utc).isoformat(),
                             }
@@ -231,6 +247,11 @@ class MoexClient:
                 {
                     "version": AMORTIZATION_CHECKPOINT_VERSION,
                     "processed": processed,
+                    "cache_stats": {
+                        "date": today_key,
+                        "hits": cache_hits,
+                        "misses": cache_misses,
+                    },
                     "completed": True,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }

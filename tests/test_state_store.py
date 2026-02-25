@@ -106,3 +106,38 @@ def test_state_store_sqlite_saves_run_metrics(tmp_path) -> None:
         ).fetchone()
 
     assert row == (5.0, 100, 30, 1, "sqlite")
+
+
+def test_state_store_updates_exclusions_history(tmp_path) -> None:
+    store = ScreenerStateStore(str(tmp_path / "state"), storage_backend="json")
+
+    history = store.update_exclusions_history(
+        {
+            "SU1": {"rule": "mat_lt_1y", "exclude_until": "2026-10-10"},
+            "SU2": {"rule": "offer_lt_1y", "exclude_until": "2026-12-12"},
+        }
+    )
+
+    assert history["SU1"]["first_excluded_at"]
+    assert history["SU1"]["last_rule"] == "mat_lt_1y"
+    assert history["SU2"]["last_exclude_until"] == "2026-12-12"
+
+
+def test_state_store_load_runs_returns_notes_json(tmp_path) -> None:
+    store = ScreenerStateStore(str(tmp_path / "state"), storage_backend="sqlite")
+    store.save_run_metrics(
+        {
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T00:00:05+00:00",
+            "elapsed_seconds": 5.0,
+            "bonds_processed": 10,
+            "bonds_filtered": 2,
+            "errors_count": 0,
+            "backend": "sqlite",
+            "notes": {"mode": "full"},
+        }
+    )
+
+    rows = store.load_runs(limit=1)
+    assert len(rows) == 1
+    assert rows[0]["notes"] == {"mode": "full"}
