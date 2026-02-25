@@ -79,11 +79,15 @@ class DohodEnricher:
         fresh_cache = self._is_checkpoint_fresh(checkpoint)
 
         identifier_to_bonds: dict[str, list[dict[str, Any]]] = {}
+        secondary_identifiers: dict[str, str] = {}
         for bond in bonds:
-            identifier = self._resolve_bond_identifier(bond)
-            if not identifier:
+            primary_identifier = self._resolve_bond_identifier(bond)
+            if not primary_identifier:
                 continue
-            identifier_to_bonds.setdefault(identifier, []).append(bond)
+            secondary_identifier = self._resolve_secondary_identifier(bond, primary_identifier)
+            if secondary_identifier:
+                secondary_identifiers.setdefault(primary_identifier, secondary_identifier)
+            identifier_to_bonds.setdefault(primary_identifier, []).append(bond)
 
         pending: list[str] = []
         for identifier in identifier_to_bonds:
@@ -105,7 +109,10 @@ class DohodEnricher:
 
         workers = max(1, int(getattr(self.config, "dohod_workers", 8)))
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self._fetch_and_parse, identifier): identifier for identifier in pending}
+            futures = {
+                executor.submit(self._fetch_with_fallback, identifier, secondary_identifiers.get(identifier)): identifier
+                for identifier in pending
+            }
             for future in as_completed(futures):
                 identifier = futures[future]
                 try:
@@ -178,6 +185,20 @@ class DohodEnricher:
                 time.sleep(float(getattr(self.config, "dohod_request_delay_seconds", 0.05)) * attempt)
 
         return DohodBondPayload(None, "", 0.0, None, "", ""), 1
+
+    def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None) -> tuple[DohodBondPayload, int]:
+        payload, errors = self._fetch_and_parse(primary_identifier)
+        if secondary_identifier and (errors > 0 or _is_payload_empty(payload)):
+            fallback_payload, fallback_errors = self._fetch_and_parse(secondary_identifier)
+            if fallback_errors == 0 and not _is_payload_empty(fallback_payload):
+                self.logger.info(
+                    "ДОХОД: использован fallback identifier %s -> %s",
+                    primary_identifier,
+                    secondary_identifier,
+                )
+                return fallback_payload, 0
+            errors += fallback_errors
+        return payload, errors
 
     @staticmethod
     def _resolve_bond_identifier(bond: dict[str, Any]) -> str:
