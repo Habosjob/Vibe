@@ -50,6 +50,7 @@ class DohodEnrichmentStats:
     coupon_updated: int = 0
     offer_added: int = 0
     offer_updated: int = 0
+    parse_empty_payloads: int = 0
 
 
 class DohodEnricher:
@@ -120,6 +121,11 @@ class DohodEnricher:
                 except Exception as exc:  # noqa: BLE001
                     self.logger.exception("Ошибка обработки ДОХОД instrument=%s: %s", identifier, exc)
                     payload, request_errors = DohodBondPayload(None, "", 0.0, None, "", ""), 1
+
+                if request_errors == 0 and _is_payload_empty(payload):
+                    self.last_stats.parse_empty_payloads += 1
+                    request_errors = 1
+                    self.logger.warning("Пустой payload ДОХОД instrument=%s: карточка получена, но данные не извлечены", identifier)
 
                 errors += request_errors
                 if request_errors == 0:
@@ -386,6 +392,45 @@ def _extract_label_map(html: str) -> dict[str, str]:
         if not match:
             continue
         result[label] = _strip_html(match.group(1))
+
+    if len(result) < len(labels):
+        loose = _extract_label_map_loose(html)
+        for label, value in loose.items():
+            result.setdefault(label, value)
+
+    return result
+
+
+def _extract_label_map_loose(html: str) -> dict[str, str]:
+    text = _strip_html(html)
+    result: dict[str, str] = {}
+
+    price_match = re.search(
+        r"цена[^\n]{0,60}?last[^\n]{0,20}?bid[^\n]{0,20}?ask[^\n]{0,80}?((?:[+-]?\d+(?:[.,]\d+)?)(?:\s*/\s*[+-]?\d+(?:[.,]\d+)?){0,2})",
+        text,
+        re.IGNORECASE,
+    )
+    if price_match:
+        result["Цена (last/bid/ask)"] = price_match.group(1)
+
+    index_match = re.search(
+        r"привязк[аи]\s+к\s+индекс[ау][^A-Z]{0,20}(RUONIA|CBR_RATE|Z_CURVE_RUS[^\s,;]*)",
+        text,
+        re.IGNORECASE,
+    )
+    if index_match:
+        tail = text[index_match.start() : index_match.start() + 80]
+        tail_match = re.search(r"(RUONIA|CBR_RATE|Z_CURVE_RUS)\s*([+-]\s*\d+(?:[.,]\d+)?)?", tail, re.IGNORECASE)
+        if tail_match:
+            result["Привязка к индексу"] = "".join(part for part in tail_match.groups() if part)
+
+    event_match = re.search(r"событие\s+в\s+ближ[^\n]{0,80}", text, re.IGNORECASE)
+    if event_match:
+        result["Событие в ближ. дату"] = event_match.group(0)
+
+    date_match = re.search(r"дата[^\n]{0,40}ytm[^\n]{0,20}(\d{2}\.\d{2}\.\d{4})", text, re.IGNORECASE)
+    if date_match:
+        result["Дата, к которой рассчит. YTM"] = date_match.group(1)
 
     return result
 

@@ -270,3 +270,22 @@ def test_compat_methods_for_mixed_versions_do_not_fail() -> None:
     assert errors == 0
     assert payload.ask_price == 100.0
     assert enricher._resolve_secondary_identifier({"ISIN": "RU1", "SECID": "SU1"}, "RU1") == ""
+
+
+
+def test_enrich_bonds_counts_empty_parsed_payload_as_error() -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    def fake_fetch(identifier: str):
+        assert identifier == "RU000A0ZZTL5"
+        return DohodBondPayload(None, "", 0.0, None, "", ""), 0
+
+    enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
+
+    bonds = [{"ISIN": "RU000A0ZZTL5", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2030-01-01"}]
+    errors = enricher.enrich_bonds(bonds)
+
+    assert errors == 1
+    assert enricher.last_stats.parse_empty_payloads == 1
+    assert "RealPrice" not in bonds[0]

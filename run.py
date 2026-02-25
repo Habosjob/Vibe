@@ -177,6 +177,7 @@ def main() -> None:
         "dohod_offer_updated": dohod_stats.offer_updated,
         "dohod_cache_hits": dohod_stats.cache_hits,
         "dohod_requested": dohod_stats.requested,
+        "dohod_parse_empty_payloads": dohod_stats.parse_empty_payloads,
     }
     summary.update(emitents_result.stage_durations)
     save_bonds_file(config.output_file, eligible_bonds, summary=summary)
@@ -205,6 +206,7 @@ def main() -> None:
         f"COUPONPERCENT +{dohod_stats.coupon_added}/~{dohod_stats.coupon_updated}, "
         f"OFFERDATE +{dohod_stats.offer_added}/~{dohod_stats.offer_updated}"
     )
+    print(f"ДОХОД: пустых payload после парсинга: {dohod_stats.parse_empty_payloads}")
     print(
         "Инкрементальные изменения: "
         f"+{incremental_stats.inserted} / ~{incremental_stats.updated} / = {incremental_stats.unchanged} / -{incremental_stats.removed}"
@@ -245,6 +247,7 @@ def main() -> None:
                 "dohod_offer_updated": dohod_stats.offer_updated,
                 "dohod_cache_hits": dohod_stats.cache_hits,
                 "dohod_requested": dohod_stats.requested,
+                "dohod_parse_empty_payloads": dohod_stats.parse_empty_payloads,
             },
         }
     )
