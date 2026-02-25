@@ -61,34 +61,34 @@ class DohodEnricher:
         index_changed = self._has_index_changed(index_values, checkpoint.get("index_values", {}))
         fresh_cache = self._is_checkpoint_fresh(checkpoint)
 
-        secid_to_bonds: dict[str, list[dict[str, Any]]] = {}
+        identifier_to_bonds: dict[str, list[dict[str, Any]]] = {}
         for bond in bonds:
-            secid = str(bond.get("SECID") or "").strip()
-            if not secid:
+            identifier = self._resolve_bond_identifier(bond)
+            if not identifier:
                 continue
-            secid_to_bonds.setdefault(secid, []).append(bond)
+            identifier_to_bonds.setdefault(identifier, []).append(bond)
 
         pending: list[str] = []
-        for secid in secid_to_bonds:
-            if fresh_cache and not index_changed and secid in processed:
-                self._apply_cached(secid_to_bonds[secid], processed[secid], index_values)
+        for identifier in identifier_to_bonds:
+            if fresh_cache and not index_changed and identifier in processed:
+                self._apply_cached(identifier_to_bonds[identifier], processed[identifier], index_values)
                 continue
-            pending.append(secid)
+            pending.append(identifier)
 
         errors = 0
-        processed_count = len(secid_to_bonds) - len(pending)
+        processed_count = len(identifier_to_bonds) - len(pending)
         if progress_callback:
-            progress_callback({"processed": processed_count, "total": len(secid_to_bonds), "message": "Кэш ДОХОД применен"})
+            progress_callback({"processed": processed_count, "total": len(identifier_to_bonds), "message": "Кэш ДОХОД применен"})
 
         workers = max(1, int(getattr(self.config, "dohod_workers", 8)))
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self._fetch_and_parse, secid): secid for secid in pending}
+            futures = {executor.submit(self._fetch_and_parse, identifier): identifier for identifier in pending}
             for future in as_completed(futures):
-                secid = futures[future]
+                identifier = futures[future]
                 try:
                     payload, request_errors = future.result()
                 except Exception as exc:  # noqa: BLE001
-                    self.logger.exception("Ошибка обработки ДОХОД secid=%s: %s", secid, exc)
+                    self.logger.exception("Ошибка обработки ДОХОД instrument=%s: %s", identifier, exc)
                     payload, request_errors = DohodBondPayload(None, "", 0.0, None, "", ""), 1
 
                 errors += request_errors
@@ -101,8 +101,8 @@ class DohodEnricher:
                         "event_name": payload.event_name,
                         "ytm_date": payload.ytm_date,
                     }
-                    processed[secid] = serialized
-                    self._apply_cached(secid_to_bonds[secid], serialized, index_values)
+                    processed[identifier] = serialized
+                    self._apply_cached(identifier_to_bonds[identifier], serialized, index_values)
 
                 processed_count += 1
                 if checkpoint_saver:
@@ -116,7 +116,7 @@ class DohodEnricher:
                         }
                     )
                 if progress_callback:
-                    progress_callback({"processed": processed_count, "total": len(secid_to_bonds)})
+                    progress_callback({"processed": processed_count, "total": len(identifier_to_bonds)})
 
         if checkpoint_saver:
             checkpoint_saver(
@@ -145,12 +145,19 @@ class DohodEnricher:
                     self.raw_store.dump_html(f"dohod_{secid}.html", html)
                 return self.parse_bond_payload(html), 0
             except requests.RequestException as error:
-                self.logger.warning("Ошибка запроса ДОХОД secid=%s попытка=%s: %s", secid, attempt, error)
+                self.logger.warning("Ошибка запроса ДОХОД instrument=%s попытка=%s: %s", secid, attempt, error)
                 if attempt == self.config.retries:
                     return DohodBondPayload(None, "", 0.0, None, "", ""), 1
                 time.sleep(float(getattr(self.config, "dohod_request_delay_seconds", 0.05)) * attempt)
 
         return DohodBondPayload(None, "", 0.0, None, "", ""), 1
+
+    @staticmethod
+    def _resolve_bond_identifier(bond: dict[str, Any]) -> str:
+        isin = str(bond.get("ISIN") or "").strip()
+        if isin:
+            return isin
+        return str(bond.get("SECID") or "").strip()
 
     @staticmethod
     def parse_bond_payload(html: str) -> DohodBondPayload:
