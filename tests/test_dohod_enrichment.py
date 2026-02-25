@@ -8,6 +8,7 @@ from moex_bond_screener.dohod_enrichment import (
     DOHOD_CHECKPOINT_VERSION,
     DohodBondPayload,
     DohodEnricher,
+    _is_payload_empty,
     _should_enrich_coupon,
     _should_enrich_offer,
 )
@@ -245,3 +246,9 @@ def test_should_enrich_offer_without_event_name_if_not_maturity() -> None:
     assert _should_enrich_offer("", "2028-01-01", "2030-01-01", "") is True
     assert _should_enrich_offer("", "2030-01-01", "2030-01-01", "") is False
     assert _should_enrich_offer("", "2028-01-01", "2030-01-01", "погашение") is False
+
+
+
+def test_is_payload_empty_helper_for_backward_compatibility() -> None:
+    assert _is_payload_empty(DohodBondPayload(None, "", 0.0, None, "", "")) is True
+    assert _is_payload_empty(DohodBondPayload(99.9, "", 0.0, None, "", "")) is False

@@ -201,15 +201,6 @@ class DohodEnricher:
         return str(bond.get("ISIN") or "").strip()
 
     @staticmethod
-    def _resolve_secondary_identifier(bond: dict[str, Any], primary_identifier: str) -> str:
-        isin = str(bond.get("ISIN") or "").strip()
-        secid = str(bond.get("SECID") or "").strip()
-        for candidate in (isin, secid):
-            if candidate and candidate != primary_identifier:
-                return candidate
-        return ""
-
-    @staticmethod
     def parse_bond_payload(html: str) -> DohodBondPayload:
         extracted = _extract_label_map(html)
         price_value = extracted.get("Цена (last/bid/ask)", "")
@@ -465,6 +456,16 @@ def _to_iso_date(raw: str) -> str:
     except ValueError:
         return ""
 
+
+
+def _is_payload_empty(payload: DohodBondPayload) -> bool:
+    """Совместимость: проверка пустого payload для старого fallback-кода."""
+    return (
+        payload.ask_price is None
+        and not payload.index_name
+        and not payload.event_name
+        and not payload.ytm_date
+    )
 
 
 def _as_float_or_none(value: Any) -> float | None:
