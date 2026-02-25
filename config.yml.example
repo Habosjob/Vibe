@@ -15,6 +15,8 @@ exclusion_window_days: 365
 amortization_workers: 8
 dohod_workers: 12
 dohod_request_delay_seconds: 0.03
+cbr_key_rate_url: "https://www.cbr-xml-daily.ru/key_rate/"
+cbr_key_rate_timeout_seconds: 10
 # dohod_index_values:
 #   RUONIA: 15.12
 #   CBR_RATE: 16.0

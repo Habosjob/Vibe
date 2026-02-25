@@ -30,6 +30,8 @@ class AppConfig:
     dohod_workers: int = 12
     dohod_request_delay_seconds: float = 0.03
     dohod_index_values: dict[str, float] | None = None
+    cbr_key_rate_url: str = "https://www.cbr-xml-daily.ru/key_rate/"
+    cbr_key_rate_timeout_seconds: int = 10
     storage_backend: str = "sqlite"
     sqlite_db_path: str = "screener_state.db"
 
