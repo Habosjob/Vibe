@@ -87,6 +87,29 @@ def test_fetch_security_description_parses_name_value(monkeypatch):
     assert payload == {"EMITTER_ID": "123", "EMITTER_INN": "7703000000"}
 
 
+def test_fetch_security_description_parses_uppercase_columns(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    monkeypatch.setattr(
+        client.session,
+        "get",
+        lambda *args, **kwargs: DummyResponse(
+            {
+                "description": {
+                    "columns": ["NAME", "TITLE", "VALUE"],
+                    "data": [["EMITTER_FULL_NAME", "", "Тестовый эмитент"], ["EMITTER_INN", "", "7703555555"]],
+                }
+            }
+        ),
+    )
+
+    payload, errors = client.fetch_security_description("SEC")
+
+    assert errors == 0
+    assert payload == {"EMITTER_FULL_NAME": "Тестовый эмитент", "EMITTER_INN": "7703555555"}
+
+
 def test_build_emitents_reference_recovers_when_eligible_missing_emitter_id(monkeypatch, tmp_path):
     config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
     client = MoexClient(config=config, logger=logging.getLogger("test"))
