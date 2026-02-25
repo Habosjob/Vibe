@@ -468,3 +468,35 @@ def save_bonds_file(path: str, bonds: list[dict[str, Any]], summary: dict[str, A
         return
 
     raise ValueError("Поддерживаются только форматы .xlsx и .csv")
+
+
+def save_emitents_excel(path: str, emitents: list[dict[str, str]]) -> None:
+    """Сохраняет справочник эмитентов в отдельный Excel-файл."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "EMITENTS"
+
+    fields = ["Полное наименование", "ИНН", "Тикеры акций", "ISIN облигаций"]
+    sheet.append(fields)
+    for row in emitents:
+        sheet.append([row.get(field, "") for field in fields])
+
+    for cell in sheet[1]:
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for col_idx in range(1, len(fields) + 1):
+        column_letter = get_column_letter(col_idx)
+        max_len = max(
+            (len(str(sheet.cell(row=row_idx, column=col_idx).value or "")) for row_idx in range(1, sheet.max_row + 1)),
+            default=0,
+        )
+        sheet.column_dimensions[column_letter].width = min(max(max_len + 2, 16), 60)
+
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(fields))}{sheet.max_row}"
+    workbook.save(target)

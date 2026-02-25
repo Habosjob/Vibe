@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 
-from moex_bond_screener.writer import save_bonds_file
+from moex_bond_screener.writer import save_bonds_file, save_emitents_excel
 
 
 @pytest.fixture
@@ -207,6 +207,26 @@ def test_save_bonds_excel_formats_numeric_columns_and_empty_zero_dates(tmp_path:
     assert sheet.cell(row=3, column=accruedint_column).number_format == "#,##0"
     assert sheet.cell(row=3, column=nextcoupon_column).value == datetime(2027, 1, 1)
     assert sheet.cell(row=3, column=nextcoupon_column).number_format == "DD.MM.YYYY"
+
+
+def test_save_emitents_excel(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "emitents.xlsx"
+    rows = [
+        {
+            "Полное наименование": "ПАО Тест",
+            "ИНН": "7701000000",
+            "Тикеры акций": "TST",
+            "ISIN облигаций": "RU000000001",
+        }
+    ]
+
+    save_emitents_excel(str(target), rows)
+
+    workbook = load_workbook(target)
+    sheet = workbook["EMITENTS"]
+    assert sheet["A1"].value == "Полное наименование"
+    assert sheet["B2"].value == "7701000000"
+    assert sheet.freeze_panes == "A2"
 
 
 def test_save_bonds_excel_converts_large_numeric_strings_with_any_thousands_groups(tmp_path: Path) -> None:

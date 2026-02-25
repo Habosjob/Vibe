@@ -272,6 +272,110 @@ class MoexClient:
 
         return [], 1, True
 
+    def fetch_security_description(self, secid: str) -> tuple[dict[str, str], int]:
+        """Возвращает словарь NAME->VALUE из блока description для инструмента."""
+        url = f"https://iss.moex.com/iss/securities/{secid}.json"
+        params = {"iss.meta": "off", "iss.only": "description"}
+
+        for attempt in range(1, self.config.retries + 1):
+            try:
+                response = self._get_with_rate_limit(
+                    url,
+                    params=params,
+                    timeout=self.config.timeout_seconds,
+                    delay_seconds=self.config.request_delay_seconds,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                description = payload.get("description") or {}
+                columns = description.get("columns") or []
+                rows = description.get("data") or []
+                if not columns or not rows:
+                    return {}, 0
+
+                name_idx = columns.index("name") if "name" in columns else None
+                value_idx = columns.index("value") if "value" in columns else None
+                if name_idx is None or value_idx is None:
+                    return {}, 0
+
+                parsed: dict[str, str] = {}
+                for row in rows:
+                    if len(row) <= max(name_idx, value_idx):
+                        continue
+                    raw_name = row[name_idx]
+                    raw_value = row[value_idx]
+                    if raw_name is None:
+                        continue
+                    key = str(raw_name).strip().upper()
+                    if not key:
+                        continue
+                    parsed[key] = "" if raw_value is None else str(raw_value).strip()
+
+                if self.raw_store and self.config.raw_dump_enabled:
+                    self.raw_store.dump_json(f"security_description_{secid}.json", response.text)
+
+                return parsed, 0
+            except requests.RequestException as error:
+                self.logger.warning("Ошибка запроса description secid=%s попытка=%s: %s", secid, attempt, error)
+                if attempt == self.config.retries:
+                    return {}, 1
+                time.sleep(self.config.request_delay_seconds * attempt)
+
+        return {}, 1
+
+    def fetch_market_securities(self, market: str) -> tuple[list[dict[str, Any]], int]:
+        """Загружает инструменты по рынку MOEX (например, bonds/shares)."""
+        url = f"https://iss.moex.com/iss/engines/stock/markets/{market}/securities.json"
+        start = 0
+        errors = 0
+        items: list[dict[str, Any]] = []
+
+        while True:
+            params = {
+                "iss.meta": "off",
+                "iss.only": "securities",
+                "start": start,
+                "limit": self.config.page_size,
+            }
+            page, page_errors, failed = self._fetch_generic_securities_page(url=url, params=params)
+            errors += page_errors
+            if failed or not page:
+                break
+
+            items.extend(page)
+
+            if start == 0 and len(page) > self.config.page_size:
+                break
+            if len(page) < self.config.page_size:
+                break
+
+            start += self.config.page_size
+
+        return items, errors
+
+    def _fetch_generic_securities_page(self, url: str, params: dict[str, Any]) -> tuple[list[dict[str, Any]], int, bool]:
+        for attempt in range(1, self.config.retries + 1):
+            try:
+                response = self._get_with_rate_limit(
+                    url,
+                    params=params,
+                    timeout=self.config.timeout_seconds,
+                    delay_seconds=self.config.request_delay_seconds,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                columns = payload.get("securities", {}).get("columns") or []
+                rows = payload.get("securities", {}).get("data") or []
+                parsed = [dict(zip(columns, row, strict=False)) for row in rows]
+                return parsed, 0, False
+            except requests.RequestException as error:
+                self.logger.warning("Ошибка запроса %s попытка=%s: %s", url, attempt, error)
+                if attempt == self.config.retries:
+                    return [], 1, True
+                time.sleep(self.config.request_delay_seconds * attempt)
+
+        return [], 1, True
+
     def _fetch_amortization_start_date(self, secid: str, matdate: str = "") -> tuple[str, int]:
         url = f"https://iss.moex.com/iss/securities/{secid}/bondization.json"
         params = {"iss.meta": "off", "iss.only": "amortizations"}

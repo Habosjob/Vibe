@@ -14,6 +14,7 @@
 - `retries` — количество повторов при ошибке.
 - `page_size` — размер страницы API.
 - `output_file` — путь к итоговому файлу (`.xlsx` по умолчанию, опционально `.csv`).
+- `emitents_output_file` — путь к отдельному Excel-справочнику эмитентов (`output/emitents.xlsx` по умолчанию).
 - `raw_dump_enabled` — сохранять сырые JSON-ответы в `raw/`.
 - `raw_ttl_hours` — TTL для raw-файлов.
 - `raw_max_size_mb` — ограничение размера `raw/`.
@@ -37,6 +38,7 @@
 ## Чекпоинты
 - `state/checkpoints/bonds_fetch.json` — последняя успешная позиция пагинации MOEX и уже загруженные бумаги.
 - `state/checkpoints/amortization.json` — кэш уже обогащенных `SECID` по полю `Amortization_start_date` (версионируется полем `version` и меткой времени `updated_at`).
+- `state/emitents_registry.json` — статичный справочник эмитентов (`full_name`, `inn`), обновляется только для новых `EMITTER_ID`.
 - Если найден старый формат чекпоинта (без `version`), он автоматически сбрасывается и этап амортизаций пересчитывается целиком, чтобы очистить ошибочный кэш.
 - Кэш амортизаций хранится между запусками и переиспользуется до 24 часов: в этот период повторные запросы делаются только для новых `SECID`.
 - В амортизациях одиночная запись с датой, совпадающей с `MATDATE`, и/или `VALUEPRC=100` считается финальным погашением без амортизации и в `Amortization_start_date` сохраняется пустое значение.
@@ -47,7 +49,7 @@
 - В итоговый Excel/CSV пишутся только бумаги, прошедшие фильтрацию.
 
 ## Безопасные дефолты
-По умолчанию `output_file=output/moex_bonds.xlsx`, `raw_dump_enabled=false`, `exclusion_window_days=365`.
+По умолчанию `output_file=output/moex_bonds.xlsx`, `emitents_output_file=output/emitents.xlsx`, `raw_dump_enabled=false`, `exclusion_window_days=365`.
 
 ## Секреты
 Секреты храните в ENV-переменных или `secrets.yml` (не коммитится).
