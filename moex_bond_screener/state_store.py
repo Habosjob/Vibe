@@ -19,12 +19,12 @@ class IncrementalStats:
 
 
 class ScreenerStateStore:
-    def __init__(self, base_dir: str = "state", storage_backend: str = "json", sqlite_db_path: str = "screener_state.db") -> None:
+    def __init__(self, base_dir: str = "state", storage_backend: str = "sqlite", sqlite_db_path: str = "screener_state.db") -> None:
         self.base_path = Path(base_dir)
         self.base_path.mkdir(parents=True, exist_ok=True)
-        self.storage_backend = (storage_backend or "json").strip().lower()
+        self.storage_backend = (storage_backend or "sqlite").strip().lower()
         if self.storage_backend not in {"json", "sqlite"}:
-            self.storage_backend = "json"
+            self.storage_backend = "sqlite"
 
         self.exclusions_path = self.base_path / "exclusions.json"
         self.eligible_bonds_path = self.base_path / "eligible_bonds.json"

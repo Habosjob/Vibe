@@ -14,5 +14,5 @@ exclusions_state_dir: "state"
 exclusion_window_days: 365
 amortization_workers: 8
 
-storage_backend: "json"
+storage_backend: "sqlite"
 sqlite_db_path: "screener_state.db"

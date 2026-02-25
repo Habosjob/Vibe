@@ -234,3 +234,29 @@ def test_build_emitents_reference_reuses_market_cache(monkeypatch, tmp_path):
     assert first.processed_emitters == 1
     assert second.processed_emitters == 1
     assert market_calls == ["bonds", "shares"]
+
+
+def test_build_emitents_reference_marks_quality_and_infers_emitters_from_market(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    eligible_bonds = [{"SECID": "BONDX", "ISIN": "RU0000000XX"}]
+
+    monkeypatch.setattr(client, "fetch_security_description", lambda secid: ({}, 1))
+
+    def fake_market(market: str):
+        if market == "bonds":
+            return ([{"EMITTER_ID": "991", "ISIN": "RU0000000XX", "SECID": "BONDX"}], 0)
+        return ([{"EMITTER_ID": "991", "SECID": "S991"}], 0)
+
+    monkeypatch.setattr(client, "fetch_market_securities", fake_market)
+
+    result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+
+    assert result.processed_emitters == 1
+    assert len(result.rows) == 1
+    row = result.rows[0]
+    assert row["missing_full_name"] == "1"
+    assert row["missing_inn"] == "1"
+    assert row["Флаг качества"] == "warning"

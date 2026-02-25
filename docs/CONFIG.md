@@ -21,7 +21,7 @@
 - `exclusions_state_dir` — папка состояния сортировщика и инкрементального кэша (`state/` по умолчанию).
 - `exclusion_window_days` — окно исключения по датам (по умолчанию `365`, т.е. < 1 года до события).
 - `amortization_workers` — число параллельных воркеров для загрузки амортизаций (`bondization`), по умолчанию `8`.
-- `storage_backend` — бэкенд хранения состояния: `json` (по умолчанию) или `sqlite`.
+- `storage_backend` — бэкенд хранения состояния: `sqlite` (по умолчанию) или `json`.
 - `sqlite_db_path` — имя файла SQLite-базы внутри `exclusions_state_dir` (по умолчанию `screener_state.db`).
 - Чекпоинты выполнения сохраняются автоматически в `state/checkpoints/*.json` и позволяют продолжить запуск после сетевого сбоя.
 
@@ -55,8 +55,14 @@
 ## SQLite режим
 Если `storage_backend: sqlite`, состояние хранится в `state/screener_state.db` (или путь из `sqlite_db_path`). Дополнительно ведётся таблица `runs` с метриками запусков: время старта/окончания, длительность, число обработанных/отфильтрованных бумаг и ошибки.
 
+## Настройка макета Excel
+- Файл `excel_layout.yml` в корне проекта задаёт правила группировки и приоритет колонок в итоговом `output/moex_bonds.xlsx`.
+- `group_order` определяет порядок цветовых групп.
+- `forced_groups` позволяет жёстко привязать поле к группе (например, `DATA_STATUS` к служебной информации).
+- `priority_fields` задаёт порядок важных колонок внутри группы.
+
 ## Безопасные дефолты
-По умолчанию `output_file=output/moex_bonds.xlsx`, `emitents_output_file=output/emitents.xlsx`, `raw_dump_enabled=false`, `exclusion_window_days=365`, `storage_backend=json`.
+По умолчанию `output_file=output/moex_bonds.xlsx`, `emitents_output_file=output/emitents.xlsx`, `raw_dump_enabled=false`, `exclusion_window_days=365`, `storage_backend=sqlite`.
 
 ## Секреты
 Секреты храните в ENV-переменных или `secrets.yml` (не коммитится).
