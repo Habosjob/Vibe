@@ -274,6 +274,7 @@ class DohodEnricher:
             normalized.setdefault("CBR_RATE", 0.0)
             normalized.setdefault("Z_CURVE_RUS", 0.0)
             self._inject_cbr_rate(normalized)
+            self._backfill_missing_bases(normalized)
             return normalized
         previous = checkpoint.get("index_values", {})
         normalized = {
@@ -290,7 +291,21 @@ class DohodEnricher:
                 continue
             normalized[normalized_key] = parsed
         self._inject_cbr_rate(normalized)
+        self._backfill_missing_bases(normalized)
         return normalized
+
+    def _backfill_missing_bases(self, index_values: dict[str, float]) -> None:
+        cbr_rate = float(index_values.get("CBR_RATE") or 0.0)
+        if cbr_rate <= 0:
+            return
+
+        if float(index_values.get("RUONIA") or 0.0) <= 0:
+            index_values["RUONIA"] = cbr_rate
+            self.logger.info("RUONIA не задана: используем CBR_RATE=%.4f как временную базу", cbr_rate)
+
+        if float(index_values.get("Z_CURVE_RUS") or 0.0) <= 0:
+            index_values["Z_CURVE_RUS"] = cbr_rate
+            self.logger.info("Z_CURVE_RUS не задана: используем CBR_RATE=%.4f как временную базу", cbr_rate)
 
     def _inject_cbr_rate(self, index_values: dict[str, float]) -> None:
         configured = float(index_values.get("CBR_RATE") or 0.0)

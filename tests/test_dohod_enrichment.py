@@ -439,6 +439,8 @@ def test_resolve_index_values_autoloads_cbr_key_rate(monkeypatch) -> None:
     index_values = enricher._resolve_index_values({})
 
     assert index_values["CBR_RATE"] == 15.5
+    assert index_values["RUONIA"] == 15.2
+    assert index_values["Z_CURVE_RUS"] == 13.0
 
 
 def test_resolve_index_values_accepts_comma_and_russian_aliases() -> None:
@@ -459,6 +461,29 @@ def test_resolve_index_values_accepts_comma_and_russian_aliases() -> None:
     assert index_values["CBR_RATE"] == 15.0
     assert index_values["Z_CURVE_RUS"] == 14.35
     assert index_values["Z_CURVE_RUS_7Y"] == 13.25
+
+
+def test_enrich_bonds_uses_cbr_fallback_base_for_ruonia_and_zcurve(monkeypatch) -> None:
+    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 0.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 0.0})
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    monkeypatch.setattr(
+        enricher.session,
+        "get",
+        lambda *args, **kwargs: _DummyJsonResponse({"value": 16.2}),
+    )
+
+    def fake_fetch(identifier: str):
+        assert identifier == "RU1"
+        return DohodBondPayload(100.0, "RUONIA", 0.8, None, "", ""), 0
+
+    enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
+
+    bonds = [{"ISIN": "RU1", "COUPONPERCENT": "", "MATDATE": "2030-01-01", "OFFERDATE": ""}]
+    errors = enricher.enrich_bonds(bonds)
+
+    assert errors == 0
+    assert bonds[0]["COUPONPERCENT"] == 17.0
 
 
 
