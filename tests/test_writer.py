@@ -283,6 +283,33 @@ def test_save_bonds_excel_writes_summary_values_from_run_metadata(tmp_path: Path
     assert summary_sheet["B5"].value == 12.34
     assert summary_sheet["B5"].number_format == "0.00"
 
+
+
+def test_save_bonds_excel_writes_extra_summary_metrics(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [{"SECID": "A", "SHORTNAME": "A"}]
+
+    save_bonds_file(
+        str(target),
+        bonds,
+        summary={
+            "bonds_count": 1,
+            "errors_count": 0,
+            "elapsed_seconds": 1.25,
+            "excluded_offer_lt_1y": 3,
+        },
+    )
+
+    workbook = load_workbook(target)
+    summary_sheet = workbook["SUMMARY"]
+
+    labels = [summary_sheet.cell(row=row, column=1).value for row in range(1, summary_sheet.max_row + 1)]
+    values = [summary_sheet.cell(row=row, column=2).value for row in range(1, summary_sheet.max_row + 1)]
+
+    assert "Excluded offer lt 1y" in labels
+    row_index = labels.index("Excluded offer lt 1y")
+    assert values[row_index] == 3
+
 def test_save_bonds_file_with_unsupported_extension(tmp_path: Path, bonds_sample: list[dict[str, object]]) -> None:
     target = tmp_path / "output" / "bonds.txt"
 
