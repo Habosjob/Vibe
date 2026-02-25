@@ -22,6 +22,8 @@ DohodCheckpointSaver = Callable[[dict[str, Any]], None]
 DOHOD_CHECKPOINT_VERSION = 1
 
 LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
+ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
+CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = r"[+-]?\d+(?:[.,]\d+)?"
 INDEX_RE = re.compile(r"(RUONIA|CBR_RATE|Z_CURVE_RUS)\s*([+-]\s*\d+(?:[.,]\d+)?)?", re.IGNORECASE)
 TENOR_RE = re.compile(r"сроком\s+погашения\s+(\d+)\s+лет", re.IGNORECASE)
@@ -325,7 +327,6 @@ class DohodEnricher:
 
 
 def _extract_label_map(html: str) -> dict[str, str]:
-    result: dict[str, str] = {}
     labels = [
         "Цена (last/bid/ask)",
         "Привязка к индексу",
@@ -333,13 +334,41 @@ def _extract_label_map(html: str) -> dict[str, str]:
         "Событие в ближ. дату",
         "Дата, к которой рассчит. YTM",
     ]
+    normalized_targets = {_normalize_label(label): label for label in labels}
+    result: dict[str, str] = {}
+
+    for row_html in ROW_RE.findall(html):
+        cells = CELL_RE.findall(row_html)
+        if len(cells) < 2:
+            continue
+        normalized_label = _normalize_label(_strip_html(cells[0]))
+        target_label = normalized_targets.get(normalized_label)
+        if not target_label:
+            continue
+        if target_label in result:
+            continue
+        result[target_label] = _strip_html(cells[1])
+
+    if len(result) == len(labels):
+        return result
+
+    # fallback для старой/нестандартной верстки
     for label in labels:
+        if label in result:
+            continue
         pattern = re.compile(LABEL_VALUE_RE.format(label=re.escape(label)), re.IGNORECASE | re.DOTALL)
         match = pattern.search(html)
         if not match:
             continue
         result[label] = _strip_html(match.group(1))
+
     return result
+
+
+def _normalize_label(raw: str) -> str:
+    normalized = raw.strip().lower().replace("ё", "е")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
 
 
 def _strip_html(raw: str) -> str:

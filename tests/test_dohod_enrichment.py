@@ -40,6 +40,26 @@ def test_parse_bond_payload_parses_prices_index_and_event() -> None:
     assert payload.ytm_date == "2027-08-26"
 
 
+def test_parse_bond_payload_parses_nested_table_markup() -> None:
+    html = """
+    <table>
+      <tr><th><span>Цена</span> (last/bid/ask)</th><td><div>95.10 / 94.90 / 95.25</div></td></tr>
+      <tr><th><div>Привязка к индексу</div></th><td><span>RUONIA + 1,25</span></td></tr>
+      <tr><th>Описание формулы изменяемого купона/номинала</th><td><p>Купон = RUONIA + 1,25%</p></td></tr>
+      <tr><th><span>Событие в ближ. дату</span></th><td><div>Оферта</div></td></tr>
+      <tr><th>Дата, к которой рассчит. YTM</th><td><span>15.11.2028</span></td></tr>
+    </table>
+    """
+
+    payload = DohodEnricher.parse_bond_payload(html)
+
+    assert payload.ask_price == 95.25
+    assert payload.index_name == "RUONIA"
+    assert payload.index_spread == 1.25
+    assert payload.event_name == "оферта"
+    assert payload.ytm_date == "2028-11-15"
+
+
 def test_enrich_bonds_fills_realprice_coupon_and_offerdate() -> None:
     config = AppConfig(retries=1, dohod_index_values={"RUONIA": 13.5, "CBR_RATE": 16.0, "Z_CURVE_RUS": 11.0, "Z_CURVE_RUS_7Y": 12.3})
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
