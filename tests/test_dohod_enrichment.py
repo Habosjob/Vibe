@@ -269,7 +269,29 @@ def test_compat_methods_for_mixed_versions_do_not_fail() -> None:
 
     assert errors == 0
     assert payload.ask_price == 100.0
-    assert enricher._resolve_secondary_identifier({"ISIN": "RU1", "SECID": "SU1"}, "RU1") == ""
+    assert enricher._resolve_secondary_identifier({"ISIN": "RU1", "SECID": "SU1"}, "RU1") == "SU1"
+
+
+def test_fetch_with_fallback_uses_secid_when_isin_payload_empty() -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    calls: list[str] = []
+
+    def fake_fetch(identifier: str):
+        calls.append(identifier)
+        if identifier == "RU000A0JTYK4":
+            return DohodBondPayload(None, "", 0.0, None, "", ""), 0
+        assert identifier == "BOND500"
+        return DohodBondPayload(99.8, "", 0.0, None, "", ""), 0
+
+    enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
+
+    payload, errors = enricher._fetch_with_fallback("RU000A0JTYK4", "BOND500")
+
+    assert errors == 0
+    assert payload.ask_price == 99.8
+    assert calls == ["RU000A0JTYK4", "BOND500"]
 
 
 
