@@ -54,27 +54,7 @@ GROUP_COLORS = {
     "Прочее": "E4DFEC",
 }
 
-INTEGER_TOKENS = (
-    "VOLUME",
-    "ISSUE",
-    "LOTSIZE",
-    "COUNT",
-    "NUM",
-    "QTY",
-    "QUANTITY",
-    "VALUE",
-)
-
-DECIMAL_TOKENS = (
-    "PRICE",
-    "YIELD",
-    "COUPON",
-    "ACCRUED",
-    "ACCINT",
-    "DURATION",
-    "SPREAD",
-    "RATE",
-)
+THOUSANDS_SEPARATOR_FIELDS = {"ISSUESIZE", "ISSUESIZEPLACED"}
 
 
 def _resolve_fields(bonds: list[dict[str, Any]]) -> list[str]:
@@ -141,11 +121,7 @@ def _excel_number_format(field: str, values: list[Any]) -> str | None:
     upper = field.upper()
     has_fraction = any(abs(float(value) - int(float(value))) > 1e-9 for value in numeric_values)
 
-    if any(token in upper for token in DECIMAL_TOKENS):
-        return "# ##0,00"
-    if any(token in upper for token in INTEGER_TOKENS) and not has_fraction:
-        return "# ##0"
-    if not has_fraction:
+    if upper in THOUSANDS_SEPARATOR_FIELDS and not has_fraction:
         return "# ##0"
     return None
 
@@ -281,8 +257,26 @@ def _write_grouped_headers(sheet: Any, fields: list[str]) -> list[str]:
     sheet.append([group for group, _ in columns])
     sheet.append([field for _, field in columns])
 
-    for index, (_, _) in enumerate(columns, start=1):
-        sheet.column_dimensions[get_column_letter(index)].outlineLevel = 1
+    current_group: str | None = None
+    group_start = 1
+
+    for index, (group_name, _) in enumerate(columns, start=1):
+        if current_group is None:
+            current_group = group_name
+            group_start = index
+            continue
+
+        if group_name != current_group:
+            start_col = get_column_letter(group_start)
+            end_col = get_column_letter(index - 1)
+            sheet.column_dimensions.group(start_col, end_col, outline_level=1, hidden=False)
+            current_group = group_name
+            group_start = index
+
+    if current_group is not None:
+        start_col = get_column_letter(group_start)
+        end_col = get_column_letter(len(columns))
+        sheet.column_dimensions.group(start_col, end_col, outline_level=1, hidden=False)
 
     sheet.sheet_properties.outlinePr.summaryRight = True
     return [field for _, field in columns]

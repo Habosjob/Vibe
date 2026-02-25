@@ -129,13 +129,21 @@ def test_save_bonds_excel_keeps_headers_unmerged_and_reorders_groups(tmp_path: P
     assert sheet.cell(row=1, column=secid_column).value == "Прочее"
     assert sheet.cell(row=1, column=currency_column).value == "Купоны и номинал"
 
+    grouped_ranges = [
+        (dimension.min, dimension.max)
+        for dimension in sheet.column_dimensions.values()
+        if dimension.outlineLevel == 1
+    ]
+    assert len(grouped_ranges) >= 3
 
-def test_save_bonds_excel_formats_numeric_values_and_empty_zero_dates(tmp_path: Path) -> None:
+
+def test_save_bonds_excel_formats_only_issue_size_columns_and_empty_zero_dates(tmp_path: Path) -> None:
     target = tmp_path / "output" / "bonds.xlsx"
     bonds = [
         {
             "SHORTNAME": "ОФЗ 26218",
             "ISSUESIZE": 1000000000,
+            "ISSUESIZEPLACED": 950000000,
             "COUPONVALUE": 62.33,
             "MATDATE": "0000-00-00",
         }
@@ -148,12 +156,14 @@ def test_save_bonds_excel_formats_numeric_values_and_empty_zero_dates(tmp_path: 
     headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
 
     issuesize_column = headers.index("ISSUESIZE") + 1
+    issuesizeplaced_column = headers.index("ISSUESIZEPLACED") + 1
     coupon_column = headers.index("COUPONVALUE") + 1
     matdate_column = headers.index("MATDATE") + 1
 
     assert sheet.cell(row=3, column=matdate_column).value in ("", None)
     assert sheet.cell(row=3, column=issuesize_column).number_format == "# ##0"
-    assert sheet.cell(row=3, column=coupon_column).number_format == "# ##0,00"
+    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "# ##0"
+    assert sheet.cell(row=3, column=coupon_column).number_format == "General"
 
 
 def test_save_bonds_file_with_unsupported_extension(tmp_path: Path, bonds_sample: list[dict[str, object]]) -> None:
