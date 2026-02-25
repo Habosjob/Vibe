@@ -115,6 +115,7 @@ def main() -> None:
         eligible_bonds=eligible_bonds,
         client=client,
         state_store=state_store,
+        progress_callback=lambda data: _print_emitents_progress(data, progress),
     )
     save_emitents_excel(config.emitents_output_file, emitents_result.rows)
 
@@ -196,6 +197,18 @@ def _print_fetch_progress(data: dict[str, Any], progress: PipelineProgress) -> N
     if message:
         progress.tick(str(message))
     progress.report_counter(fetched, f"загружено бумаг: {fetched} (+{new_items}, start={start})")
+
+
+
+def _print_emitents_progress(data: dict[str, Any], progress: PipelineProgress) -> None:
+    message = data.get("message")
+    if message:
+        progress.tick(str(message))
+
+    if data.get("phase") == "sample_descriptions":
+        processed = int(data.get("processed", 0))
+        total = int(data.get("total", 0))
+        progress.report_fraction(processed, total, "обработано карточек эмитентов")
 
 
 def _print_amortization_progress(data: dict[str, Any], progress: PipelineProgress) -> None:

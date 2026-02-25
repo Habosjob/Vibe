@@ -329,8 +329,10 @@ class MoexClient:
         start = 0
         errors = 0
         items: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str, str]] = set()
 
         while True:
+            self.logger.info("Запрос списка инструментов рынка %s: start=%s", market, start)
             params = {
                 "iss.meta": "off",
                 "iss.only": "securities",
@@ -342,7 +344,26 @@ class MoexClient:
             if failed or not page:
                 break
 
-            items.extend(page)
+            new_items: list[dict[str, Any]] = []
+            for row in page:
+                secid = str(row.get("SECID") or "").strip()
+                isin = str(row.get("ISIN") or "").strip()
+                regnumber = str(row.get("REGNUMBER") or "").strip()
+                key = (secid, isin, regnumber)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                new_items.append(row)
+
+            items.extend(new_items)
+
+            if start > 0 and not new_items:
+                self.logger.warning(
+                    "Пагинация рынка %s вернула только дубликаты на start=%s. Останавливаемся, чтобы избежать бесконечного цикла.",
+                    market,
+                    start,
+                )
+                break
 
             if start == 0 and len(page) > self.config.page_size:
                 break

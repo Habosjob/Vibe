@@ -417,3 +417,28 @@ def test_enrich_amortization_checkpoint_contains_updated_at(monkeypatch):
 
     assert errors == 0
     assert isinstance(saved_payloads[-1].get("updated_at"), str)
+
+
+def test_fetch_market_securities_stops_when_pagination_repeats_data(monkeypatch):
+    config = AppConfig(page_size=2, retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    response = DummyResponse(
+        {"securities": {"columns": ["EMITTER_ID", "SECID", "ISIN", "REGNUMBER"], "data": [["1", "A", "RU1", "R1"], ["2", "B", "RU2", "R2"]]}}
+    )
+    calls = {"count": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] > 2:
+            raise AssertionError("Вероятный бесконечный цикл пагинации")
+        return response
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    rows, errors = client.fetch_market_securities("bonds")
+
+    assert errors == 0
+    assert calls["count"] == 2
+    assert len(rows) == 2
+    assert [row["SECID"] for row in rows] == ["A", "B"]
