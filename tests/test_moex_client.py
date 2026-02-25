@@ -187,12 +187,68 @@ def test_enrich_amortization_start_dates_fills_earliest_date(monkeypatch):
         )
 
     monkeypatch.setattr(client.session, "get", fake_get)
-    bonds = [{"SECID": "A"}]
+    bonds = [{"SECID": "A", "MATDATE": "2028-01-01"}]
 
     errors = client.enrich_amortization_start_dates(bonds)
 
     assert errors == 0
     assert bonds[0]["Amortization_start_date"] == "2025-06-01"
+
+
+def test_extract_earliest_amortization_date_ignores_single_full_redemption_with_matdate():
+    payload = {
+        "amortizations": {
+            "columns": ["amortdate", "valueprc"],
+            "data": [["2030-05-01", 100]],
+        }
+    }
+
+    result = MoexClient._extract_earliest_amortization_date(payload, matdate="2030-05-01")
+
+    assert result is None
+
+
+def test_extract_earliest_amortization_date_returns_first_partial_payment():
+    payload = {
+        "amortizations": {
+            "columns": ["amortdate", "valueprc"],
+            "data": [["2030-05-01", 100], ["2028-05-01", 20]],
+        }
+    }
+
+    result = MoexClient._extract_earliest_amortization_date(payload, matdate="2030-05-01")
+
+    assert result == "2028-05-01"
+
+
+def test_enrich_amortization_start_dates_deduplicates_secid_requests(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0, amortization_workers=4)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    calls = {"count": 0}
+
+    def fake_get(url, params, timeout):
+        calls["count"] += 1
+        return DummyResponse(
+            {
+                "amortizations": {
+                    "columns": ["amortdate", "valueprc"],
+                    "data": [["2027-12-01", 10], ["2030-01-01", 100]],
+                }
+            }
+        )
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+    bonds = [
+        {"SECID": "A", "MATDATE": "2030-01-01"},
+        {"SECID": "A", "MATDATE": "2030-01-01"},
+    ]
+
+    errors = client.enrich_amortization_start_dates(bonds)
+
+    assert errors == 0
+    assert calls["count"] == 1
+    assert bonds[0]["Amortization_start_date"] == "2027-12-01"
+    assert bonds[1]["Amortization_start_date"] == "2027-12-01"
 
 
 def test_fetch_all_bonds_resumes_from_checkpoint(monkeypatch):
