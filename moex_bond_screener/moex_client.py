@@ -17,6 +17,8 @@ from .raw_store import RawStore
 ProgressCallback = Callable[[dict[str, Any]], None]
 CheckpointSaver = Callable[[dict[str, Any]], None]
 
+AMORTIZATION_CHECKPOINT_VERSION = 2
+
 
 class MoexClient:
     def __init__(self, config: AppConfig, logger: logging.Logger, raw_store: RawStore | None = None) -> None:
@@ -197,13 +199,14 @@ class MoexClient:
                         date_value, request_errors = "", 1
 
                     errors += request_errors
-                    processed[secid] = date_value
+                    if request_errors == 0:
+                        processed[secid] = date_value
                     for idx in secid_to_indices.get(secid, []):
                         bonds[idx]["Amortization_start_date"] = date_value
                     progress_processed += len(secid_to_indices.get(secid, []))
 
                     if checkpoint_saver:
-                        checkpoint_saver({"processed": processed, "completed": False})
+                        checkpoint_saver({"version": AMORTIZATION_CHECKPOINT_VERSION, "processed": processed, "completed": False})
 
                     if progress_callback:
                         progress_callback(
@@ -217,7 +220,7 @@ class MoexClient:
                         )
 
         if checkpoint_saver:
-            checkpoint_saver({"processed": processed, "completed": True})
+            checkpoint_saver({"version": AMORTIZATION_CHECKPOINT_VERSION, "processed": processed, "completed": True})
 
         return errors
 
