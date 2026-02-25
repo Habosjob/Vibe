@@ -36,6 +36,9 @@ def main() -> None:
     exclusion_filter = BondExclusionFilter(days_threshold=config.exclusion_window_days)
     exclusion_result = exclusion_filter.apply(bonds=bonds, previous_exclusions=previous_exclusions)
 
+    print("[Этап] Обогащение датой начала амортизации...")
+    amortization_errors = client.enrich_amortization_start_dates(exclusion_result.eligible_bonds)
+
     state_store.save_exclusions(exclusion_result.active_exclusions)
 
     print("[Этап] Инкрементальное обновление итоговых данных...")
@@ -45,7 +48,7 @@ def main() -> None:
     elapsed_before_export = time.time() - started
     summary = {
         "bonds_count": len(exclusion_result.eligible_bonds),
-        "errors_count": errors,
+        "errors_count": errors + amortization_errors,
         "elapsed_seconds": elapsed_before_export,
         "filtered_total": len(bonds) - len(exclusion_result.eligible_bonds),
         "excluded_by_active_exclusion": exclusion_result.skipped_by_active_exclusion,
@@ -67,7 +70,9 @@ def main() -> None:
     print(f"  - OFFERDATE < {config.exclusion_window_days} дней: {exclusion_result.excluded_by_rule['offer_lt_1y']}")
     print(f"  - CALLOPTIONDATE < {config.exclusion_window_days} дней: {exclusion_result.excluded_by_rule['calloption_lt_1y']}")
     print(f"  - MATDATE < {config.exclusion_window_days} дней: {exclusion_result.excluded_by_rule['mat_lt_1y']}")
-    print(f"Ошибок: {errors}")
+    print(f"Ошибок: {errors + amortization_errors}")
+    print(f"  - ошибки загрузки списка бумаг: {errors}")
+    print(f"  - ошибки запроса амортизации: {amortization_errors}")
     print(
         "Инкрементальные изменения: "
         f"+{incremental_stats.inserted} / ~{incremental_stats.updated} / = {incremental_stats.unchanged} / -{incremental_stats.removed}"

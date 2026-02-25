@@ -133,3 +133,58 @@ def test_fetch_page_requests_all_columns_without_securities_columns(monkeypatch)
     assert captured["params"]["iss.only"] == "securities"
     assert captured["params"]["iss.meta"] == "off"
     assert "securities.columns" not in captured["params"]
+
+
+def test_extract_earliest_amortization_date_returns_min_date():
+    payload = {
+        "amortizations": {
+            "columns": ["amortdate", "value"],
+            "data": [["2028-04-01", 100], ["2026-09-15", 50], ["0000-00-00", 0]],
+        }
+    }
+
+    result = MoexClient._extract_earliest_amortization_date(payload)
+
+    assert result == "2026-09-15"
+
+
+def test_enrich_amortization_start_dates_sets_empty_if_no_data(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    def fake_get(url, params, timeout):
+        assert "bondization.json" in url
+        assert params["iss.only"] == "amortizations"
+        return DummyResponse({"amortizations": {"columns": ["amortdate"], "data": []}})
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+    bonds = [{"SECID": "SU26218RMFS6", "SHORTNAME": "ОФЗ 26218"}]
+
+    errors = client.enrich_amortization_start_dates(bonds)
+
+    assert errors == 0
+    assert bonds[0]["Amortization_start_date"] == ""
+
+
+def test_enrich_amortization_start_dates_fills_earliest_date(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    def fake_get(url, params, timeout):
+        assert url.endswith("/A/bondization.json")
+        return DummyResponse(
+            {
+                "amortizations": {
+                    "columns": ["amortdate", "valueprc"],
+                    "data": [["2027-12-01", 10], ["2025-06-01", 5]],
+                }
+            }
+        )
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+    bonds = [{"SECID": "A"}]
+
+    errors = client.enrich_amortization_start_dates(bonds)
+
+    assert errors == 0
+    assert bonds[0]["Amortization_start_date"] == "2025-06-01"

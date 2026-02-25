@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 import requests
@@ -65,6 +66,29 @@ class MoexClient:
 
         return bonds, errors
 
+    def enrich_amortization_start_dates(self, bonds: list[dict[str, Any]]) -> int:
+        """Обогащает список бумаг полем Amortization_start_date.
+
+        Значение заполняется самой ранней датой амортизации по данным MOEX,
+        либо пустой строкой, если амортизации нет.
+        """
+
+        errors = 0
+        for bond in bonds:
+            secid = str(bond.get("SECID") or "").strip()
+            if not secid:
+                bond["Amortization_start_date"] = ""
+                continue
+
+            date_value, request_errors = self._fetch_amortization_start_date(secid)
+            errors += request_errors
+            bond["Amortization_start_date"] = date_value
+
+            if self.config.request_delay_seconds > 0:
+                time.sleep(self.config.request_delay_seconds)
+
+        return errors
+
     def _fetch_page(self, start: int) -> tuple[list[dict[str, Any]], int]:
         params = {
             "iss.meta": "off",
@@ -97,3 +121,65 @@ class MoexClient:
                 time.sleep(self.config.request_delay_seconds * attempt)
 
         return [], 1
+
+    def _fetch_amortization_start_date(self, secid: str) -> tuple[str, int]:
+        url = f"https://iss.moex.com/iss/securities/{secid}/bondization.json"
+        params = {"iss.meta": "off", "iss.only": "amortizations"}
+
+        for attempt in range(1, self.config.retries + 1):
+            try:
+                response = self.session.get(
+                    url,
+                    params=params,
+                    timeout=self.config.timeout_seconds,
+                )
+                response.raise_for_status()
+                payload = response.json()
+
+                if self.raw_store and self.config.raw_dump_enabled:
+                    self.raw_store.dump_json(f"amortization_{secid}.json", response.text)
+
+                earliest = self._extract_earliest_amortization_date(payload)
+                return earliest or "", 0
+            except requests.RequestException as error:
+                self.logger.warning(
+                    "Ошибка запроса амортизации secid=%s попытка=%s: %s",
+                    secid,
+                    attempt,
+                    error,
+                )
+                if attempt == self.config.retries:
+                    return "", 1
+                time.sleep(self.config.request_delay_seconds * attempt)
+
+        return "", 1
+
+    @staticmethod
+    def _extract_earliest_amortization_date(payload: dict[str, Any]) -> str | None:
+        amortizations = payload.get("amortizations") or {}
+        columns = amortizations.get("columns") or []
+        rows = amortizations.get("data") or []
+        if not columns or not rows:
+            return None
+
+        col_map = {name.upper(): idx for idx, name in enumerate(columns)}
+        date_idx = col_map.get("AMORTDATE")
+        if date_idx is None:
+            return None
+
+        parsed_dates: list[datetime] = []
+        for row in rows:
+            if len(row) <= date_idx:
+                continue
+            raw_date = row[date_idx]
+            if not isinstance(raw_date, str) or raw_date == "0000-00-00":
+                continue
+            try:
+                parsed_dates.append(datetime.strptime(raw_date, "%Y-%m-%d"))
+            except ValueError:
+                continue
+
+        if not parsed_dates:
+            return None
+
+        return min(parsed_dates).strftime("%Y-%m-%d")
