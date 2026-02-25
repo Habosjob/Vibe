@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any, Callable
 
 from .moex_client import MoexClient
@@ -16,6 +17,7 @@ class EmitentsBuildResult:
     errors: int
     processed_emitters: int
     new_emitters: int
+    stage_durations: dict[str, float]
 
 
 def build_emitents_reference(
@@ -32,12 +34,19 @@ def build_emitents_reference(
     """
 
     registry = state_store.load_emitents_registry()
-    secid_samples = _pick_emitter_samples(eligible_bonds)
+    secid_to_emitter = state_store.load_secid_to_emitter_map()
+    secid_samples = _pick_emitter_samples(eligible_bonds, secid_to_emitter)
     total_samples = len(secid_samples.known_emitters) + len(secid_samples.unknown_emitters)
     discovered_emitters: set[str] = set()
     errors = 0
     new_emitters = 0
     registry_changed = False
+    secid_cache_changed = False
+    stage_durations = {
+        "emitents_cards_seconds": 0.0,
+        "emitents_market_bonds_seconds": 0.0,
+        "emitents_market_shares_seconds": 0.0,
+    }
     workers = max(1, int(client.config.amortization_workers))
 
     if progress_callback:
@@ -72,6 +81,7 @@ def build_emitents_reference(
 
     pending_samples.extend((secid, "") for secid in sorted(secid_samples.unknown_emitters))
 
+    cards_started = perf_counter()
     if pending_samples:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
@@ -109,6 +119,10 @@ def build_emitents_reference(
                             }
                         )
                     continue
+
+                if secid_to_emitter.get(secid) != resolved_emitter_id:
+                    secid_to_emitter[secid] = resolved_emitter_id
+                    secid_cache_changed = True
                 discovered_emitters.add(resolved_emitter_id)
 
                 cached = registry.get(resolved_emitter_id)
@@ -158,15 +172,24 @@ def build_emitents_reference(
                         }
                     )
 
+    stage_durations["emitents_cards_seconds"] = round(perf_counter() - cards_started, 2)
+
     if registry_changed:
         state_store.save_emitents_registry(registry)
+    if secid_cache_changed:
+        state_store.save_secid_to_emitter_map(secid_to_emitter)
 
+    bonds_started = perf_counter()
     if progress_callback:
         progress_callback({"phase": "market_data", "message": "Загрузка рыночных инструментов bonds"})
     bonds_market, bonds_errors = client.fetch_market_securities("bonds")
+    stage_durations["emitents_market_bonds_seconds"] = round(perf_counter() - bonds_started, 2)
+
+    shares_started = perf_counter()
     if progress_callback:
         progress_callback({"phase": "market_data", "message": "Загрузка рыночных инструментов shares"})
     shares_market, shares_errors = client.fetch_market_securities("shares")
+    stage_durations["emitents_market_shares_seconds"] = round(perf_counter() - shares_started, 2)
     errors += bonds_errors + shares_errors
 
     bond_map = _collect_market_instruments(bonds_market, instrument_key="ISIN")
@@ -190,6 +213,7 @@ def build_emitents_reference(
         errors=errors,
         processed_emitters=len(discovered_emitters),
         new_emitters=new_emitters,
+        stage_durations=stage_durations,
     )
 
 
@@ -199,12 +223,17 @@ class EmitterSamples:
     unknown_emitters: set[str]
 
 
-def _pick_emitter_samples(eligible_bonds: list[dict[str, Any]]) -> EmitterSamples:
+def _pick_emitter_samples(eligible_bonds: list[dict[str, Any]], secid_to_emitter: dict[str, str]) -> EmitterSamples:
     known_emitters: dict[str, str] = {}
     unknown_emitters: set[str] = set()
     for bond in eligible_bonds:
         secid = str(bond.get("SECID") or "").strip()
-        emitter_id = str(bond.get("EMITTER_ID") or bond.get("ISSUER_ID") or "").strip()
+        emitter_id = str(
+            bond.get("EMITTER_ID")
+            or bond.get("ISSUER_ID")
+            or secid_to_emitter.get(secid, "")
+            or ""
+        ).strip()
         if not secid:
             continue
 

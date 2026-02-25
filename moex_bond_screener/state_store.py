@@ -25,6 +25,7 @@ class ScreenerStateStore:
         self.checkpoints_dir = self.base_path / "checkpoints"
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         self.emitents_registry_path = self.base_path / "emitents_registry.json"
+        self.secid_to_emitter_path = self.base_path / "secid_to_emitter.json"
 
     def load_exclusions(self) -> dict[str, dict[str, str]]:
         payload = self._load_json(self.exclusions_path)
@@ -100,6 +101,20 @@ class ScreenerStateStore:
 
     def save_emitents_registry(self, emitents: dict[str, dict[str, str]]) -> None:
         self._save_json(self.emitents_registry_path, {"emitents": emitents})
+
+    def load_secid_to_emitter_map(self) -> dict[str, str]:
+        payload = self._load_json(self.secid_to_emitter_path)
+        mappings = payload.get("mappings", {}) if isinstance(payload, dict) else {}
+        if not isinstance(mappings, dict):
+            return {}
+        return {
+            str(secid): str(emitter_id)
+            for secid, emitter_id in mappings.items()
+            if str(secid).strip() and str(emitter_id).strip()
+        }
+
+    def save_secid_to_emitter_map(self, mappings: dict[str, str]) -> None:
+        self._save_json(self.secid_to_emitter_path, {"mappings": mappings})
 
     def _checkpoint_path(self, name: str) -> Path:
         safe_name = "".join(ch for ch in name if ch.isalnum() or ch in {"_", "-"}).strip("_")

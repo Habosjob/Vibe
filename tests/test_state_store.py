@@ -52,3 +52,11 @@ def test_state_store_emitents_registry_roundtrip(tmp_path) -> None:
     store.save_emitents_registry({"10": {"full_name": "Эмитент", "inn": "7701234567"}})
 
     assert store.load_emitents_registry() == {"10": {"full_name": "Эмитент", "inn": "7701234567"}}
+
+
+def test_state_store_secid_to_emitter_roundtrip(tmp_path) -> None:
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    store.save_secid_to_emitter_map({"BOND1": "111", "BOND2": "222"})
+
+    assert store.load_secid_to_emitter_map() == {"BOND1": "111", "BOND2": "222"}
