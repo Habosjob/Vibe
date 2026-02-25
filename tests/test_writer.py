@@ -33,6 +33,13 @@ def test_save_bonds_file_as_excel(tmp_path: Path, bonds_sample: list[dict[str, o
     workbook = load_workbook(target)
     sheet = workbook["MOEX_BONDS"]
 
+    assert "SUMMARY" in workbook.sheetnames
+    assert workbook.sheetnames[0] == "SUMMARY"
+    summary_sheet = workbook["SUMMARY"]
+    assert summary_sheet["A2"].value == "Дата и время формирования"
+    assert summary_sheet["A3"].value == "Количество бумаг"
+    assert summary_sheet["B3"].value == 1
+
     assert sheet["A1"].value == "Служебная информация"
     headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
 
@@ -193,11 +200,11 @@ def test_save_bonds_excel_formats_numeric_columns_and_empty_zero_dates(tmp_path:
     nextcoupon_column = headers.index("NEXTCOUPON") + 1
 
     assert sheet.cell(row=3, column=matdate_column).value in ("", None)
-    assert sheet.cell(row=3, column=issuesize_column).number_format == "# ##0"
-    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "# ##0"
-    assert sheet.cell(row=3, column=coupon_column).number_format == "# ##0.00"
-    assert sheet.cell(row=3, column=bidvalue_column).number_format == "# ##0.00"
-    assert sheet.cell(row=3, column=accruedint_column).number_format == "# ##0"
+    assert sheet.cell(row=3, column=issuesize_column).number_format == "#,##0"
+    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "#,##0"
+    assert sheet.cell(row=3, column=coupon_column).number_format == "#,##0.00"
+    assert sheet.cell(row=3, column=bidvalue_column).number_format == "#,##0.00"
+    assert sheet.cell(row=3, column=accruedint_column).number_format == "#,##0"
     assert sheet.cell(row=3, column=nextcoupon_column).value == datetime(2027, 1, 1)
     assert sheet.cell(row=3, column=nextcoupon_column).number_format == "DD.MM.YYYY"
 
@@ -226,9 +233,9 @@ def test_save_bonds_excel_converts_large_numeric_strings_with_any_thousands_grou
     assert sheet.cell(row=3, column=issuesize_column).value == 1_000_000_000
     assert sheet.cell(row=3, column=issuesizeplaced_column).value == 1_250_000_000_000
     assert sheet.cell(row=3, column=coupon_column).value == 62.33
-    assert sheet.cell(row=3, column=issuesize_column).number_format == "# ##0"
-    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "# ##0"
-    assert sheet.cell(row=3, column=coupon_column).number_format == "# ##0.00"
+    assert sheet.cell(row=3, column=issuesize_column).number_format == "#,##0"
+    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "#,##0"
+    assert sheet.cell(row=3, column=coupon_column).number_format == "#,##0.00"
 
 
 
@@ -254,8 +261,27 @@ def test_save_bonds_excel_converts_numeric_strings_with_narrow_nbsp(tmp_path: Pa
 
     assert sheet.cell(row=3, column=issuesize_column).value == 1_000_000_000
     assert sheet.cell(row=3, column=issuesizeplaced_column).value == 750_000_000
-    assert sheet.cell(row=3, column=issuesize_column).number_format == "# ##0"
-    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "# ##0"
+    assert sheet.cell(row=3, column=issuesize_column).number_format == "#,##0"
+    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "#,##0"
+
+
+def test_save_bonds_excel_writes_summary_values_from_run_metadata(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [{"SHORTNAME": "ОФЗ 26218", "ISSUESIZE": "1000000 000"}]
+
+    save_bonds_file(
+        str(target),
+        bonds,
+        summary={"bonds_count": 77, "errors_count": 3, "elapsed_seconds": 12.34},
+    )
+
+    workbook = load_workbook(target)
+    summary_sheet = workbook["SUMMARY"]
+
+    assert summary_sheet["B3"].value == 77
+    assert summary_sheet["B4"].value == 3
+    assert summary_sheet["B5"].value == 12.34
+    assert summary_sheet["B5"].number_format == "0.00"
 
 def test_save_bonds_file_with_unsupported_extension(tmp_path: Path, bonds_sample: list[dict[str, object]]) -> None:
     target = tmp_path / "output" / "bonds.txt"
