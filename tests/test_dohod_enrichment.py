@@ -117,6 +117,23 @@ def test_parse_bond_payload_parses_fuzzy_labels() -> None:
     assert payload.ytm_date == "2029-09-05"
 
 
+def test_parse_bond_payload_parses_russian_index_aliases() -> None:
+    html = """
+    <table>
+      <tr><th>Цена (last / bid / ask):</th><td>101,10 / 100,90</td></tr>
+      <tr><th>Привязка к индексу:</th><td>КЛЮЧЕВАЯ СТАВКА ЦБ + 1,50</td></tr>
+      <tr><th>Описание формулы изменяемого купона/номинала:</th><td>Купон = КБД ОФЗ + 0,75%</td></tr>
+      <tr><th>Событие в ближ дату:</th><td>Оферта</td></tr>
+      <tr><th>Дата к которой рассчит YTM:</th><td>05.09.2029</td></tr>
+    </table>
+    """
+
+    payload = DohodEnricher.parse_bond_payload(html)
+
+    assert payload.index_name == "CBR_RATE"
+    assert payload.index_spread == 1.5
+
+
 
 def test_parse_bond_payload_parses_script_values_when_labels_absent() -> None:
     html = """
@@ -351,6 +368,26 @@ def test_resolve_index_values_autoloads_cbr_key_rate(monkeypatch) -> None:
     index_values = enricher._resolve_index_values({})
 
     assert index_values["CBR_RATE"] == 15.5
+
+
+def test_resolve_index_values_accepts_comma_and_russian_aliases() -> None:
+    config = AppConfig(
+        retries=1,
+        dohod_index_values={
+            "RUONIA": "16,15",
+            "Ключевая ставка ЦБ": "15,00",
+            "КБД ОФЗ": "14,35",
+            "Z_CURVE_RUS_7Y": "13,25",
+        },
+    )
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    index_values = enricher._resolve_index_values({})
+
+    assert index_values["RUONIA"] == 16.15
+    assert index_values["CBR_RATE"] == 15.0
+    assert index_values["Z_CURVE_RUS"] == 14.35
+    assert index_values["Z_CURVE_RUS_7Y"] == 13.25
 
 
 

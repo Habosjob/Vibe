@@ -25,7 +25,10 @@ LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
 CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = r"[+-]?\d+(?:[.,]\d+)?"
-INDEX_RE = re.compile(r"(RUONIA|CBR_RATE|Z_CURVE_RUS)\s*([+-]\s*\d+(?:[.,]\d+)?)?", re.IGNORECASE)
+INDEX_RE = re.compile(
+    r"(RUONIA|CBR_RATE|Z_CURVE_RUS|КЛЮЧЕВАЯ\s+СТАВКА(?:\s+ЦБ)?|КБД\s+ОФЗ|КРИВ[А-ЯA-Z\s]+ОФЗ)\s*([+\-−]\s*\d+(?:[.,]\d+)?)?",
+    re.IGNORECASE,
+)
 TENOR_RE = re.compile(r"сроком\s+погашения\s+(\d+)\s+лет", re.IGNORECASE)
 
 DL_PAIR_RE = re.compile(
@@ -262,10 +265,10 @@ class DohodEnricher:
         if isinstance(configured, dict):
             normalized: dict[str, float] = {}
             for key, value in configured.items():
-                try:
-                    normalized[str(key).upper()] = float(value)
-                except (TypeError, ValueError):
+                parsed = _as_float_or_none(value)
+                if parsed is None:
                     continue
+                normalized[_normalize_index_name(str(key))] = parsed
             normalized.setdefault("RUONIA", 0.0)
             normalized.setdefault("CBR_RATE", 0.0)
             normalized.setdefault("Z_CURVE_RUS", 0.0)
@@ -273,10 +276,18 @@ class DohodEnricher:
             return normalized
         previous = checkpoint.get("index_values", {})
         normalized = {
-            "RUONIA": float((previous or {}).get("RUONIA") or 0.0),
-            "CBR_RATE": float((previous or {}).get("CBR_RATE") or 0.0),
-            "Z_CURVE_RUS": float((previous or {}).get("Z_CURVE_RUS") or 0.0),
+            "RUONIA": _as_float_or_none((previous or {}).get("RUONIA")) or 0.0,
+            "CBR_RATE": _as_float_or_none((previous or {}).get("CBR_RATE")) or 0.0,
+            "Z_CURVE_RUS": _as_float_or_none((previous or {}).get("Z_CURVE_RUS")) or 0.0,
         }
+        for key, value in (previous or {}).items():
+            normalized_key = _normalize_index_name(str(key))
+            if normalized_key in {"RUONIA", "CBR_RATE", "Z_CURVE_RUS"}:
+                continue
+            parsed = _as_float_or_none(value)
+            if parsed is None:
+                continue
+            normalized[normalized_key] = parsed
         self._inject_cbr_rate(normalized)
         return normalized
 
@@ -557,10 +568,24 @@ def _parse_index_and_spread(raw: str) -> tuple[str, float]:
     match = INDEX_RE.search(raw)
     if not match:
         return "", 0.0
-    name = str(match.group(1) or "").upper()
+    name = _normalize_index_name(str(match.group(1) or ""))
     spread_raw = str(match.group(2) or "0")
-    spread = float(spread_raw.replace(" ", "").replace(",", ".")) if spread_raw else 0.0
+    spread = float(spread_raw.replace("−", "-").replace(" ", "").replace(",", ".")) if spread_raw else 0.0
     return name, spread
+
+
+def _normalize_index_name(raw: str) -> str:
+    normalized = raw.upper().replace("Ё", "Е")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if normalized.startswith("Z_CURVE_RUS_"):
+        return normalized.replace(" ", "")
+    if "RUONIA" in normalized:
+        return "RUONIA"
+    if "CBR_RATE" in normalized or "КЛЮЧЕВАЯ СТАВКА" in normalized:
+        return "CBR_RATE"
+    if "Z_CURVE_RUS" in normalized or "КБД ОФЗ" in normalized or "КРИВ" in normalized:
+        return "Z_CURVE_RUS"
+    return normalized
 
 
 def _parse_tenor_years(raw: str) -> int | None:
