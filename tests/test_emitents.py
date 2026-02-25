@@ -153,3 +153,56 @@ def test_build_emitents_reference_requests_one_card_per_known_emitter(monkeypatc
     assert result.processed_emitters == 2
     assert set(calls) == {"BOND1", "BOND4"}
     assert len(calls) == 2
+
+
+def test_build_emitents_reference_reuses_secid_to_emitter_cache(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    store.save_emitents_registry({"111": {"full_name": "Кэш Эмитент", "inn": "7701999999"}})
+    store.save_secid_to_emitter_map({"BOND1": "111"})
+
+    eligible_bonds = [{"SECID": "BOND1"}]
+
+    calls: list[str] = []
+
+    def fake_description(secid: str):
+        calls.append(secid)
+        return {}, 1
+
+    monkeypatch.setattr(client, "fetch_security_description", fake_description)
+    monkeypatch.setattr(client, "fetch_market_securities", lambda market: ([], 0))
+
+    result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+
+    assert result.errors == 0
+    assert result.processed_emitters == 1
+    assert result.new_emitters == 0
+    assert len(result.rows) == 1
+    assert result.rows[0]["ИНН"] == "7701999999"
+    assert calls == []
+
+
+def test_build_emitents_reference_fills_stage_timers(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    eligible_bonds = [{"SECID": "BOND1", "EMITTER_ID": "111"}]
+
+    monkeypatch.setattr(
+        client,
+        "fetch_security_description",
+        lambda secid: ({"EMITTER_ID": "111", "EMITTER_FULL_NAME": "Первый", "EMITTER_INN": "7701111111"}, 0),
+    )
+    monkeypatch.setattr(client, "fetch_market_securities", lambda market: ([], 0))
+
+    result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+
+    assert set(result.stage_durations.keys()) == {
+        "emitents_cards_seconds",
+        "emitents_market_bonds_seconds",
+        "emitents_market_shares_seconds",
+    }
+    assert all(value >= 0 for value in result.stage_durations.values())

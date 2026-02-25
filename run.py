@@ -95,20 +95,6 @@ def main() -> None:
     incremental_stats = state_store.update_eligible_bonds(eligible_bonds)
 
     progress.start_stage(8, "Сохранение итогового файла")
-    elapsed_before_export = time.time() - started
-    summary = {
-        "bonds_count": len(eligible_bonds),
-        "errors_count": errors + amortization_errors,
-        "elapsed_seconds": elapsed_before_export,
-        "filtered_total": len(bonds) - len(eligible_bonds),
-        "excluded_by_active_exclusion": skipped_by_active_exclusion,
-        "excluded_buyback_lt_1y": excluded_by_rule["buyback_lt_1y"],
-        "excluded_offer_lt_1y": excluded_by_rule["offer_lt_1y"],
-        "excluded_calloption_lt_1y": excluded_by_rule["calloption_lt_1y"],
-        "excluded_mat_lt_1y": excluded_by_rule["mat_lt_1y"],
-        "excluded_amortization_started_or_lt_1y_permanent": excluded_by_rule[AMORTIZATION_RULE_NAME],
-    }
-    save_bonds_file(config.output_file, eligible_bonds, summary=summary)
 
     progress.start_stage(9, "Формирование справочника эмитентов")
     emitents_result = build_emitents_reference(
@@ -120,6 +106,20 @@ def main() -> None:
     save_emitents_excel(config.emitents_output_file, emitents_result.rows)
 
     elapsed = time.time() - started
+    summary = {
+        "bonds_count": len(eligible_bonds),
+        "errors_count": errors + amortization_errors + emitents_result.errors,
+        "elapsed_seconds": elapsed,
+        "filtered_total": len(bonds) - len(eligible_bonds),
+        "excluded_by_active_exclusion": skipped_by_active_exclusion,
+        "excluded_buyback_lt_1y": excluded_by_rule["buyback_lt_1y"],
+        "excluded_offer_lt_1y": excluded_by_rule["offer_lt_1y"],
+        "excluded_calloption_lt_1y": excluded_by_rule["calloption_lt_1y"],
+        "excluded_mat_lt_1y": excluded_by_rule["mat_lt_1y"],
+        "excluded_amortization_started_or_lt_1y_permanent": excluded_by_rule[AMORTIZATION_RULE_NAME],
+    }
+    summary.update(emitents_result.stage_durations)
+    save_bonds_file(config.output_file, eligible_bonds, summary=summary)
     filtered_total = len(bonds) - len(eligible_bonds)
 
     print("\nГотово.")
@@ -134,7 +134,7 @@ def main() -> None:
         "  - Amortization_start_date < "
         f"{config.exclusion_window_days} дней (включая начавшуюся): {excluded_by_rule[AMORTIZATION_RULE_NAME]}"
     )
-    print(f"Ошибок: {errors + amortization_errors}")
+    print(f"Ошибок: {errors + amortization_errors + emitents_result.errors}")
     print(f"  - ошибки загрузки списка бумаг: {errors}")
     print(f"  - ошибки запроса амортизации: {amortization_errors}")
     print(f"  - ошибки этапа эмитентов: {emitents_result.errors}")

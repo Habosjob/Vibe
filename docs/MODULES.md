@@ -3,7 +3,7 @@
 ## `run.py`
 - Назначение: запуск полного сценария без аргументов.
 - Вход: `config.yml` (опционально), сеть, состояние в `state/`.
-- Выход: `output/moex_bonds.xlsx` (лист `MOEX_BONDS` + лист `SUMMARY`), `output/emitents.xlsx` (лист `EMITENTS`), `logs/latest.log`, `state/exclusions.json`, `state/eligible_bonds.json`, `state/emitents_registry.json`, чекпоинты `state/checkpoints/*.json`, опционально `raw/*.json`.
+- Выход: `output/moex_bonds.xlsx` (лист `MOEX_BONDS` + лист `SUMMARY`), `output/emitents.xlsx` (лист `EMITENTS`), `logs/latest.log`, `state/exclusions.json`, `state/eligible_bonds.json`, `state/emitents_registry.json`, `state/secid_to_emitter.json`, чекпоинты `state/checkpoints/*.json`, опционально `raw/*.json`.
 - Как менять конфиг: правьте `config.yml` (см. `docs/CONFIG.md`).
 
 ## `scripts/run_emitents.py`
@@ -44,7 +44,7 @@
 ## `moex_bond_screener/emitents.py`
 - Назначение: сбор справочника эмитентов по итоговому списку облигаций: полное наименование, ИНН, тикеры акций и ISIN облигаций, с выводом подэтапов прогресса в консоль.
 - Вход: список допущенных облигаций, `MoexClient`, `ScreenerStateStore`.
-- Выход: список строк для `output/emitents.xlsx`; статичные поля эмитента кэшируются в `state/emitents_registry.json`.
+- Выход: список строк для `output/emitents.xlsx`; статичные поля эмитента кэшируются в `state/emitents_registry.json`, а сопоставления `SECID -> EMITTER_ID` — в `state/secid_to_emitter.json`; в результат возвращаются таймеры подэтапов (`карточки`, `рынок bonds`, `рынок shares`).
 
 ## `moex_bond_screener/logging_utils.py`
 - Назначение: настраивает логирование в файл и консоль.
