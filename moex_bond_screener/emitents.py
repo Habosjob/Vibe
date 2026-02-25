@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -32,11 +33,12 @@ def build_emitents_reference(
 
     registry = state_store.load_emitents_registry()
     secid_samples = _pick_emitter_samples(eligible_bonds)
-    total_samples = len(secid_samples)
+    total_samples = len(secid_samples.known_emitters) + len(secid_samples.unknown_emitters)
     discovered_emitters: set[str] = set()
     errors = 0
     new_emitters = 0
     registry_changed = False
+    workers = max(1, int(client.config.amortization_workers))
 
     if progress_callback:
         progress_callback(
@@ -48,94 +50,113 @@ def build_emitents_reference(
             }
         )
 
-    for index, secid in enumerate(sorted(secid_samples), start=1):
-        emitter_id = secid_samples[secid]
-        cached = registry.get(emitter_id) if emitter_id else None
-        if emitter_id and cached and cached.get("full_name") and cached.get("inn"):
-            discovered_emitters.add(emitter_id)
-            if progress_callback:
-                progress_callback(
-                    {
-                        "phase": "sample_descriptions",
-                        "processed": index,
-                        "total": total_samples,
-                    }
-                )
-            continue
+    processed_samples = 0
+    pending_samples: list[tuple[str, str]] = []
 
-        details, fetch_errors = client.fetch_security_description(secid)
-        errors += fetch_errors
-        if fetch_errors:
-            if progress_callback:
-                progress_callback(
-                    {
-                        "phase": "sample_descriptions",
-                        "processed": index,
-                        "total": total_samples,
-                    }
-                )
-            continue
-
-        if not emitter_id:
-            emitter_id = str(details.get("EMITTER_ID") or details.get("ISSUER_ID") or "").strip()
-        if not emitter_id:
-            if progress_callback:
-                progress_callback(
-                    {
-                        "phase": "sample_descriptions",
-                        "processed": index,
-                        "total": total_samples,
-                    }
-                )
-            continue
-        discovered_emitters.add(emitter_id)
-
+    for emitter_id, secid in sorted(secid_samples.known_emitters.items()):
         cached = registry.get(emitter_id)
         if cached and cached.get("full_name") and cached.get("inn"):
+            discovered_emitters.add(emitter_id)
+            processed_samples += 1
             if progress_callback:
                 progress_callback(
                     {
                         "phase": "sample_descriptions",
-                        "processed": index,
+                        "processed": processed_samples,
                         "total": total_samples,
                     }
                 )
             continue
 
-        full_name = str(details.get("EMITTER_FULL_NAME") or "").strip()
-        inn = str(details.get("EMITTER_INN") or details.get("INN") or "").strip()
-        if not full_name and cached:
-            full_name = str(cached.get("full_name") or "")
-        if not inn and cached:
-            inn = str(cached.get("inn") or "")
+        pending_samples.append((secid, emitter_id))
 
-        if not full_name and not inn:
-            if progress_callback:
-                progress_callback(
-                    {
-                        "phase": "sample_descriptions",
-                        "processed": index,
-                        "total": total_samples,
-                    }
-                )
-            continue
+    pending_samples.extend((secid, "") for secid in sorted(secid_samples.unknown_emitters))
 
-        if emitter_id not in registry:
-            new_emitters += 1
-        registry_changed = True
-        registry[emitter_id] = {
-            "full_name": full_name,
-            "inn": inn,
-        }
+    if pending_samples:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(client.fetch_security_description, secid): (secid, emitter_id)
+                for secid, emitter_id in pending_samples
+            }
+            for future in as_completed(futures):
+                secid, emitter_id = futures[future]
+                try:
+                    details, fetch_errors = future.result()
+                except Exception:  # noqa: BLE001
+                    details, fetch_errors = {}, 1
+                errors += fetch_errors
+                processed_samples += 1
 
-        if progress_callback:
-            progress_callback(
-                {
-                    "phase": "sample_descriptions",
-                    "processed": index,
-                    "total": total_samples,
+                if fetch_errors:
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "phase": "sample_descriptions",
+                                "processed": processed_samples,
+                                "total": total_samples,
+                            }
+                        )
+                    continue
+
+                resolved_emitter_id = emitter_id or str(details.get("EMITTER_ID") or details.get("ISSUER_ID") or "").strip()
+                if not resolved_emitter_id:
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "phase": "sample_descriptions",
+                                "processed": processed_samples,
+                                "total": total_samples,
+                            }
+                        )
+                    continue
+                discovered_emitters.add(resolved_emitter_id)
+
+                cached = registry.get(resolved_emitter_id)
+                if cached and cached.get("full_name") and cached.get("inn"):
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "phase": "sample_descriptions",
+                                "processed": processed_samples,
+                                "total": total_samples,
+                            }
+                        )
+                    continue
+
+                full_name = str(details.get("EMITTER_FULL_NAME") or "").strip()
+                inn = str(details.get("EMITTER_INN") or details.get("INN") or "").strip()
+                if not full_name and cached:
+                    full_name = str(cached.get("full_name") or "")
+                if not inn and cached:
+                    inn = str(cached.get("inn") or "")
+
+                if not full_name and not inn:
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "phase": "sample_descriptions",
+                                "processed": processed_samples,
+                                "total": total_samples,
+                            }
+                        )
+                    continue
+
+                if resolved_emitter_id not in registry:
+                    new_emitters += 1
+                registry_changed = True
+                registry[resolved_emitter_id] = {
+                    "full_name": full_name,
+                    "inn": inn,
                 }
-            )
+
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "phase": "sample_descriptions",
+                            "processed": processed_samples,
+                            "total": total_samples,
+                        }
+                    )
 
     if registry_changed:
         state_store.save_emitents_registry(registry)
@@ -172,9 +193,15 @@ def build_emitents_reference(
     )
 
 
-def _pick_emitter_samples(eligible_bonds: list[dict[str, Any]]) -> dict[str, str]:
-    secid_to_emitter: dict[str, str] = {}
-    sampled_emitters: set[str] = set()
+@dataclass(slots=True)
+class EmitterSamples:
+    known_emitters: dict[str, str]
+    unknown_emitters: set[str]
+
+
+def _pick_emitter_samples(eligible_bonds: list[dict[str, Any]]) -> EmitterSamples:
+    known_emitters: dict[str, str] = {}
+    unknown_emitters: set[str] = set()
     for bond in eligible_bonds:
         secid = str(bond.get("SECID") or "").strip()
         emitter_id = str(bond.get("EMITTER_ID") or bond.get("ISSUER_ID") or "").strip()
@@ -182,15 +209,14 @@ def _pick_emitter_samples(eligible_bonds: list[dict[str, Any]]) -> dict[str, str
             continue
 
         if not emitter_id:
-            secid_to_emitter[secid] = ""
+            unknown_emitters.add(secid)
             continue
 
-        if emitter_id in sampled_emitters:
+        if emitter_id in known_emitters:
             continue
 
-        secid_to_emitter[secid] = emitter_id
-        sampled_emitters.add(emitter_id)
-    return secid_to_emitter
+        known_emitters[emitter_id] = secid
+    return EmitterSamples(known_emitters=known_emitters, unknown_emitters=unknown_emitters)
 
 
 def _collect_market_instruments(rows: list[dict[str, Any]], instrument_key: str) -> dict[str, list[str]]:
