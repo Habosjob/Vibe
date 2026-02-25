@@ -32,3 +32,15 @@ def test_state_store_incremental_updates(tmp_path) -> None:
 
     payload = json.loads((tmp_path / "state" / "eligible_bonds.json").read_text(encoding="utf-8"))
     assert payload["bonds"].keys() == {"B"}
+
+
+def test_state_store_checkpoint_roundtrip(tmp_path) -> None:
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    store.save_checkpoint("bonds_fetch", {"next_start": 200, "completed": False})
+    loaded = store.load_checkpoint("bonds_fetch")
+
+    assert loaded == {"next_start": 200, "completed": False}
+
+    store.clear_checkpoint("bonds_fetch")
+    assert store.load_checkpoint("bonds_fetch") == {}

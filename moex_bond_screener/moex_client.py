@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
 from .config import AppConfig
 from .raw_store import RawStore
+
+ProgressCallback = Callable[[dict[str, Any]], None]
+CheckpointSaver = Callable[[dict[str, Any]], None]
 
 
 class MoexClient:
@@ -20,16 +23,36 @@ class MoexClient:
         self.session = requests.Session()
         self.raw_store = raw_store
 
-    def fetch_all_bonds(self) -> tuple[list[dict[str, Any]], int]:
-        bonds: list[dict[str, Any]] = []
+    def fetch_all_bonds(
+        self,
+        checkpoint_data: dict[str, Any] | None = None,
+        checkpoint_saver: CheckpointSaver | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> tuple[list[dict[str, Any]], int, bool]:
+        bonds = list(checkpoint_data.get("bonds", [])) if checkpoint_data else []
         errors = 0
-        start = 0
-        seen_secids: set[str] = set()
+        start = int(checkpoint_data.get("next_start", 0)) if checkpoint_data else 0
+        seen_secids = {str(secid) for secid in checkpoint_data.get("seen_secids", [])} if checkpoint_data else set()
+        completed = True
+
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "fetch_bonds",
+                    "fetched": len(bonds),
+                    "start": start,
+                    "message": "Возобновление загрузки списка облигаций",
+                }
+            )
 
         while True:
             self.logger.info("Запрос страницы MOEX: start=%s", start)
-            page_data, page_errors = self._fetch_page(start)
+            page_data, page_errors, request_failed = self._fetch_page(start)
             errors += page_errors
+
+            if request_failed:
+                completed = False
+                break
 
             if not page_data:
                 break
@@ -43,6 +66,16 @@ class MoexClient:
                     new_items.append(item)
 
             bonds.extend(new_items)
+
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "fetch_bonds",
+                        "fetched": len(bonds),
+                        "new_items": len(new_items),
+                        "start": start,
+                    }
+                )
 
             if start > 0 and not new_items:
                 self.logger.warning(
@@ -61,12 +94,39 @@ class MoexClient:
 
             if len(page_data) < self.config.page_size:
                 break
-            start += self.config.page_size
+
+            next_start = start + self.config.page_size
+            if checkpoint_saver:
+                checkpoint_saver(
+                    {
+                        "bonds": bonds,
+                        "next_start": next_start,
+                        "seen_secids": sorted(seen_secids),
+                        "completed": False,
+                    }
+                )
+            start = next_start
             time.sleep(self.config.request_delay_seconds)
 
-        return bonds, errors
+        if checkpoint_saver:
+            checkpoint_saver(
+                {
+                    "bonds": bonds,
+                    "next_start": start,
+                    "seen_secids": sorted(seen_secids),
+                    "completed": completed,
+                }
+            )
 
-    def enrich_amortization_start_dates(self, bonds: list[dict[str, Any]]) -> int:
+        return bonds, errors, completed
+
+    def enrich_amortization_start_dates(
+        self,
+        bonds: list[dict[str, Any]],
+        checkpoint_data: dict[str, Any] | None = None,
+        checkpoint_saver: CheckpointSaver | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> int:
         """Обогащает список бумаг полем Amortization_start_date.
 
         Значение заполняется самой ранней датой амортизации по данным MOEX,
@@ -74,22 +134,57 @@ class MoexClient:
         """
 
         errors = 0
-        for bond in bonds:
+        processed: dict[str, str] = dict(checkpoint_data.get("processed", {})) if checkpoint_data else {}
+        total = len(bonds)
+
+        for index, bond in enumerate(bonds, start=1):
             secid = str(bond.get("SECID") or "").strip()
             if not secid:
                 bond["Amortization_start_date"] = ""
                 continue
 
+            if secid in processed:
+                bond["Amortization_start_date"] = str(processed.get(secid) or "")
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "amortization",
+                            "processed": index,
+                            "total": total,
+                            "secid": secid,
+                            "resumed": True,
+                        }
+                    )
+                continue
+
             date_value, request_errors = self._fetch_amortization_start_date(secid)
             errors += request_errors
             bond["Amortization_start_date"] = date_value
+            processed[secid] = date_value
+
+            if checkpoint_saver:
+                checkpoint_saver({"processed": processed, "completed": False})
+
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": "amortization",
+                        "processed": index,
+                        "total": total,
+                        "secid": secid,
+                        "resumed": False,
+                    }
+                )
 
             if self.config.request_delay_seconds > 0:
                 time.sleep(self.config.request_delay_seconds)
 
+        if checkpoint_saver:
+            checkpoint_saver({"processed": processed, "completed": True})
+
         return errors
 
-    def _fetch_page(self, start: int) -> tuple[list[dict[str, Any]], int]:
+    def _fetch_page(self, start: int) -> tuple[list[dict[str, Any]], int, bool]:
         params = {
             "iss.meta": "off",
             "iss.only": "securities",
@@ -113,14 +208,14 @@ class MoexClient:
                 columns = payload["securities"]["columns"]
                 rows = payload["securities"]["data"]
                 items = [dict(zip(columns, row, strict=False)) for row in rows]
-                return items, 0
+                return items, 0, False
             except requests.RequestException as error:
                 self.logger.warning("Ошибка запроса start=%s попытка=%s: %s", start, attempt, error)
                 if attempt == self.config.retries:
-                    return [], 1
+                    return [], 1, True
                 time.sleep(self.config.request_delay_seconds * attempt)
 
-        return [], 1
+        return [], 1, True
 
     def _fetch_amortization_start_date(self, secid: str) -> tuple[str, int]:
         url = f"https://iss.moex.com/iss/securities/{secid}/bondization.json"

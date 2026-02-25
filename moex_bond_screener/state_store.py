@@ -22,6 +22,8 @@ class ScreenerStateStore:
         self.base_path.mkdir(parents=True, exist_ok=True)
         self.exclusions_path = self.base_path / "exclusions.json"
         self.eligible_bonds_path = self.base_path / "eligible_bonds.json"
+        self.checkpoints_dir = self.base_path / "checkpoints"
+        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
     def load_exclusions(self) -> dict[str, dict[str, str]]:
         payload = self._load_json(self.exclusions_path)
@@ -67,6 +69,23 @@ class ScreenerStateStore:
         removed = max(len(stored_bonds) - len(next_bonds), 0)
         self._save_json(self.eligible_bonds_path, {"bonds": next_bonds})
         return IncrementalStats(inserted=inserted, updated=updated, unchanged=unchanged, removed=removed)
+
+    def load_checkpoint(self, name: str) -> dict[str, Any]:
+        return self._load_json(self._checkpoint_path(name))
+
+    def save_checkpoint(self, name: str, payload: dict[str, Any]) -> None:
+        self._save_json(self._checkpoint_path(name), payload)
+
+    def clear_checkpoint(self, name: str) -> None:
+        path = self._checkpoint_path(name)
+        if path.exists():
+            path.unlink()
+
+    def _checkpoint_path(self, name: str) -> Path:
+        safe_name = "".join(ch for ch in name if ch.isalnum() or ch in {"_", "-"}).strip("_")
+        if not safe_name:
+            safe_name = "checkpoint"
+        return self.checkpoints_dir / f"{safe_name}.json"
 
     @staticmethod
     def _load_json(path: Path) -> dict[str, Any]:
