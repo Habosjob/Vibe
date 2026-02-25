@@ -114,6 +114,7 @@ def main() -> None:
         checkpoint_saver=lambda payload: state_store.save_checkpoint("dohod_enrichment", payload),
         progress_callback=lambda data: _print_dohod_progress(data, progress),
     )
+    dohod_stats = dohod_client.last_stats
 
     progress.start_stage(8, "Повторная фильтрация после обогащения")
     post_dohod_exclusion_result = exclusion_filter.apply(
@@ -168,6 +169,14 @@ def main() -> None:
         "excluded_amortization_started_or_lt_1y_permanent": excluded_by_rule[AMORTIZATION_RULE_NAME],
         "amortization_cache_hits": int(amortization_checkpoint_latest.get("cache_stats", {}).get("hits", 0)),
         "amortization_cache_misses": int(amortization_checkpoint_latest.get("cache_stats", {}).get("misses", 0)),
+        "dohod_realprice_added": dohod_stats.realprice_added,
+        "dohod_realprice_updated": dohod_stats.realprice_updated,
+        "dohod_coupon_added": dohod_stats.coupon_added,
+        "dohod_coupon_updated": dohod_stats.coupon_updated,
+        "dohod_offer_added": dohod_stats.offer_added,
+        "dohod_offer_updated": dohod_stats.offer_updated,
+        "dohod_cache_hits": dohod_stats.cache_hits,
+        "dohod_requested": dohod_stats.requested,
     }
     summary.update(emitents_result.stage_durations)
     save_bonds_file(config.output_file, eligible_bonds, summary=summary)
@@ -190,6 +199,12 @@ def main() -> None:
     print(f"  - ошибки запроса амортизации: {amortization_errors}")
     print(f"  - ошибки обогащения ДОХОД: {dohod_errors}")
     print(f"  - ошибки этапа эмитентов: {emitents_result.errors}")
+    print(
+        "ДОХОД (добавлено/обновлено): "
+        f"RealPrice +{dohod_stats.realprice_added}/~{dohod_stats.realprice_updated}, "
+        f"COUPONPERCENT +{dohod_stats.coupon_added}/~{dohod_stats.coupon_updated}, "
+        f"OFFERDATE +{dohod_stats.offer_added}/~{dohod_stats.offer_updated}"
+    )
     print(
         "Инкрементальные изменения: "
         f"+{incremental_stats.inserted} / ~{incremental_stats.updated} / = {incremental_stats.unchanged} / -{incremental_stats.removed}"
@@ -222,6 +237,14 @@ def main() -> None:
                 "amortization_cache_misses": int(
                     amortization_checkpoint_latest.get("cache_stats", {}).get("misses", 0)
                 ),
+                "dohod_realprice_added": dohod_stats.realprice_added,
+                "dohod_realprice_updated": dohod_stats.realprice_updated,
+                "dohod_coupon_added": dohod_stats.coupon_added,
+                "dohod_coupon_updated": dohod_stats.coupon_updated,
+                "dohod_offer_added": dohod_stats.offer_added,
+                "dohod_offer_updated": dohod_stats.offer_updated,
+                "dohod_cache_hits": dohod_stats.cache_hits,
+                "dohod_requested": dohod_stats.requested,
             },
         }
     )
