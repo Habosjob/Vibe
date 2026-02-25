@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from moex_bond_screener.config import load_config
-from moex_bond_screener.exclusion_rules import BondExclusionFilter
+from moex_bond_screener.exclusion_rules import AMORTIZATION_RULE_NAME, BondExclusionFilter
 from moex_bond_screener.logging_utils import setup_logging
 from moex_bond_screener.moex_client import AMORTIZATION_CHECKPOINT_VERSION, MoexClient
 from moex_bond_screener.progress import PipelineProgress
@@ -70,36 +70,55 @@ def main() -> None:
     )
     state_store.clear_checkpoint("amortization")
 
+    post_amortization_exclusion_result = exclusion_filter.apply(
+        bonds=exclusion_result.eligible_bonds,
+        previous_exclusions={},
+    )
+    eligible_bonds = post_amortization_exclusion_result.eligible_bonds
+    active_exclusions = dict(exclusion_result.active_exclusions)
+    active_exclusions.update(post_amortization_exclusion_result.active_exclusions)
+    excluded_by_rule = dict(exclusion_result.excluded_by_rule)
+    for rule_name, count in post_amortization_exclusion_result.excluded_by_rule.items():
+        excluded_by_rule[rule_name] = excluded_by_rule.get(rule_name, 0) + count
+    skipped_by_active_exclusion = (
+        exclusion_result.skipped_by_active_exclusion + post_amortization_exclusion_result.skipped_by_active_exclusion
+    )
+
     progress.start_stage(7, "Сохранение инкрементального состояния")
-    state_store.save_exclusions(exclusion_result.active_exclusions)
-    incremental_stats = state_store.update_eligible_bonds(exclusion_result.eligible_bonds)
+    state_store.save_exclusions(active_exclusions)
+    incremental_stats = state_store.update_eligible_bonds(eligible_bonds)
 
     progress.start_stage(8, "Сохранение итогового файла")
     elapsed_before_export = time.time() - started
     summary = {
-        "bonds_count": len(exclusion_result.eligible_bonds),
+        "bonds_count": len(eligible_bonds),
         "errors_count": errors + amortization_errors,
         "elapsed_seconds": elapsed_before_export,
-        "filtered_total": len(bonds) - len(exclusion_result.eligible_bonds),
-        "excluded_by_active_exclusion": exclusion_result.skipped_by_active_exclusion,
-        "excluded_buyback_lt_1y": exclusion_result.excluded_by_rule["buyback_lt_1y"],
-        "excluded_offer_lt_1y": exclusion_result.excluded_by_rule["offer_lt_1y"],
-        "excluded_calloption_lt_1y": exclusion_result.excluded_by_rule["calloption_lt_1y"],
-        "excluded_mat_lt_1y": exclusion_result.excluded_by_rule["mat_lt_1y"],
+        "filtered_total": len(bonds) - len(eligible_bonds),
+        "excluded_by_active_exclusion": skipped_by_active_exclusion,
+        "excluded_buyback_lt_1y": excluded_by_rule["buyback_lt_1y"],
+        "excluded_offer_lt_1y": excluded_by_rule["offer_lt_1y"],
+        "excluded_calloption_lt_1y": excluded_by_rule["calloption_lt_1y"],
+        "excluded_mat_lt_1y": excluded_by_rule["mat_lt_1y"],
+        "excluded_amortization_started_or_lt_1y_permanent": excluded_by_rule[AMORTIZATION_RULE_NAME],
     }
-    save_bonds_file(config.output_file, exclusion_result.eligible_bonds, summary=summary)
+    save_bonds_file(config.output_file, eligible_bonds, summary=summary)
 
     elapsed = time.time() - started
-    filtered_total = len(bonds) - len(exclusion_result.eligible_bonds)
+    filtered_total = len(bonds) - len(eligible_bonds)
 
     print("\nГотово.")
     print(f"Обработано бумаг: {len(bonds)}")
     print(f"Отфильтровано: {filtered_total}")
-    print(f"  - уже исключены по активному сроку: {exclusion_result.skipped_by_active_exclusion}")
-    print(f"  - BUYBACKDATE < {config.exclusion_window_days} дней: {exclusion_result.excluded_by_rule['buyback_lt_1y']}")
-    print(f"  - OFFERDATE < {config.exclusion_window_days} дней: {exclusion_result.excluded_by_rule['offer_lt_1y']}")
-    print(f"  - CALLOPTIONDATE < {config.exclusion_window_days} дней: {exclusion_result.excluded_by_rule['calloption_lt_1y']}")
-    print(f"  - MATDATE < {config.exclusion_window_days} дней: {exclusion_result.excluded_by_rule['mat_lt_1y']}")
+    print(f"  - уже исключены по активному сроку: {skipped_by_active_exclusion}")
+    print(f"  - BUYBACKDATE < {config.exclusion_window_days} дней: {excluded_by_rule['buyback_lt_1y']}")
+    print(f"  - OFFERDATE < {config.exclusion_window_days} дней: {excluded_by_rule['offer_lt_1y']}")
+    print(f"  - CALLOPTIONDATE < {config.exclusion_window_days} дней: {excluded_by_rule['calloption_lt_1y']}")
+    print(f"  - MATDATE < {config.exclusion_window_days} дней: {excluded_by_rule['mat_lt_1y']}")
+    print(
+        "  - Amortization_start_date < "
+        f"{config.exclusion_window_days} дней (включая начавшуюся): {excluded_by_rule[AMORTIZATION_RULE_NAME]}"
+    )
     print(f"Ошибок: {errors + amortization_errors}")
     print(f"  - ошибки загрузки списка бумаг: {errors}")
     print(f"  - ошибки запроса амортизации: {amortization_errors}")
