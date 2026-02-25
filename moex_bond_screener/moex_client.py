@@ -68,9 +68,9 @@ class MoexClient:
     def _fetch_page(self, start: int) -> tuple[list[dict[str, Any]], int]:
         params = {
             "iss.meta": "off",
+            "iss.only": "securities",
             "start": start,
             "limit": self.config.page_size,
-            "securities.columns": "SECID,SHORTNAME,ISIN,FACEUNIT,LISTLEVEL,PREVLEGALCLOSEPRICE",
         }
 
         for attempt in range(1, self.config.retries + 1):
