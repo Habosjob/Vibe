@@ -1,0 +1,9 @@
+base_url: "https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json"
+timeout_seconds: 20
+request_delay_seconds: 0.15
+retries: 3
+page_size: 100
+output_file: "output/moex_bonds.csv"
+raw_dump_enabled: false
+raw_ttl_hours: 24
+raw_max_size_mb: 50
