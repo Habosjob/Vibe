@@ -104,7 +104,7 @@ def test_save_bonds_file_removes_unwanted_and_merged_columns(tmp_path: Path) -> 
     assert "CURRENCYID" in headers
 
 
-def test_save_bonds_excel_keeps_headers_unmerged_and_reorders_groups(tmp_path: Path) -> None:
+def test_save_bonds_excel_keeps_separator_columns_and_group_outline(tmp_path: Path) -> None:
     target = tmp_path / "output" / "bonds.xlsx"
     bonds = [
         {
@@ -120,22 +120,39 @@ def test_save_bonds_excel_keeps_headers_unmerged_and_reorders_groups(tmp_path: P
 
     workbook = load_workbook(target)
     sheet = workbook["MOEX_BONDS"]
+    first_row = [sheet.cell(row=1, column=idx).value for idx in range(1, sheet.max_column + 1)]
     headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
 
     assert not sheet.merged_cells.ranges
 
-    secid_column = headers.index("SECID") + 1
-    currency_column = headers.index("CURRENCYID") + 1
-    assert sheet.cell(row=1, column=secid_column).value == "Прочее"
-    assert sheet.cell(row=1, column=currency_column).value == "Купоны и номинал"
+    separator_columns = [idx for idx, header in enumerate(headers, start=1) if header in ("", None)]
+    assert len(separator_columns) >= 3
 
-    grouped_ranges = [
-        (dimension.min, dimension.max)
-        for dimension in sheet.column_dimensions.values()
-        if dimension.outlineLevel == 1
+    first_separator = separator_columns[0]
+    assert first_row[first_separator - 1] == "Служебная информация"
+    assert sheet.column_dimensions[sheet.cell(row=1, column=first_separator).column_letter].width >= 18
+    assert sheet.cell(row=1, column=first_separator).alignment.wrap_text is True
+
+    for idx, value in enumerate(first_row, start=1):
+        if idx in separator_columns:
+            assert value in {
+                "Служебная информация",
+                "Торги и доходность",
+                "Купоны и номинал",
+                "Даты",
+                "Прочее",
+            }
+        else:
+            assert value in ("", None)
+
+    data_columns_outline = [
+        idx
+        for idx, header in enumerate(headers, start=1)
+        if header not in ("", None)
+        and sheet.column_dimensions[sheet.cell(row=2, column=idx).column_letter].outlineLevel == 1
     ]
-    assert len(grouped_ranges) >= 3
-
+    assert data_columns_outline
+    assert headers[first_separator] == "SHORTNAME"
 
 def test_save_bonds_excel_formats_only_issue_size_columns_and_empty_zero_dates(tmp_path: Path) -> None:
     target = tmp_path / "output" / "bonds.xlsx"
