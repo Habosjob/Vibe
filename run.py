@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from moex_bond_screener.config import load_config
+from moex_bond_screener.emitents import build_emitents_reference
 from moex_bond_screener.exclusion_rules import AMORTIZATION_RULE_NAME, BondExclusionFilter
 from moex_bond_screener.logging_utils import setup_logging
 from moex_bond_screener.moex_client import AMORTIZATION_CHECKPOINT_VERSION, MoexClient
@@ -14,12 +15,13 @@ from moex_bond_screener.progress import PipelineProgress
 from moex_bond_screener.raw_store import RawStore
 from moex_bond_screener.state_store import ScreenerStateStore
 from moex_bond_screener.writer import save_bonds_file
+from moex_bond_screener.writer import save_emitents_excel
 
 
 def main() -> None:
     started = time.time()
     logger = setup_logging()
-    progress = PipelineProgress(total_stages=8)
+    progress = PipelineProgress(total_stages=9)
 
     progress.start_stage(1, "Загрузка конфигурации")
     config = load_config()
@@ -108,6 +110,14 @@ def main() -> None:
     }
     save_bonds_file(config.output_file, eligible_bonds, summary=summary)
 
+    progress.start_stage(9, "Формирование справочника эмитентов")
+    emitents_result = build_emitents_reference(
+        eligible_bonds=eligible_bonds,
+        client=client,
+        state_store=state_store,
+    )
+    save_emitents_excel(config.emitents_output_file, emitents_result.rows)
+
     elapsed = time.time() - started
     filtered_total = len(bonds) - len(eligible_bonds)
 
@@ -126,12 +136,18 @@ def main() -> None:
     print(f"Ошибок: {errors + amortization_errors}")
     print(f"  - ошибки загрузки списка бумаг: {errors}")
     print(f"  - ошибки запроса амортизации: {amortization_errors}")
+    print(f"  - ошибки этапа эмитентов: {emitents_result.errors}")
     print(
         "Инкрементальные изменения: "
         f"+{incremental_stats.inserted} / ~{incremental_stats.updated} / = {incremental_stats.unchanged} / -{incremental_stats.removed}"
     )
     if not fetch_completed:
         print("[Внимание] Загрузка MOEX завершилась с ошибкой сети. Чекпоинт сохранен, следующий запуск продолжит с места остановки.")
+    print(
+        "Справочник эмитентов: "
+        f"{emitents_result.processed_emitters} эмитентов, новых: {emitents_result.new_emitters}, "
+        f"файл: {config.emitents_output_file}"
+    )
     print(f"Время выполнения: {elapsed:.2f} сек")
 
 

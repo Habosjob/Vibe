@@ -5,6 +5,7 @@ amortization_request_delay_seconds: 0.02
 retries: 3
 page_size: 100
 output_file: "output/moex_bonds.xlsx"
+emitents_output_file: "output/emitents.xlsx"
 raw_dump_enabled: false
 raw_ttl_hours: 24
 raw_max_size_mb: 50

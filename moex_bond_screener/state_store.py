@@ -24,6 +24,7 @@ class ScreenerStateStore:
         self.eligible_bonds_path = self.base_path / "eligible_bonds.json"
         self.checkpoints_dir = self.base_path / "checkpoints"
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        self.emitents_registry_path = self.base_path / "emitents_registry.json"
 
     def load_exclusions(self) -> dict[str, dict[str, str]]:
         payload = self._load_json(self.exclusions_path)
@@ -80,6 +81,25 @@ class ScreenerStateStore:
         path = self._checkpoint_path(name)
         if path.exists():
             path.unlink()
+
+    def load_emitents_registry(self) -> dict[str, dict[str, str]]:
+        payload = self._load_json(self.emitents_registry_path)
+        emitents = payload.get("emitents", {}) if isinstance(payload, dict) else {}
+        if not isinstance(emitents, dict):
+            return {}
+
+        normalized: dict[str, dict[str, str]] = {}
+        for emitter_id, details in emitents.items():
+            if not isinstance(details, dict):
+                continue
+            normalized[str(emitter_id)] = {
+                "full_name": str(details.get("full_name") or ""),
+                "inn": str(details.get("inn") or ""),
+            }
+        return normalized
+
+    def save_emitents_registry(self, emitents: dict[str, dict[str, str]]) -> None:
+        self._save_json(self.emitents_registry_path, {"emitents": emitents})
 
     def _checkpoint_path(self, name: str) -> Path:
         safe_name = "".join(ch for ch in name if ch.isalnum() or ch in {"_", "-"}).strip("_")
