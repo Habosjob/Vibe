@@ -28,6 +28,13 @@ NUMBER_RE = r"[+-]?\d+(?:[.,]\d+)?"
 INDEX_RE = re.compile(r"(RUONIA|CBR_RATE|Z_CURVE_RUS)\s*([+-]\s*\d+(?:[.,]\d+)?)?", re.IGNORECASE)
 TENOR_RE = re.compile(r"сроком\s+погашения\s+(\d+)\s+лет", re.IGNORECASE)
 
+DL_PAIR_RE = re.compile(
+    r"<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>",
+    re.IGNORECASE | re.DOTALL,
+)
+SCRIPT_ASK_RE = re.compile(r"\"(?:ask|ask_price|askPrice)\"\s*[:=]\s*\"?([+-]?\d+(?:[.,]\d+)?)", re.IGNORECASE)
+SCRIPT_YTM_RE = re.compile(r"\"(?:ytm_date|ytmDate|date_ytm)\"\s*[:=]\s*\"?(\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})", re.IGNORECASE)
+SCRIPT_EVENT_RE = re.compile(r"\"(?:event|event_name|nearest_event)\"\s*[:=]\s*\"([^\"]+)\"", re.IGNORECASE)
 
 @dataclass(slots=True)
 class DohodBondPayload:
@@ -167,10 +174,6 @@ class DohodEnricher:
 
         return errors
 
-    def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None) -> tuple[DohodBondPayload, int]:
-        """Совместимость со старыми сборками: запрос только по primary (ISIN-only)."""
-        return self._fetch_and_parse(primary_identifier)
-
     def _fetch_and_parse(self, secid: str) -> tuple[DohodBondPayload, int]:
         for attempt in range(1, self.config.retries + 1):
             try:
@@ -183,7 +186,10 @@ class DohodEnricher:
                 html = response.text
                 if self.raw_store and self.config.raw_dump_enabled:
                     self.raw_store.dump_html(f"dohod_{secid}.html", html)
-                return self.parse_bond_payload(html), 0
+                payload = self.parse_bond_payload(html)
+                if self.raw_store and _is_payload_empty(payload):
+                    self.raw_store.dump_html(f"dohod_empty_{secid}.html", html)
+                return payload, 0
             except requests.RequestException as error:
                 self.logger.warning("Ошибка запроса ДОХОД instrument=%s попытка=%s: %s", secid, attempt, error)
                 if attempt == self.config.retries:
@@ -212,7 +218,7 @@ class DohodEnricher:
 
     @staticmethod
     def _resolve_secondary_identifier(bond: dict[str, Any], primary_identifier: str) -> str:
-        """Совместимость со старыми сборками: fallback отключен, всегда пусто."""
+        """Сервис ДОХОД работает только с ISIN: fallback по другим идентификаторам отключен."""
         _ = bond
         _ = primary_identifier
         return ""
@@ -230,8 +236,19 @@ class DohodEnricher:
         if index_name == "Z_CURVE_RUS":
             tenor_years = _parse_tenor_years(formula_value)
 
+        if ask_price is None:
+            ask_price = _parse_ask_price_from_html(html)
+
+        if not index_name:
+            index_name, spread = _parse_index_and_spread(_strip_html(html))
+
         event_name = extracted.get("Событие в ближ. дату", "").strip().lower()
+        if not event_name:
+            event_name = _extract_event_name_from_html(html)
+
         ytm_date = _to_iso_date(extracted.get("Дата, к которой рассчит. YTM", ""))
+        if not ytm_date:
+            ytm_date = _extract_ytm_date_from_html(html)
 
         return DohodBondPayload(ask_price, index_name, spread, tenor_years, event_name, ytm_date)
 
@@ -394,6 +411,14 @@ def _extract_label_map(html: str) -> dict[str, str]:
         result[label] = _strip_html(match.group(1))
 
     if len(result) < len(labels):
+        # На части карточек используется верстка через список определений (dt/dd) вместо таблицы.
+        for raw_label, raw_value in DL_PAIR_RE.findall(html):
+            target_label = _match_target_label(_strip_html(raw_label))
+            if not target_label or target_label in result:
+                continue
+            result[target_label] = _strip_html(raw_value)
+
+    if len(result) < len(labels):
         loose = _extract_label_map_loose(html)
         for label, value in loose.items():
             result.setdefault(label, value)
@@ -507,11 +532,54 @@ def _to_iso_date(raw: str) -> str:
     value = raw.strip()
     if not value:
         return ""
-    try:
-        return datetime.strptime(value, "%d.%m.%Y").strftime("%Y-%m-%d")
-    except ValueError:
-        return ""
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return ""
 
+
+def _parse_ask_price_from_html(html: str) -> float | None:
+    script_match = SCRIPT_ASK_RE.search(html)
+    if script_match:
+        try:
+            return float(script_match.group(1).replace(",", "."))
+        except ValueError:
+            pass
+
+    text = _strip_html(html)
+    ask_match = re.search(r"\bask\b[^0-9]{0,20}([+-]?\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
+    if not ask_match:
+        return None
+    try:
+        return float(ask_match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _extract_ytm_date_from_html(html: str) -> str:
+    script_match = SCRIPT_YTM_RE.search(html)
+    if script_match:
+        return _to_iso_date(script_match.group(1))
+
+    text = _strip_html(html)
+    match = re.search(r"(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})", text)
+    if not match:
+        return ""
+    return _to_iso_date(match.group(1))
+
+
+def _extract_event_name_from_html(html: str) -> str:
+    script_match = SCRIPT_EVENT_RE.search(html)
+    if script_match:
+        return script_match.group(1).strip().lower()
+
+    text = _strip_html(html).lower()
+    for marker in ("оферта", "put", "погашение"):
+        if marker in text:
+            return marker
+    return ""
 
 
 def _is_payload_empty(payload: DohodBondPayload) -> bool:

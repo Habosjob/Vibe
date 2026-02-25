@@ -14,6 +14,9 @@ class RawStore:
     def dump_json(self, filename: str, payload: str) -> None:
         (self.root / filename).write_text(payload, encoding="utf-8")
 
+    def dump_html(self, filename: str, payload: str) -> None:
+        (self.root / filename).write_text(payload, encoding="utf-8")
+
     def cleanup(self, ttl_hours: int, max_size_mb: int) -> None:
         files = sorted([f for f in self.root.glob("*.json") if f.is_file()], key=lambda f: f.stat().st_mtime)
         now = time.time()
