@@ -44,6 +44,7 @@ def build_emitents_reference(
     secid_cache_changed = False
     stage_durations = {
         "emitents_cards_seconds": 0.0,
+        "emitents_market_descriptions_seconds": 0.0,
         "emitents_market_bonds_seconds": 0.0,
         "emitents_market_shares_seconds": 0.0,
     }
@@ -181,7 +182,7 @@ def build_emitents_reference(
     bonds_started = perf_counter()
     unresolved_bonds = _count_bonds_without_emitter(eligible_bonds, secid_to_emitter)
     bonds_without_isin = _count_bonds_without_isin(eligible_bonds)
-    need_bonds_market = unresolved_bonds > 0 or bonds_without_isin > 0
+    need_bonds_market = True
     if need_bonds_market:
         bonds_market = state_store.load_market_cache("bonds") or []
         if not bonds_market:
@@ -222,6 +223,76 @@ def build_emitents_reference(
         progress_callback({"phase": "market_data", "message": "Используем кэш рыночных инструментов shares"})
     stage_durations["emitents_market_shares_seconds"] = round(perf_counter() - shares_started, 2)
     errors += bonds_errors + shares_errors
+
+    market_description_started = perf_counter()
+    secid_cache_before_market = dict(secid_to_emitter)
+    market_description_errors = _resolve_market_emitter_ids(
+        rows=[*bonds_market, *shares_market],
+        client=client,
+        secid_to_emitter=secid_to_emitter,
+        workers=workers,
+        progress_callback=progress_callback,
+    )
+    stage_durations["emitents_market_descriptions_seconds"] = round(perf_counter() - market_description_started, 2)
+    errors += market_description_errors
+    if secid_to_emitter != secid_cache_before_market:
+        state_store.save_secid_to_emitter_map(secid_to_emitter)
+
+    market_emitters = _extract_emitter_ids_from_market(bonds_market) | _extract_emitter_ids_from_market(shares_market)
+    discovered_emitters.update(market_emitters)
+    late_emitters = sorted(emitter_id for emitter_id in market_emitters if _needs_emitter_details(registry.get(emitter_id)))
+    if progress_callback:
+        progress_callback(
+            {
+                "phase": "emitter_profiles",
+                "processed": 0,
+                "total": len(late_emitters),
+                "message": "Дозагрузка карточек эмитентов, найденных через markets/*/securities",
+            }
+        )
+
+    if late_emitters:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(client.fetch_emitter_details, emitter_id): emitter_id
+                for emitter_id in late_emitters
+            }
+            late_processed = 0
+            for future in as_completed(futures):
+                emitter_id = futures[future]
+                try:
+                    details, fetch_errors = future.result()
+                except Exception:  # noqa: BLE001
+                    details, fetch_errors = {}, 1
+                errors += fetch_errors
+                late_processed += 1
+
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "phase": "emitter_profiles",
+                            "processed": late_processed,
+                            "total": len(late_emitters),
+                        }
+                    )
+
+                if fetch_errors:
+                    continue
+
+                cached = registry.get(emitter_id, {})
+                full_name = str(details.get("TITLE") or details.get("SHORT_TITLE") or cached.get("full_name") or "").strip()
+                inn = str(details.get("INN") or cached.get("inn") or "").strip()
+                if not full_name and not inn:
+                    continue
+
+                if emitter_id not in registry:
+                    new_emitters += 1
+                registry[emitter_id] = {
+                    "full_name": full_name,
+                    "inn": inn,
+                }
+
+        state_store.save_emitents_registry(registry)
 
     bond_map = _collect_bond_isins_by_emitter(eligible_bonds, secid_to_emitter)
     if bonds_market:
@@ -310,6 +381,104 @@ def _collect_market_instruments(rows: list[dict[str, Any]], instrument_key: str)
         instruments.setdefault(emitter_id, set()).add(instrument)
 
     return {key: sorted(values) for key, values in instruments.items()}
+
+
+def _extract_emitter_ids_from_market(rows: list[dict[str, Any]]) -> set[str]:
+    emitter_ids: set[str] = set()
+    for row in rows:
+        emitter_id = _normalize_emitter_id(
+            row.get("EMITTER_ID")
+            or row.get("ISSUER_ID")
+            or row.get("EMITTERID")
+            or row.get("ISSUERID")
+            or ""
+        )
+        if emitter_id:
+            emitter_ids.add(emitter_id)
+    return emitter_ids
+
+
+def _needs_emitter_details(cached: dict[str, Any] | None) -> bool:
+    if not cached:
+        return True
+    return not str(cached.get("full_name") or "").strip() or not str(cached.get("inn") or "").strip()
+
+
+def _resolve_market_emitter_ids(
+    rows: list[dict[str, Any]],
+    client: MoexClient,
+    secid_to_emitter: dict[str, str],
+    workers: int,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+) -> int:
+    pending_secids: set[str] = set()
+    for row in rows:
+        secid = str(row.get("SECID") or "").strip()
+        if not secid:
+            continue
+        cached_emitter_id = _normalize_emitter_id(secid_to_emitter.get(secid, ""))
+        if cached_emitter_id:
+            row["EMITTER_ID"] = cached_emitter_id
+            continue
+        pending_secids.add(secid)
+
+    if progress_callback:
+        progress_callback(
+            {
+                "phase": "market_descriptions",
+                "processed": 0,
+                "total": len(pending_secids),
+                "message": "Запрашиваем description для market SECID без EMITTER_ID",
+            }
+        )
+
+    errors = 0
+    if not pending_secids:
+        return errors
+
+    resolved = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        futures = {executor.submit(client.fetch_security_description, secid): secid for secid in sorted(pending_secids)}
+        for future in as_completed(futures):
+            secid = futures[future]
+            try:
+                payload, fetch_errors = future.result()
+            except Exception:  # noqa: BLE001
+                payload, fetch_errors = {}, 1
+            errors += fetch_errors
+            resolved += 1
+
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "market_descriptions",
+                        "processed": resolved,
+                        "total": len(pending_secids),
+                    }
+                )
+
+            if fetch_errors:
+                continue
+
+            emitter_id = _normalize_emitter_id(payload.get("EMITTER_ID") or payload.get("ISSUER_ID") or "")
+            if not emitter_id:
+                continue
+            secid_to_emitter[secid] = emitter_id
+
+    for row in rows:
+        secid = str(row.get("SECID") or "").strip()
+        if not secid:
+            continue
+        emitter_id = _normalize_emitter_id(
+            row.get("EMITTER_ID")
+            or row.get("ISSUER_ID")
+            or secid_to_emitter.get(secid, "")
+            or ""
+        )
+        if emitter_id:
+            row["EMITTER_ID"] = emitter_id
+
+    return errors
 
 
 def _infer_emitters_from_market(
