@@ -13,6 +13,13 @@ raw_max_size_mb: 50
 exclusions_state_dir: "state"
 exclusion_window_days: 365
 amortization_workers: 8
+dohod_workers: 12
+dohod_request_delay_seconds: 0.03
+# dohod_index_values:
+#   RUONIA: 15.12
+#   CBR_RATE: 16.0
+#   Z_CURVE_RUS: 14.8
+#   Z_CURVE_RUS_7Y: 13.9
 
 storage_backend: "sqlite"
 sqlite_db_path: "screener_state.db"

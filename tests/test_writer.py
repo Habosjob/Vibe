@@ -356,3 +356,24 @@ def test_save_bonds_excel_places_amortization_start_date_into_dates_group(tmp_pa
 
     assert sheet.cell(row=1, column=amort_column - 1).value == "Даты"
     assert sheet.cell(row=3, column=amort_column).value == datetime(2025, 6, 1)
+
+
+def test_save_bonds_excel_marks_approx_coupon_in_yellow(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [
+        {
+            "SECID": "RU1",
+            "SHORTNAME": "Тест",
+            "COUPONPERCENT": 13.25,
+            "_COUPONPERCENT_APPROX": True,
+        }
+    ]
+
+    save_bonds_file(str(target), bonds)
+
+    workbook = load_workbook(target)
+    sheet = workbook["MOEX_BONDS"]
+    headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
+    coupon_col = headers.index("COUPONPERCENT") + 1
+
+    assert sheet.cell(row=3, column=coupon_col).fill.fgColor.rgb == "00FFF59D"
