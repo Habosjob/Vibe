@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from moex_bond_screener.config import load_config
+from moex_bond_screener.data_quality import attach_data_status
 from moex_bond_screener.emitents import build_emitents_reference
 from moex_bond_screener.exclusion_rules import AMORTIZATION_RULE_NAME, BondExclusionFilter
 from moex_bond_screener.logging_utils import setup_logging
@@ -86,6 +87,7 @@ def main() -> None:
         previous_exclusions={},
     )
     eligible_bonds = post_amortization_exclusion_result.eligible_bonds
+    attach_data_status(eligible_bonds)
     active_exclusions = dict(exclusion_result.active_exclusions)
     active_exclusions.update(post_amortization_exclusion_result.active_exclusions)
     excluded_by_rule = dict(exclusion_result.excluded_by_rule)

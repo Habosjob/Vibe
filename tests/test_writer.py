@@ -217,6 +217,9 @@ def test_save_emitents_excel(tmp_path: Path) -> None:
             "ИНН": "7701000000",
             "Тикеры акций": "TST",
             "ISIN облигаций": "RU000000001",
+            "missing_full_name": "0",
+            "missing_inn": "0",
+            "Флаг качества": "ok",
         }
     ]
 
@@ -226,6 +229,8 @@ def test_save_emitents_excel(tmp_path: Path) -> None:
     sheet = workbook["EMITENTS"]
     assert sheet["A1"].value == "Полное наименование"
     assert sheet["B2"].value == "7701000000"
+    assert sheet["G1"].value == "Флаг качества"
+    assert sheet["G2"].value == "ok"
     assert sheet.freeze_panes == "A2"
 
 

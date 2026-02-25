@@ -6,7 +6,7 @@ from moex_bond_screener.state_store import ScreenerStateStore
 
 
 def test_state_store_save_and_load_exclusions(tmp_path) -> None:
-    store = ScreenerStateStore(str(tmp_path / "state"))
+    store = ScreenerStateStore(str(tmp_path / "state"), storage_backend="json")
 
     store.save_exclusions({"SU1": {"rule": "mat_lt_1y", "exclude_until": "2026-10-10"}})
 
@@ -15,7 +15,7 @@ def test_state_store_save_and_load_exclusions(tmp_path) -> None:
 
 
 def test_state_store_incremental_updates(tmp_path) -> None:
-    store = ScreenerStateStore(str(tmp_path / "state"))
+    store = ScreenerStateStore(str(tmp_path / "state"), storage_backend="json")
 
     first = store.update_eligible_bonds(
         [{"SECID": "A", "MATDATE": "2030-01-01"}, {"SECID": "B", "MATDATE": "2031-01-01"}]

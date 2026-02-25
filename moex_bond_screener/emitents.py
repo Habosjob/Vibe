@@ -208,16 +208,25 @@ def build_emitents_reference(
 
     bond_map = _collect_market_instruments(bonds_market, instrument_key="ISIN")
     share_map = _collect_market_instruments(shares_market, instrument_key="SECID")
+    discovered_emitters.update(_infer_emitters_from_market(eligible_bonds, bonds_market, shares_market, secid_to_emitter))
 
     rows: list[dict[str, str]] = []
     for emitter_id in sorted(discovered_emitters):
         details = registry.get(emitter_id, {})
+        full_name = str(details.get("full_name") or "").strip()
+        inn = str(details.get("inn") or "").strip()
+        missing_full_name = "1" if not full_name else "0"
+        missing_inn = "1" if not inn else "0"
+        quality_flag = "ok" if missing_full_name == "0" and missing_inn == "0" else "warning"
         rows.append(
             {
-                "Полное наименование": str(details.get("full_name") or ""),
-                "ИНН": str(details.get("inn") or ""),
+                "Полное наименование": full_name,
+                "ИНН": inn,
                 "Тикеры акций": ", ".join(share_map.get(emitter_id, [])),
                 "ISIN облигаций": ", ".join(bond_map.get(emitter_id, [])),
+                "missing_full_name": missing_full_name,
+                "missing_inn": missing_inn,
+                "Флаг качества": quality_flag,
             }
         )
 
@@ -272,3 +281,41 @@ def _collect_market_instruments(rows: list[dict[str, Any]], instrument_key: str)
         instruments.setdefault(emitter_id, set()).add(instrument)
 
     return {key: sorted(values) for key, values in instruments.items()}
+
+
+def _infer_emitters_from_market(
+    eligible_bonds: list[dict[str, Any]],
+    bonds_market: list[dict[str, Any]],
+    shares_market: list[dict[str, Any]],
+    secid_to_emitter: dict[str, str],
+) -> set[str]:
+    by_secid: dict[str, str] = {}
+    by_isin: dict[str, str] = {}
+
+    for row in [*bonds_market, *shares_market]:
+        emitter_id = str(row.get("EMITTER_ID") or "").strip()
+        if not emitter_id:
+            continue
+        secid = str(row.get("SECID") or "").strip()
+        isin = str(row.get("ISIN") or "").strip()
+        if secid:
+            by_secid[secid] = emitter_id
+        if isin:
+            by_isin[isin] = emitter_id
+
+    inferred: set[str] = set()
+    for bond in eligible_bonds:
+        secid = str(bond.get("SECID") or "").strip()
+        isin = str(bond.get("ISIN") or "").strip()
+        emitter_id = str(
+            bond.get("EMITTER_ID")
+            or bond.get("ISSUER_ID")
+            or secid_to_emitter.get(secid, "")
+            or by_secid.get(secid, "")
+            or by_isin.get(isin, "")
+            or ""
+        ).strip()
+        if emitter_id:
+            inferred.add(emitter_id)
+
+    return inferred

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import re
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+import yaml
 
 
 DEFAULT_FIELDS = ["SECID", "SHORTNAME", "ISIN", "CURRENCYID", "PREVLEGALCLOSEPRICE", "MATDATE"]
@@ -36,13 +38,18 @@ UNWANTED_FIELDS = {
     "FACEVALUEONSETTLEDATE",
     "SECTORID",
 }
-GROUP_ORDER = [
+DEFAULT_GROUP_ORDER = [
     "Служебная информация",
     "Торги и доходность",
     "Купоны и номинал",
     "Даты",
     "Прочее",
 ]
+DEFAULT_FORCED_GROUPS = {
+    "AMORTIZATION_START_DATE": "Даты",
+    "CURRENCYID": "Купоны и номинал",
+}
+DEFAULT_PRIORITY_FIELDS = ["SHORTNAME", "ISIN", "DATA_STATUS", "MATDATE", "AMORTIZATION_START_DATE", "SECID"]
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 GROUP_FONT = Font(color="000000", bold=True)
@@ -61,6 +68,35 @@ NUMERIC_STRING_RE = re.compile(r"^[+-]?\d[\d\s\u00A0]*(?:[.,]\d+)?$")
 UNICODE_SPACES_RE = re.compile(r"[\s\u00A0\u202F\u2007]+")
 
 
+@lru_cache(maxsize=1)
+def _load_excel_layout() -> tuple[list[str], dict[str, str], list[str]]:
+    path = Path("excel_layout.yml")
+    if not path.exists():
+        return DEFAULT_GROUP_ORDER, DEFAULT_FORCED_GROUPS, DEFAULT_PRIORITY_FIELDS
+
+    with path.open("r", encoding="utf-8") as file:
+        payload = yaml.safe_load(file) or {}
+
+    group_order = payload.get("group_order") if isinstance(payload, dict) else None
+    forced_groups = payload.get("forced_groups") if isinstance(payload, dict) else None
+    priority_fields = payload.get("priority_fields") if isinstance(payload, dict) else None
+
+    normalized_group_order = [str(item).strip() for item in (group_order or []) if str(item).strip()] or DEFAULT_GROUP_ORDER
+    normalized_forced_groups = {
+        str(field).strip().upper(): str(group).strip()
+        for field, group in (forced_groups or {}).items()
+        if str(field).strip() and str(group).strip()
+    }
+    if not normalized_forced_groups:
+        normalized_forced_groups = DEFAULT_FORCED_GROUPS
+
+    normalized_priority = [str(item).strip() for item in (priority_fields or []) if str(item).strip()]
+    if not normalized_priority:
+        normalized_priority = DEFAULT_PRIORITY_FIELDS
+
+    return normalized_group_order, normalized_forced_groups, normalized_priority
+
+
 def _resolve_fields(bonds: list[dict[str, Any]]) -> list[str]:
     if not bonds:
         return DEFAULT_FIELDS.copy()
@@ -75,11 +111,12 @@ def _resolve_fields(bonds: list[dict[str, Any]]) -> list[str]:
 
 
 def _group_name(field: str) -> str:
+    group_order, forced_groups, _ = _load_excel_layout()
     upper = field.upper()
-    if upper == "AMORTIZATION_START_DATE":
-        return "Даты"
-    if upper == "CURRENCYID":
-        return "Купоны и номинал"
+    if upper in forced_groups:
+        forced = forced_groups[upper]
+        if forced in group_order:
+            return forced
     if upper in {"SHORTNAME", "ISIN", "FACEUNIT", "BONDNAME", "EMITTER"}:
         return "Служебная информация"
     if any(token in upper for token in ["PRICE", "YIELD", "WAPRICE", "DURATION", "SPREAD"]):
@@ -88,7 +125,13 @@ def _group_name(field: str) -> str:
         return "Купоны и номинал"
     if "DATE" in upper or any(token in upper for token in ["MAT", "OFFER", "BEGIN", "END"]):
         return "Даты"
-    return "Прочее"
+    return "Прочее" if "Прочее" in group_order else group_order[-1]
+
+
+def _apply_priority_fields(fields: list[str]) -> list[str]:
+    _, _, priority_fields = _load_excel_layout()
+    order_map = {name.upper(): idx for idx, name in enumerate(priority_fields)}
+    return sorted(fields, key=lambda field: (order_map.get(field.upper(), len(order_map)), fields.index(field)))
 
 
 def _is_iso_date(value: str) -> bool:
@@ -265,28 +308,33 @@ def _prepare_export_data(bonds: list[dict[str, Any]]) -> tuple[list[str], list[d
         seen_signatures[signature] = field
         deduplicated_fields.append(field)
 
-    grouped: dict[str, list[str]] = {name: [] for name in GROUP_ORDER}
+    group_order, _, _ = _load_excel_layout()
+    grouped: dict[str, list[str]] = {name: [] for name in group_order}
     for field in deduplicated_fields:
         grouped[_group_name(field)].append(field)
+
+    for group_name in group_order:
+        grouped[group_name] = _apply_priority_fields(grouped[group_name])
 
     if "SECID" in grouped["Служебная информация"]:
         grouped["Служебная информация"].remove("SECID")
         grouped["Прочее"].append("SECID")
 
     ordered_fields: list[str] = []
-    for group_name in GROUP_ORDER:
+    for group_name in group_order:
         ordered_fields.extend(grouped[group_name])
 
     return ordered_fields, prepared_rows
 
 
 def _build_columns(fields: list[str]) -> list[tuple[str, str]]:
+    group_order, _, _ = _load_excel_layout()
     columns: list[tuple[str, str]] = []
-    grouped: dict[str, list[str]] = {name: [] for name in GROUP_ORDER}
+    grouped: dict[str, list[str]] = {name: [] for name in group_order}
     for field in fields:
         grouped[_group_name(field)].append(field)
 
-    for group_name in GROUP_ORDER:
+    for group_name in group_order:
         group_fields = grouped[group_name]
         if not group_fields:
             continue
@@ -479,7 +527,15 @@ def save_emitents_excel(path: str, emitents: list[dict[str, str]]) -> None:
     sheet = workbook.active
     sheet.title = "EMITENTS"
 
-    fields = ["Полное наименование", "ИНН", "Тикеры акций", "ISIN облигаций"]
+    fields = [
+        "Полное наименование",
+        "ИНН",
+        "Тикеры акций",
+        "ISIN облигаций",
+        "missing_full_name",
+        "missing_inn",
+        "Флаг качества",
+    ]
     sheet.append(fields)
     for row in emitents:
         sheet.append([row.get(field, "") for field in fields])
