@@ -26,7 +26,11 @@ ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
 CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = r"[+-]?\d+(?:[.,]\d+)?"
 INDEX_RE = re.compile(
-    r"(RUONIA|CBR_RATE|Z_CURVE_RUS|КЛЮЧЕВАЯ\s+СТАВКА(?:\s+ЦБ)?|КБД\s+ОФЗ|КРИВ[А-ЯA-Z\s]+ОФЗ)\s*([+\-−]\s*\d+(?:[.,]\d+)?)?",
+    r"(RUONIA|R[-_\s]?UONIA|CBR_RATE|KEY_RATE|Z[-_\s]?CURVE[-_\s]?RUS|"
+    r"КЛЮЧЕВАЯ\s+СТАВКА(?:\s+(?:ЦБ|БАНКА\s+РОССИИ))?|КС\s*ЦБ(?:\s*РФ)?|"
+    r"КБД\s+ОФЗ|КРИВ[А-ЯA-Z\s]+ОФЗ)"
+    r"(?:\s*(?:\(|:))?\s*"
+    r"([+\-−]\s*\d+(?:[.,]\d+)?)?",
     re.IGNORECASE,
 )
 TENOR_RE = re.compile(r"сроком\s+погашения\s+(\d+)\s+лет", re.IGNORECASE)
@@ -52,6 +56,7 @@ class DohodBondPayload:
     index_tenor_years: int | None
     event_name: str
     ytm_date: str
+    index_base_rate: float | None = None
 
 
 @dataclass(slots=True)
@@ -78,6 +83,7 @@ class DohodEnricher:
         self._request_lock = threading.Lock()
         self._next_request_ts = 0.0
         self._thread_local = threading.local()
+        self._missing_base_warning_counts: dict[tuple[str, float], int] = {}
         self.last_stats = DohodEnrichmentStats()
 
     def enrich_bonds(
@@ -88,6 +94,7 @@ class DohodEnricher:
         progress_callback: DohodProgressCallback | None = None,
     ) -> int:
         self.last_stats = DohodEnrichmentStats()
+        self._missing_base_warning_counts = {}
         checkpoint = self._normalize_checkpoint(checkpoint_data or {})
         previous_payload = checkpoint.get("bonds", {})
         processed: dict[str, dict[str, Any]] = dict(previous_payload) if isinstance(previous_payload, dict) else {}
@@ -136,7 +143,7 @@ class DohodEnricher:
                     payload, request_errors = future.result()
                 except Exception as exc:  # noqa: BLE001
                     self.logger.exception("Ошибка обработки ДОХОД instrument=%s: %s", identifier, exc)
-                    payload, request_errors = DohodBondPayload(None, "", 0.0, None, "", ""), 1
+                    payload, request_errors = DohodBondPayload(None, "", 0.0, None, "", "", None), 1
 
                 if request_errors == 0 and _is_payload_empty(payload):
                     self.last_stats.parse_empty_payloads += 1
@@ -149,6 +156,7 @@ class DohodEnricher:
                         "ask_price": payload.ask_price,
                         "index_name": payload.index_name,
                         "index_spread": payload.index_spread,
+                        "index_base_rate": payload.index_base_rate,
                         "index_tenor_years": payload.index_tenor_years,
                         "event_name": payload.event_name,
                         "ytm_date": payload.ytm_date,
@@ -181,6 +189,8 @@ class DohodEnricher:
                 }
             )
 
+        self._log_missing_base_summary_if_needed()
+
         return errors
 
     def _fetch_and_parse(self, secid: str) -> tuple[DohodBondPayload, int]:
@@ -202,10 +212,10 @@ class DohodEnricher:
             except requests.RequestException as error:
                 self.logger.warning("Ошибка запроса ДОХОД instrument=%s попытка=%s: %s", secid, attempt, error)
                 if attempt == self.config.retries:
-                    return DohodBondPayload(None, "", 0.0, None, "", ""), 1
+                    return DohodBondPayload(None, "", 0.0, None, "", "", None), 1
                 time.sleep(float(getattr(self.config, "dohod_request_delay_seconds", 0.05)) * attempt)
 
-        return DohodBondPayload(None, "", 0.0, None, "", ""), 1
+        return DohodBondPayload(None, "", 0.0, None, "", "", None), 1
 
     def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None) -> tuple[DohodBondPayload, int]:
         payload, errors = self._fetch_and_parse(primary_identifier)
@@ -259,7 +269,9 @@ class DohodEnricher:
         if not ytm_date:
             ytm_date = _extract_ytm_date_from_html(html)
 
-        return DohodBondPayload(ask_price, index_name, spread, tenor_years, event_name, ytm_date)
+        index_base_rate = _extract_index_base_rate_from_html(html, index_name)
+
+        return DohodBondPayload(ask_price, index_name, spread, tenor_years, event_name, ytm_date, index_base_rate)
 
     def _resolve_index_values(self, checkpoint: dict[str, Any]) -> dict[str, float]:
         configured = getattr(self.config, "dohod_index_values", None)
@@ -388,6 +400,7 @@ class DohodEnricher:
         ask_price = payload.get("ask_price")
         index_name = str(payload.get("index_name") or "")
         index_spread = float(payload.get("index_spread") or 0.0)
+        index_base_rate = _as_float_or_none(payload.get("index_base_rate"))
         index_tenor_years = payload.get("index_tenor_years")
         event_name = str(payload.get("event_name") or "")
         ytm_date = str(payload.get("ytm_date") or "")
@@ -406,16 +419,12 @@ class DohodEnricher:
             base_rate = float(index_values.get(index_name, 0.0))
             if index_name == "Z_CURVE_RUS" and index_tenor_years:
                 base_rate = float(index_values.get(f"Z_CURVE_RUS_{index_tenor_years}Y", base_rate))
+            if index_base_rate is not None and index_base_rate > 0:
+                base_rate = float(index_base_rate)
 
             if index_name and base_rate <= 0:
                 self.last_stats.coupon_skipped_no_base += 1
-                self.logger.warning(
-                    "Пропуск расчета COUPONPERCENT: нет базовой ставки для index=%s spread=%.4f isin=%s secid=%s",
-                    index_name,
-                    index_spread,
-                    str(bond.get("ISIN") or "").strip(),
-                    str(bond.get("SECID") or "").strip(),
-                )
+                self._log_missing_base_warning(index_name, index_spread, bond)
                 continue
 
             if _should_enrich_coupon(
@@ -468,6 +477,38 @@ class DohodEnricher:
             thread_session = requests.Session()
             self._thread_local.session = thread_session
         return thread_session
+
+    def _log_missing_base_warning(self, index_name: str, index_spread: float, bond: dict[str, Any]) -> None:
+        key = (index_name, round(float(index_spread), 6))
+        with self._request_lock:
+            seen_count = self._missing_base_warning_counts.get(key, 0)
+            self._missing_base_warning_counts[key] = seen_count + 1
+
+        if seen_count > 0:
+            return
+
+        self.logger.warning(
+            "Пропуск расчета COUPONPERCENT: нет базовой ставки для index=%s spread=%.4f isin=%s secid=%s (дальше одинаковые случаи агрегируются)",
+            index_name,
+            index_spread,
+            str(bond.get("ISIN") or "").strip(),
+            str(bond.get("SECID") or "").strip(),
+        )
+
+    def _log_missing_base_summary_if_needed(self) -> None:
+        if not self._missing_base_warning_counts:
+            return
+
+        aggregated = ", ".join(
+            f"{index}@{spread:.4f}: {count}"
+            for (index, spread), count in sorted(self._missing_base_warning_counts.items(), key=lambda item: (-item[1], item[0][0], item[0][1]))
+        )
+        self.logger.warning(
+            "COUPONPERCENT пропущен из-за отсутствия базовой ставки: всего=%s, уникальных комбинаций=%s [%s]",
+            self.last_stats.coupon_skipped_no_base,
+            len(self._missing_base_warning_counts),
+            aggregated,
+        )
 
 
 def _extract_label_map(html: str) -> dict[str, str]:
@@ -610,16 +651,47 @@ def _parse_index_and_spread(raw: str) -> tuple[str, float]:
 
 def _normalize_index_name(raw: str) -> str:
     normalized = raw.upper().replace("Ё", "Е")
+    normalized = normalized.replace("-", "_")
     normalized = re.sub(r"\s+", " ", normalized).strip()
     if normalized.startswith("Z_CURVE_RUS_"):
         return normalized.replace(" ", "")
-    if "RUONIA" in normalized:
+    if "RUONIA" in normalized or "R_UONIA" in normalized:
         return "RUONIA"
-    if "CBR_RATE" in normalized or "КЛЮЧЕВАЯ СТАВКА" in normalized:
+    if "CBR_RATE" in normalized or "KEY_RATE" in normalized or "КЛЮЧЕВАЯ СТАВКА" in normalized or "КС ЦБ" in normalized:
         return "CBR_RATE"
-    if "Z_CURVE_RUS" in normalized or "КБД ОФЗ" in normalized or "КРИВ" in normalized:
+    if "Z_CURVE_RUS" in normalized or "Z CURVE RUS" in normalized or "КБД ОФЗ" in normalized or "КРИВ" in normalized:
         return "Z_CURVE_RUS"
     return normalized
+
+
+def _extract_index_base_rate_from_html(html: str, index_name: str) -> float | None:
+    if not index_name:
+        return None
+
+    aliases: dict[str, tuple[str, ...]] = {
+        "RUONIA": ("RUONIA", "R-UONIA", "R UONIA"),
+        "CBR_RATE": ("CBR_RATE", "KEY_RATE", "КЛЮЧЕВАЯ СТАВКА", "КС ЦБ"),
+        "Z_CURVE_RUS": ("Z_CURVE_RUS", "Z-CURVE-RUS", "КБД ОФЗ", "КРИВАЯ ОФЗ"),
+    }
+    alias_pattern = "|".join(re.escape(alias) for alias in aliases.get(index_name, (index_name,)))
+    number_pattern = r"([+-]?\d+(?:[.,]\d+)?)"
+
+    text = _strip_html(html).upper().replace("Ё", "Е")
+    text = re.sub(r"\s+", " ", text)
+
+    patterns = [
+        rf"(?:ЗНАЧЕНИ[ЕЯ]|УРОВЕН[ЬЯ]|СТАВК[АИ]).{{0,40}}(?:{alias_pattern}).{{0,15}}{number_pattern}",
+        rf"(?:{alias_pattern}).{{0,25}}(?:СОСТАВЛЯЕТ|СОСТАВИЛА|РАВНА|РАВНО|НА УРОВНЕ|=|:)\s*{number_pattern}",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        value = _as_float_or_none(match.group(1))
+        if value is not None and value > 0:
+            return value
+    return None
 
 
 def _parse_tenor_years(raw: str) -> int | None:
