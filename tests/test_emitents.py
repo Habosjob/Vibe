@@ -244,6 +244,7 @@ def test_build_emitents_reference_fills_stage_timers(monkeypatch, tmp_path):
 
     assert set(result.stage_durations.keys()) == {
         "emitents_cards_seconds",
+        "emitents_market_descriptions_seconds",
         "emitents_market_bonds_seconds",
         "emitents_market_shares_seconds",
     }
@@ -338,7 +339,11 @@ def test_build_emitents_reference_uses_issuer_id_for_market_maps(monkeypatch, tm
 
     eligible_bonds = [{"SECID": "BOND1", "ISSUER_ID": "111", "ISIN": "RU000A"}]
 
-    monkeypatch.setattr(client, "fetch_security_description", lambda secid: ({}, 0))
+    monkeypatch.setattr(
+        client,
+        "fetch_security_description",
+        lambda secid: ({"EMITTER_ID": "111"}, 0) if secid == "S111" else ({}, 0),
+    )
     monkeypatch.setattr(client, "fetch_emitter_details", lambda emitter_id: ({"TITLE": "Эмитент", "INN": "7701111111"}, 0))
 
     def fake_market(market: str):
@@ -354,6 +359,73 @@ def test_build_emitents_reference_uses_issuer_id_for_market_maps(monkeypatch, tm
     assert len(result.rows) == 1
     assert result.rows[0]["Тикеры акций"] == "S111"
     assert result.rows[0]["ISIN облигаций"] == "RU000A"
+
+
+def test_build_emitents_reference_resolves_market_secids_via_description(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    eligible_bonds = [{"SECID": "BOND1", "EMITTER_ID": "111", "ISIN": "RU000A"}]
+
+    description_calls: list[str] = []
+
+    def fake_description(secid: str):
+        description_calls.append(secid)
+        if secid == "S111":
+            return {"EMITTER_ID": "111"}, 0
+        return {}, 0
+
+    monkeypatch.setattr(client, "fetch_security_description", fake_description)
+    monkeypatch.setattr(client, "fetch_emitter_details", lambda emitter_id: ({"TITLE": "Эмитент", "INN": "7701111111"}, 0))
+
+    def fake_market(market: str):
+        if market == "shares":
+            return ([{"SECID": "S111"}], 0)
+        return ([], 0)
+
+    monkeypatch.setattr(client, "fetch_market_securities", fake_market)
+
+    result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+
+    assert result.errors == 0
+    assert result.rows[0]["Тикеры акций"] == "S111"
+    assert "S111" in description_calls
+
+
+def test_build_emitents_reference_includes_emitters_from_moex_markets(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    eligible_bonds = []
+
+    monkeypatch.setattr(
+        client,
+        "fetch_security_description",
+        lambda secid: ({"EMITTER_ID": "500"}, 0) if secid == "B500" else ({"EMITTER_ID": "600"}, 0),
+    )
+
+    def fake_emitter_details(emitter_id: str):
+        if emitter_id == "500":
+            return {"TITLE": "РЖД", "INN": "7708503727"}, 0
+        return {"TITLE": "РСХБ", "INN": "7725114488"}, 0
+
+    monkeypatch.setattr(client, "fetch_emitter_details", fake_emitter_details)
+
+    def fake_market(market: str):
+        if market == "bonds":
+            return ([{"SECID": "B500", "ISIN": "RU000A0JTU85"}], 0)
+        return ([{"SECID": "S600"}], 0)
+
+    monkeypatch.setattr(client, "fetch_market_securities", fake_market)
+
+    result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+
+    assert result.errors == 0
+    assert result.processed_emitters == 2
+    names = {row["Полное наименование"] for row in result.rows}
+    assert names == {"РЖД", "РСХБ"}
 
 
 def test_build_emitents_reference_skips_bonds_market_when_emitters_known(monkeypatch, tmp_path):
@@ -377,5 +449,5 @@ def test_build_emitents_reference_skips_bonds_market_when_emitters_known(monkeyp
     result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
 
     assert result.errors == 0
-    assert market_calls == ["shares"]
+    assert market_calls == ["bonds", "shares"]
     assert result.rows[0]["ISIN облигаций"] == "RU000B"
