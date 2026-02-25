@@ -101,3 +101,35 @@ def test_fetch_all_bonds_stops_when_moex_returns_all_rows_at_once(monkeypatch):
     assert errors == 0
     assert calls["count"] == 1
     assert [item["SECID"] for item in bonds] == ["A", "B", "C"]
+
+
+def test_fetch_page_requests_all_columns_without_securities_columns(monkeypatch):
+    config = AppConfig(page_size=10, retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    captured: dict[str, object] = {}
+
+    def fake_get(url, params, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        captured["timeout"] = timeout
+        return DummyResponse(
+            {
+                "securities": {
+                    "columns": ["SECID", "SHORTNAME", "MATDATE"],
+                    "data": [["A", "Bond A", "2030-01-01"]],
+                }
+            }
+        )
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    page, errors = client._fetch_page(0)
+
+    assert errors == 0
+    assert page == [{"SECID": "A", "SHORTNAME": "Bond A", "MATDATE": "2030-01-01"}]
+    assert captured["url"] == config.base_url
+    assert captured["timeout"] == config.timeout_seconds
+    assert captured["params"]["iss.only"] == "securities"
+    assert captured["params"]["iss.meta"] == "off"
+    assert "securities.columns" not in captured["params"]
