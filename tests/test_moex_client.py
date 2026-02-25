@@ -140,6 +140,29 @@ def test_fetch_page_requests_all_columns_without_securities_columns(monkeypatch)
     assert "securities.columns" not in captured["params"]
 
 
+def test_fetch_emitter_details_parses_title_and_inn(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    monkeypatch.setattr(
+        client.session,
+        "get",
+        lambda *args, **kwargs: DummyResponse(
+            {
+                "emitter": {
+                    "columns": ["EMITTER_ID", "TITLE", "INN"],
+                    "data": [[1228, "Минфин", "7710168360"]],
+                }
+            }
+        ),
+    )
+
+    payload, errors = client.fetch_emitter_details("1228")
+
+    assert errors == 0
+    assert payload == {"EMITTER_ID": "1228", "TITLE": "Минфин", "INN": "7710168360"}
+
+
 def test_extract_earliest_amortization_date_returns_min_date():
     payload = {
         "amortizations": {

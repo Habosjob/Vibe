@@ -11,7 +11,9 @@
 - `raw/*.json` — отладочные сырые ответы (если включено).
 
 - Дополнительная точка для обогащения амортизацией: `https://iss.moex.com/iss/securities/{SECID}/bondization.json` (`iss.only=amortizations`) — используется для поля `Amortization_start_date`; одиночное полное погашение (`VALUEPRC=100`) и запись в дату `MATDATE` не считаются амортизацией.
-- Для справочника эмитентов используется карточка инструмента `https://iss.moex.com/iss/securities/{SECID}.json` (`iss.only=description`) — из нее берутся `EMITTER_ID`, полное наименование и ИНН.
+- Для справочника эмитентов используется 2 шага:
+  - `https://iss.moex.com/iss/securities/{SECID}.json` (`iss.only=description`) — получить `EMITTER_ID` для бумаг, где он отсутствует в исходной строке.
+  - `https://iss.moex.com/iss/emitters/{EMITTER_ID}.json` (`iss.only=emitter`) — получить статичные поля эмитента (`TITLE`, `INN`) для заполнения полного наименования и ИНН.
 - Тикеры/ISIN обновляются ежедневно через рынки:
   - `https://iss.moex.com/iss/engines/stock/markets/shares/securities.json` (тикеры акций);
   - `https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json` (ISIN облигаций).

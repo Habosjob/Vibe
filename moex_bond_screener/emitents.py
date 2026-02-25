@@ -36,7 +36,7 @@ def build_emitents_reference(
     registry = state_store.load_emitents_registry()
     secid_to_emitter = state_store.load_secid_to_emitter_map()
     secid_samples = _pick_emitter_samples(eligible_bonds, secid_to_emitter)
-    total_samples = len(secid_samples.known_emitters) + len(secid_samples.unknown_emitters)
+    total_descriptions = len(secid_samples.unknown_emitters)
     discovered_emitters: set[str] = set(registry.keys())
     errors = 0
     new_emitters = 0
@@ -49,128 +49,125 @@ def build_emitents_reference(
     }
     workers = max(1, int(client.config.amortization_workers))
 
+    emitters_needing_details: set[str] = set()
+    for emitter_id in secid_samples.known_emitters:
+        cached = registry.get(emitter_id)
+        if cached and cached.get("full_name") and cached.get("inn"):
+            discovered_emitters.add(emitter_id)
+            continue
+        emitters_needing_details.add(emitter_id)
+
     if progress_callback:
         progress_callback(
             {
                 "phase": "sample_descriptions",
                 "processed": 0,
-                "total": total_samples,
-                "message": "Сбор описаний эмитентов по итоговым бумагам",
+                "total": total_descriptions,
+                "message": "Сопоставление SECID -> EMITTER_ID по карточкам бумаг",
             }
         )
 
-    processed_samples = 0
-    pending_samples: list[tuple[str, str]] = []
-
-    for emitter_id, secid in sorted(secid_samples.known_emitters.items()):
-        cached = registry.get(emitter_id)
-        if cached and cached.get("full_name") and cached.get("inn"):
-            discovered_emitters.add(emitter_id)
-            processed_samples += 1
-            if progress_callback:
-                progress_callback(
-                    {
-                        "phase": "sample_descriptions",
-                        "processed": processed_samples,
-                        "total": total_samples,
-                    }
-                )
-            continue
-
-        pending_samples.append((secid, emitter_id))
-
-    pending_samples.extend((secid, "") for secid in sorted(secid_samples.unknown_emitters))
+    processed_descriptions = 0
+    pending_secids = sorted(secid_samples.unknown_emitters)
 
     cards_started = perf_counter()
-    if pending_samples:
+    if pending_secids:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(client.fetch_security_description, secid): (secid, emitter_id)
-                for secid, emitter_id in pending_samples
+                executor.submit(client.fetch_security_description, secid): secid
+                for secid in pending_secids
             }
             for future in as_completed(futures):
-                secid, emitter_id = futures[future]
+                secid = futures[future]
                 try:
                     details, fetch_errors = future.result()
                 except Exception:  # noqa: BLE001
                     details, fetch_errors = {}, 1
                 errors += fetch_errors
-                processed_samples += 1
-
-                if fetch_errors:
-                    if progress_callback:
-                        progress_callback(
-                            {
-                                "phase": "sample_descriptions",
-                                "processed": processed_samples,
-                                "total": total_samples,
-                            }
-                        )
-                    continue
-
-                resolved_emitter_id = emitter_id or str(details.get("EMITTER_ID") or details.get("ISSUER_ID") or "").strip()
-                if not resolved_emitter_id:
-                    if progress_callback:
-                        progress_callback(
-                            {
-                                "phase": "sample_descriptions",
-                                "processed": processed_samples,
-                                "total": total_samples,
-                            }
-                        )
-                    continue
-
-                if secid_to_emitter.get(secid) != resolved_emitter_id:
-                    secid_to_emitter[secid] = resolved_emitter_id
-                    secid_cache_changed = True
-                discovered_emitters.add(resolved_emitter_id)
-
-                cached = registry.get(resolved_emitter_id)
-                if cached and cached.get("full_name") and cached.get("inn"):
-                    if progress_callback:
-                        progress_callback(
-                            {
-                                "phase": "sample_descriptions",
-                                "processed": processed_samples,
-                                "total": total_samples,
-                            }
-                        )
-                    continue
-
-                full_name = str(details.get("EMITTER_FULL_NAME") or "").strip()
-                inn = str(details.get("EMITTER_INN") or details.get("INN") or "").strip()
-                if not full_name and cached:
-                    full_name = str(cached.get("full_name") or "")
-                if not inn and cached:
-                    inn = str(cached.get("inn") or "")
-
-                if not full_name and not inn:
-                    if progress_callback:
-                        progress_callback(
-                            {
-                                "phase": "sample_descriptions",
-                                "processed": processed_samples,
-                                "total": total_samples,
-                            }
-                        )
-                    continue
-
-                if resolved_emitter_id not in registry:
-                    new_emitters += 1
-                registry_changed = True
-                registry[resolved_emitter_id] = {
-                    "full_name": full_name,
-                    "inn": inn,
-                }
+                processed_descriptions += 1
 
                 if progress_callback:
                     progress_callback(
                         {
                             "phase": "sample_descriptions",
-                            "processed": processed_samples,
-                            "total": total_samples,
+                            "processed": processed_descriptions,
+                            "total": total_descriptions,
                         }
                     )
+
+                if fetch_errors:
+                    continue
+
+                resolved_emitter_id = str(details.get("EMITTER_ID") or details.get("ISSUER_ID") or "").strip()
+                if not resolved_emitter_id:
+                    continue
+
+                if secid_to_emitter.get(secid) != resolved_emitter_id:
+                    secid_to_emitter[secid] = resolved_emitter_id
+                    secid_cache_changed = True
+
+                discovered_emitters.add(resolved_emitter_id)
+                cached = registry.get(resolved_emitter_id)
+                if not (cached and cached.get("full_name") and cached.get("inn")):
+                    emitters_needing_details.add(resolved_emitter_id)
+
+    pending_emitters = sorted(emitters_needing_details)
+    if progress_callback:
+        progress_callback(
+            {
+                "phase": "emitter_profiles",
+                "processed": 0,
+                "total": len(pending_emitters),
+                "message": "Загрузка карточек эмитентов по EMITTER_ID",
+            }
+        )
+
+    processed_emitters = 0
+    if pending_emitters:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(client.fetch_emitter_details, emitter_id): emitter_id
+                for emitter_id in pending_emitters
+            }
+            for future in as_completed(futures):
+                emitter_id = futures[future]
+                try:
+                    details, fetch_errors = future.result()
+                except Exception:  # noqa: BLE001
+                    details, fetch_errors = {}, 1
+                errors += fetch_errors
+                processed_emitters += 1
+
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "phase": "emitter_profiles",
+                            "processed": processed_emitters,
+                            "total": len(pending_emitters),
+                        }
+                    )
+
+                if fetch_errors:
+                    continue
+
+                cached = registry.get(emitter_id, {})
+                full_name = str(details.get("TITLE") or details.get("SHORT_TITLE") or "").strip()
+                inn = str(details.get("INN") or "").strip()
+                if not full_name:
+                    full_name = str(cached.get("full_name") or "").strip()
+                if not inn:
+                    inn = str(cached.get("inn") or "").strip()
+                if not full_name and not inn:
+                    continue
+
+                if emitter_id not in registry:
+                    new_emitters += 1
+                registry_changed = True
+                registry[emitter_id] = {
+                    "full_name": full_name,
+                    "inn": inn,
+                }
+                discovered_emitters.add(emitter_id)
 
     stage_durations["emitents_cards_seconds"] = round(perf_counter() - cards_started, 2)
 

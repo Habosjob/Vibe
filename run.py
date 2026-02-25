@@ -318,10 +318,15 @@ def _print_emitents_progress(data: dict[str, Any], progress: PipelineProgress) -
     if message:
         progress.tick(str(message))
 
-    if data.get("phase") == "sample_descriptions":
+    phase = str(data.get("phase") or "")
+    if phase == "sample_descriptions":
         processed = int(data.get("processed", 0))
         total = int(data.get("total", 0))
         progress.report_fraction(processed, total, "обработано карточек эмитентов")
+    elif phase == "emitter_profiles":
+        processed = int(data.get("processed", 0))
+        total = int(data.get("total", 0))
+        progress.report_fraction(processed, total, "обработано профилей эмитентов")
 
 
 def _print_amortization_progress(data: dict[str, Any], progress: PipelineProgress) -> None:

@@ -3,7 +3,19 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 
 from moex_bond_screener.moex_client import AMORTIZATION_CHECKPOINT_VERSION
-from run import _prepare_amortization_checkpoint
+from run import _prepare_amortization_checkpoint, _print_emitents_progress
+
+
+class _DummyProgress:
+    def __init__(self) -> None:
+        self.ticks: list[str] = []
+        self.fractions: list[tuple[int, int, str]] = []
+
+    def tick(self, message: str) -> None:
+        self.ticks.append(message)
+
+    def report_fraction(self, processed: int, total: int, message: str) -> None:
+        self.fractions.append((processed, total, message))
 
 
 def test_prepare_amortization_checkpoint_invalidates_legacy_version() -> None:
@@ -67,3 +79,37 @@ def test_prepare_amortization_checkpoint_invalidates_stale_cache() -> None:
     assert invalidated is True
     assert is_fresh is False
     assert checkpoint == {}
+
+
+def test_print_emitents_progress_reports_sample_descriptions() -> None:
+    progress = _DummyProgress()
+
+    _print_emitents_progress(
+        {
+            "phase": "sample_descriptions",
+            "processed": 3,
+            "total": 10,
+            "message": "Сопоставление SECID -> EMITTER_ID",
+        },
+        progress,
+    )
+
+    assert progress.ticks == ["Сопоставление SECID -> EMITTER_ID"]
+    assert progress.fractions == [(3, 10, "обработано карточек эмитентов")]
+
+
+def test_print_emitents_progress_reports_emitter_profiles() -> None:
+    progress = _DummyProgress()
+
+    _print_emitents_progress(
+        {
+            "phase": "emitter_profiles",
+            "processed": 8,
+            "total": 324,
+            "message": "Загрузка карточек эмитентов по EMITTER_ID",
+        },
+        progress,
+    )
+
+    assert progress.ticks == ["Загрузка карточек эмитентов по EMITTER_ID"]
+    assert progress.fractions == [(8, 324, "обработано профилей эмитентов")]
