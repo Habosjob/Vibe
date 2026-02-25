@@ -311,6 +311,42 @@ def test_enrich_bonds_refetches_when_cached_payload_is_empty() -> None:
     assert bonds[0]["OFFERDATE"] == "2028-05-01"
 
 
+def test_enrich_bonds_recalculates_legacy_spread_only_coupon_from_cache() -> None:
+    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 16.0, "CBR_RATE": 15.5, "Z_CURVE_RUS": 14.0})
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    checkpoint = {
+        "version": DOHOD_CHECKPOINT_VERSION,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "completed": True,
+        "index_values": {"RUONIA": 16.0, "CBR_RATE": 15.5, "Z_CURVE_RUS": 14.0},
+        "bonds": {
+            "RU000A105KW6": {
+                "ask_price": 101.0,
+                "index_name": "CBR_RATE",
+                "index_spread": 1.5,
+                "index_tenor_years": None,
+                "event_name": "",
+                "ytm_date": "",
+            }
+        },
+    }
+    bonds = [
+        {
+            "ISIN": "RU000A105KW6",
+            "COUPONPERCENT": "1.5",  # legacy: только спред без базовой ставки
+            "OFFERDATE": "",
+            "MATDATE": "2033-10-12",
+        }
+    ]
+
+    errors = enricher.enrich_bonds(bonds, checkpoint_data=checkpoint)
+
+    assert errors == 0
+    assert bonds[0]["COUPONPERCENT"] == 17.0
+    assert bonds[0]["_COUPONPERCENT_APPROX"] is True
+
+
 def test_enrich_bonds_skips_record_without_isin() -> None:
     config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
@@ -337,6 +373,11 @@ def test_should_enrich_coupon_for_zero_and_empty_markers() -> None:
     assert _should_enrich_coupon("0", "RUONIA") is True
     assert _should_enrich_coupon("2.5", "RUONIA") is False
     assert _should_enrich_coupon("", "") is False
+
+
+def test_should_enrich_coupon_when_legacy_value_equals_spread_only() -> None:
+    assert _should_enrich_coupon("1.5", "CBR_RATE", base_rate=15.5, index_spread=1.5) is True
+    assert _should_enrich_coupon("17.0", "CBR_RATE", base_rate=15.5, index_spread=1.5) is False
 
 
 def test_should_enrich_offer_without_event_name_if_not_maturity() -> None:

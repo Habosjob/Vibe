@@ -387,8 +387,14 @@ class DohodEnricher:
                 bond["RealPrice"] = new_real_price
 
             coupon_raw = str(bond.get("COUPONPERCENT") or "").strip()
-            if _should_enrich_coupon(coupon_raw, index_name):
-                base_rate = float(index_values.get(index_name, 0.0))
+            base_rate = float(index_values.get(index_name, 0.0))
+            if _should_enrich_coupon(
+                coupon_raw=coupon_raw,
+                index_name=index_name,
+                base_rate=base_rate,
+                index_spread=index_spread,
+                approx_flag=bool(bond.get("_COUPONPERCENT_APPROX")),
+            ):
                 if index_name == "Z_CURVE_RUS" and index_tenor_years:
                     base_rate = float(index_values.get(f"Z_CURVE_RUS_{index_tenor_years}Y", base_rate))
                 new_coupon = round(base_rate + index_spread, 4)
@@ -675,14 +681,34 @@ def _as_float_or_none(value: Any) -> float | None:
         return None
 
 
-def _should_enrich_coupon(coupon_raw: str, index_name: str) -> bool:
+def _should_enrich_coupon(
+    coupon_raw: str,
+    index_name: str,
+    base_rate: float = 0.0,
+    index_spread: float = 0.0,
+    approx_flag: bool = False,
+) -> bool:
     if not index_name:
         return False
     normalized = coupon_raw.strip().lower()
     if normalized in {"", "-", "—", "нет", "n/a", "na", "none", "null", "nan"}:
         return True
     numeric = _as_float_or_none(coupon_raw)
-    return numeric is not None and numeric <= 0
+    if numeric is None:
+        return False
+    if numeric <= 0:
+        return True
+
+    # Диагностика legacy-кеша: ранее могли сохранить только spread (без base_rate).
+    if base_rate > 0 and abs(numeric - float(index_spread)) <= 1e-6:
+        return True
+
+    # Если поле было ранее помечено как приблизительное, разрешаем пересчет при наличии базы.
+    if approx_flag and base_rate > 0:
+        expected = base_rate + float(index_spread)
+        return abs(numeric - expected) > 1e-6
+
+    return False
 
 
 def _should_enrich_offer(
