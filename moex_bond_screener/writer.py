@@ -58,6 +58,7 @@ GROUP_COLORS = {
 SEPARATOR_FIELD = "__GROUP_SEPARATOR__"
 SEPARATOR_COLUMN_WIDTH = 18
 NUMERIC_STRING_RE = re.compile(r"^[+-]?\d[\d\s\u00A0]*(?:[.,]\d+)?$")
+UNICODE_SPACES_RE = re.compile(r"[\s\u00A0\u202F\u2007]+")
 
 
 def _resolve_fields(bonds: list[dict[str, Any]]) -> list[str]:
@@ -149,11 +150,11 @@ def _format_excel_value(field: str, value: Any) -> Any:
 
 
 def _coerce_numeric_string(value: str) -> int | float | None:
-    normalized = value.strip()
+    normalized = value.strip().replace("\u00A0", " ").replace("\u202F", " ").replace("\u2007", " ")
     if not normalized or not NUMERIC_STRING_RE.match(normalized):
         return None
 
-    compact = re.sub(r"\s+", "", normalized)
+    compact = UNICODE_SPACES_RE.sub("", normalized)
     if "," in compact and "." not in compact:
         compact = compact.replace(",", ".")
 
@@ -179,8 +180,38 @@ def _excel_number_format(field: str, values: list[Any]) -> str | None:
 
     has_fraction = any(abs(float(value) - int(float(value))) > 1e-9 for value in numeric_values)
     if has_fraction:
-        return "# ##0.00"
-    return "# ##0"
+        return "#,##0.00"
+    return "#,##0"
+
+
+def _summary_metrics(prepared_rows: list[dict[str, Any]], summary: dict[str, Any] | None) -> dict[str, Any]:
+    payload = summary.copy() if summary else {}
+    payload.setdefault("bonds_count", len(prepared_rows))
+    payload.setdefault("errors_count", 0)
+    payload.setdefault("elapsed_seconds", 0.0)
+    payload.setdefault("generated_at", datetime.now())
+    return payload
+
+
+def _write_summary_sheet(workbook: Workbook, prepared_rows: list[dict[str, Any]], summary: dict[str, Any] | None) -> None:
+    payload = _summary_metrics(prepared_rows, summary)
+    summary_sheet = workbook.create_sheet("SUMMARY", 0)
+    summary_sheet.append(["Параметр", "Значение"])
+    summary_sheet.append(["Дата и время формирования", payload["generated_at"]])
+    summary_sheet.append(["Количество бумаг", int(payload["bonds_count"])])
+    summary_sheet.append(["Количество ошибок", int(payload["errors_count"])])
+    summary_sheet.append(["Время выполнения, сек", float(payload["elapsed_seconds"])])
+
+    for cell in summary_sheet[1]:
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    summary_sheet.column_dimensions["A"].width = 34
+    summary_sheet.column_dimensions["B"].width = 24
+    summary_sheet["B2"].number_format = "DD.MM.YYYY HH:MM:SS"
+    summary_sheet["B5"].number_format = "0.00"
+    summary_sheet.freeze_panes = "A2"
 
 
 def _excel_date_format(field: str, values: list[Any]) -> str | None:
@@ -250,7 +281,7 @@ def _build_columns(fields: list[str]) -> list[tuple[str, str]]:
     return columns
 
 
-def save_bonds_excel(path: str, bonds: list[dict[str, Any]]) -> None:
+def save_bonds_excel(path: str, bonds: list[dict[str, Any]], summary: dict[str, Any] | None = None) -> None:
     """Сохраняет список облигаций в Excel (.xlsx) без проблем с кодировкой."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -271,6 +302,7 @@ def save_bonds_excel(path: str, bonds: list[dict[str, Any]]) -> None:
         sheet.append(row_values)
 
     _apply_excel_formatting(sheet)
+    _write_summary_sheet(workbook, prepared_rows, summary)
 
     workbook.save(target)
 
@@ -405,7 +437,7 @@ def save_bonds_csv(path: str, bonds: list[dict[str, Any]]) -> None:
         )
 
 
-def save_bonds_file(path: str, bonds: list[dict[str, Any]]) -> None:
+def save_bonds_file(path: str, bonds: list[dict[str, Any]], summary: dict[str, Any] | None = None) -> None:
     """Сохраняет результат в формате по расширению файла.
 
     По умолчанию поддерживаются `.xlsx` и `.csv`.
@@ -416,7 +448,7 @@ def save_bonds_file(path: str, bonds: list[dict[str, Any]]) -> None:
         return
 
     if extension == ".xlsx":
-        save_bonds_excel(path, bonds)
+        save_bonds_excel(path, bonds, summary=summary)
         return
 
     raise ValueError("Поддерживаются только форматы .xlsx и .csv")

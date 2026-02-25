@@ -27,7 +27,16 @@ def main() -> None:
     bonds, errors = client.fetch_all_bonds()
 
     print("[Этап] Сохранение итогового файла...")
-    save_bonds_file(config.output_file, bonds)
+    elapsed_before_export = time.time() - started
+    save_bonds_file(
+        config.output_file,
+        bonds,
+        summary={
+            "bonds_count": len(bonds),
+            "errors_count": errors,
+            "elapsed_seconds": elapsed_before_export,
+        },
+    )
 
     elapsed = time.time() - started
     filtered = 0
