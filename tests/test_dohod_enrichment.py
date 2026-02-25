@@ -168,6 +168,53 @@ def test_resolve_index_values_normalizes_hyphenated_keys() -> None:
     assert index_values["CBR_RATE"] == 16.0
     assert index_values["RUONIA"] == 15.4
 
+
+
+def test_parse_bond_payload_extracts_index_base_rate_from_text() -> None:
+    html = """
+    <table>
+      <tr><th>Привязка к индексу</th><td>RUONIA + 1,25</td></tr>
+      <tr><th>Описание формулы изменяемого купона/номинала</th><td>Купон = RUONIA + 1,25%</td></tr>
+    </table>
+    <div>Значение RUONIA на дату расчёта составляет 15,40%</div>
+    """
+
+    payload = DohodEnricher.parse_bond_payload(html)
+
+    assert payload.index_name == "RUONIA"
+    assert payload.index_spread == 1.25
+    assert payload.index_base_rate == 15.4
+
+
+def test_enrich_bonds_uses_index_base_rate_from_dohod_payload_when_config_base_missing() -> None:
+    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 0.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 0.0})
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    checkpoint = {
+        "version": DOHOD_CHECKPOINT_VERSION,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "completed": True,
+        "index_values": {"RUONIA": 0.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 0.0},
+        "bonds": {
+            "RU_BASE": {
+                "ask_price": 100.0,
+                "index_name": "RUONIA",
+                "index_spread": 1.25,
+                "index_base_rate": 15.4,
+                "index_tenor_years": None,
+                "event_name": "",
+                "ytm_date": "",
+            }
+        },
+    }
+    bonds = [{"ISIN": "RU_BASE", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2033-10-12"}]
+
+    errors = enricher.enrich_bonds(bonds, checkpoint_data=checkpoint)
+
+    assert errors == 0
+    assert bonds[0]["COUPONPERCENT"] == 16.65
+    assert enricher.last_stats.coupon_skipped_no_base == 0
+
 def test_parse_bond_payload_parses_script_values_when_labels_absent() -> None:
     html = """
     <script>
