@@ -315,3 +315,19 @@ def test_save_bonds_file_with_unsupported_extension(tmp_path: Path, bonds_sample
 
     with pytest.raises(ValueError, match=".xlsx и .csv"):
         save_bonds_file(str(target), bonds_sample)
+
+
+def test_save_bonds_excel_places_amortization_start_date_into_dates_group(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [{"SECID": "A", "SHORTNAME": "A", "Amortization_start_date": "2025-06-01"}]
+
+    save_bonds_file(str(target), bonds)
+
+    workbook = load_workbook(target)
+    sheet = workbook["MOEX_BONDS"]
+
+    headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
+    amort_column = headers.index("Amortization_start_date") + 1
+
+    assert sheet.cell(row=1, column=amort_column - 1).value == "Даты"
+    assert sheet.cell(row=3, column=amort_column).value == datetime(2025, 6, 1)

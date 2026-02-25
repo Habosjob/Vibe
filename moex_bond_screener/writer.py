@@ -76,6 +76,8 @@ def _resolve_fields(bonds: list[dict[str, Any]]) -> list[str]:
 
 def _group_name(field: str) -> str:
     upper = field.upper()
+    if upper == "AMORTIZATION_START_DATE":
+        return "Даты"
     if upper == "CURRENCYID":
         return "Купоны и номинал"
     if upper in {"SHORTNAME", "ISIN", "FACEUNIT", "BONDNAME", "EMITTER"}:
