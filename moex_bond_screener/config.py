@@ -16,6 +16,7 @@ class AppConfig:
     base_url: str = "https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json"
     timeout_seconds: int = 20
     request_delay_seconds: float = 0.15
+    amortization_request_delay_seconds: float = 0.02
     retries: int = 3
     page_size: int = 100
     output_file: str = "output/moex_bonds.xlsx"
@@ -24,6 +25,7 @@ class AppConfig:
     raw_max_size_mb: int = 50
     exclusions_state_dir: str = "state"
     exclusion_window_days: int = 365
+    amortization_workers: int = 8
 
 
 DEFAULT_CONFIG_PATH = Path("config.yml")

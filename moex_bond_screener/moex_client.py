@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Callable
 
@@ -22,6 +24,8 @@ class MoexClient:
         self.logger = logger
         self.session = requests.Session()
         self.raw_store = raw_store
+        self._request_lock = threading.Lock()
+        self._next_request_ts = 0.0
 
     def fetch_all_bonds(
         self,
@@ -106,7 +110,6 @@ class MoexClient:
                     }
                 )
             start = next_start
-            time.sleep(self.config.request_delay_seconds)
 
         if checkpoint_saver:
             checkpoint_saver(
@@ -136,20 +139,32 @@ class MoexClient:
         errors = 0
         processed: dict[str, str] = dict(checkpoint_data.get("processed", {})) if checkpoint_data else {}
         total = len(bonds)
+        secid_to_indices: dict[str, list[int]] = {}
 
-        for index, bond in enumerate(bonds, start=1):
+        for idx, bond in enumerate(bonds):
             secid = str(bond.get("SECID") or "").strip()
+            if secid:
+                secid_to_indices.setdefault(secid, []).append(idx)
+
+        progress_processed = 0
+        pending: list[tuple[str, str]] = []
+
+        for secid, indices in secid_to_indices.items():
+            sample_bond = bonds[indices[0]]
+            matdate = str(sample_bond.get("MATDATE") or "")
             if not secid:
-                bond["Amortization_start_date"] = ""
                 continue
 
             if secid in processed:
-                bond["Amortization_start_date"] = str(processed.get(secid) or "")
+                value = str(processed.get(secid) or "")
+                for idx in indices:
+                    bonds[idx]["Amortization_start_date"] = value
+                progress_processed += len(indices)
                 if progress_callback:
                     progress_callback(
                         {
                             "stage": "amortization",
-                            "processed": index,
+                            "processed": progress_processed,
                             "total": total,
                             "secid": secid,
                             "resumed": True,
@@ -157,27 +172,43 @@ class MoexClient:
                     )
                 continue
 
-            date_value, request_errors = self._fetch_amortization_start_date(secid)
-            errors += request_errors
-            bond["Amortization_start_date"] = date_value
-            processed[secid] = date_value
+            pending.append((secid, matdate))
 
-            if checkpoint_saver:
-                checkpoint_saver({"processed": processed, "completed": False})
+        for bond in bonds:
+            secid = str(bond.get("SECID") or "").strip()
+            if not secid:
+                bond["Amortization_start_date"] = ""
+                progress_processed += 1
 
-            if progress_callback:
-                progress_callback(
-                    {
-                        "stage": "amortization",
-                        "processed": index,
-                        "total": total,
-                        "secid": secid,
-                        "resumed": False,
-                    }
-                )
+        workers = max(1, self.config.amortization_workers)
+        if pending:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(self._fetch_amortization_start_date, secid, matdate): secid
+                    for secid, matdate in pending
+                }
+                for future in as_completed(futures):
+                    secid = futures[future]
+                    date_value, request_errors = future.result()
+                    errors += request_errors
+                    processed[secid] = date_value
+                    for idx in secid_to_indices.get(secid, []):
+                        bonds[idx]["Amortization_start_date"] = date_value
+                    progress_processed += len(secid_to_indices.get(secid, []))
 
-            if self.config.request_delay_seconds > 0:
-                time.sleep(self.config.request_delay_seconds)
+                    if checkpoint_saver:
+                        checkpoint_saver({"processed": processed, "completed": False})
+
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "stage": "amortization",
+                                "processed": progress_processed,
+                                "total": total,
+                                "secid": secid,
+                                "resumed": False,
+                            }
+                        )
 
         if checkpoint_saver:
             checkpoint_saver({"processed": processed, "completed": True})
@@ -194,10 +225,11 @@ class MoexClient:
 
         for attempt in range(1, self.config.retries + 1):
             try:
-                response = self.session.get(
+                response = self._get_with_rate_limit(
                     self.config.base_url,
                     params=params,
                     timeout=self.config.timeout_seconds,
+                    delay_seconds=self.config.request_delay_seconds,
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -217,16 +249,17 @@ class MoexClient:
 
         return [], 1, True
 
-    def _fetch_amortization_start_date(self, secid: str) -> tuple[str, int]:
+    def _fetch_amortization_start_date(self, secid: str, matdate: str = "") -> tuple[str, int]:
         url = f"https://iss.moex.com/iss/securities/{secid}/bondization.json"
         params = {"iss.meta": "off", "iss.only": "amortizations"}
 
         for attempt in range(1, self.config.retries + 1):
             try:
-                response = self.session.get(
+                response = self._get_with_rate_limit(
                     url,
                     params=params,
                     timeout=self.config.timeout_seconds,
+                    delay_seconds=self.config.amortization_request_delay_seconds,
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -234,7 +267,7 @@ class MoexClient:
                 if self.raw_store and self.config.raw_dump_enabled:
                     self.raw_store.dump_json(f"amortization_{secid}.json", response.text)
 
-                earliest = self._extract_earliest_amortization_date(payload)
+                earliest = self._extract_earliest_amortization_date(payload, matdate=matdate)
                 return earliest or "", 0
             except requests.RequestException as error:
                 self.logger.warning(
@@ -245,12 +278,12 @@ class MoexClient:
                 )
                 if attempt == self.config.retries:
                     return "", 1
-                time.sleep(self.config.request_delay_seconds * attempt)
+                time.sleep(self.config.amortization_request_delay_seconds * attempt)
 
         return "", 1
 
     @staticmethod
-    def _extract_earliest_amortization_date(payload: dict[str, Any]) -> str | None:
+    def _extract_earliest_amortization_date(payload: dict[str, Any], matdate: str = "") -> str | None:
         amortizations = payload.get("amortizations") or {}
         columns = amortizations.get("columns") or []
         rows = amortizations.get("data") or []
@@ -259,10 +292,12 @@ class MoexClient:
 
         col_map = {name.upper(): idx for idx, name in enumerate(columns)}
         date_idx = col_map.get("AMORTDATE")
+        value_prc_idx = col_map.get("VALUEPRC")
         if date_idx is None:
             return None
 
-        parsed_dates: list[datetime] = []
+        parsed_items: list[tuple[datetime, float | None]] = []
+        partial_dates: list[datetime] = []
         for row in rows:
             if len(row) <= date_idx:
                 continue
@@ -270,11 +305,58 @@ class MoexClient:
             if not isinstance(raw_date, str) or raw_date == "0000-00-00":
                 continue
             try:
-                parsed_dates.append(datetime.strptime(raw_date, "%Y-%m-%d"))
+                parsed_date = datetime.strptime(raw_date, "%Y-%m-%d")
             except ValueError:
                 continue
 
-        if not parsed_dates:
+            value_prc: float | None = None
+            if value_prc_idx is not None and len(row) > value_prc_idx:
+                raw_value_prc = row[value_prc_idx]
+                try:
+                    value_prc = float(raw_value_prc)
+                except (TypeError, ValueError):
+                    value_prc = None
+
+            parsed_items.append((parsed_date, value_prc))
+            if value_prc is None or value_prc < 99.999:
+                partial_dates.append(parsed_date)
+
+        if partial_dates:
+            return min(partial_dates).strftime("%Y-%m-%d")
+
+        if not parsed_items:
             return None
 
-        return min(parsed_dates).strftime("%Y-%m-%d")
+        if len(parsed_items) == 1:
+            only_date, only_value_prc = parsed_items[0]
+            only_date_str = only_date.strftime("%Y-%m-%d")
+            is_full_redemption = only_value_prc is not None and only_value_prc >= 99.999
+            if is_full_redemption or (matdate and only_date_str == matdate):
+                return None
+            return only_date_str
+
+        if value_prc_idx is not None:
+            # Если VALUEPRC есть и частичных выплат нет, это погашения, а не амортизация.
+            return None
+
+        return min(date for date, _ in parsed_items).strftime("%Y-%m-%d")
+
+    def _get_with_rate_limit(
+        self,
+        url: str,
+        params: dict[str, Any],
+        timeout: int,
+        delay_seconds: float,
+    ) -> requests.Response:
+        delay = max(0.0, float(delay_seconds))
+        sleep_for = 0.0
+        if delay > 0:
+            with self._request_lock:
+                now = time.monotonic()
+                sleep_for = max(0.0, self._next_request_ts - now)
+                reserve_from = max(now, self._next_request_ts)
+                self._next_request_ts = reserve_from + delay
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
+        return self.session.get(url, params=params, timeout=timeout)
