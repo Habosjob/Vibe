@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import csv
+import re
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -56,6 +57,7 @@ GROUP_COLORS = {
 
 SEPARATOR_FIELD = "__GROUP_SEPARATOR__"
 SEPARATOR_COLUMN_WIDTH = 18
+NUMERIC_STRING_RE = re.compile(r"^[+-]?\d[\d\s\u00A0]*(?:[.,]\d+)?$")
 
 
 def _resolve_fields(bonds: list[dict[str, Any]]) -> list[str]:
@@ -139,7 +141,31 @@ def _format_excel_value(field: str, value: Any) -> Any:
     excel_date = _coerce_excel_date(field, value)
     if excel_date == "":
         return ""
+    if isinstance(excel_date, str):
+        numeric = _coerce_numeric_string(excel_date)
+        if numeric is not None:
+            return numeric
     return excel_date
+
+
+def _coerce_numeric_string(value: str) -> int | float | None:
+    normalized = value.strip()
+    if not normalized or not NUMERIC_STRING_RE.match(normalized):
+        return None
+
+    compact = re.sub(r"\s+", "", normalized)
+    if "," in compact and "." not in compact:
+        compact = compact.replace(",", ".")
+
+    try:
+        if "." in compact:
+            as_float = float(compact)
+            if as_float.is_integer():
+                return int(as_float)
+            return as_float
+        return int(compact)
+    except ValueError:
+        return None
 
 
 def _is_numeric_like(value: Any) -> bool:

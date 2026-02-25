@@ -202,6 +202,61 @@ def test_save_bonds_excel_formats_numeric_columns_and_empty_zero_dates(tmp_path:
     assert sheet.cell(row=3, column=nextcoupon_column).number_format == "DD.MM.YYYY"
 
 
+def test_save_bonds_excel_converts_large_numeric_strings_with_any_thousands_groups(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [
+        {
+            "SHORTNAME": "Тест большой эмиссии",
+            "ISSUESIZE": "1000000 000",
+            "ISSUESIZEPLACED": "1 250 000 000 000",
+            "COUPONVALUE": "62,33",
+        }
+    ]
+
+    save_bonds_file(str(target), bonds)
+
+    workbook = load_workbook(target)
+    sheet = workbook["MOEX_BONDS"]
+    headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
+
+    issuesize_column = headers.index("ISSUESIZE") + 1
+    issuesizeplaced_column = headers.index("ISSUESIZEPLACED") + 1
+    coupon_column = headers.index("COUPONVALUE") + 1
+
+    assert sheet.cell(row=3, column=issuesize_column).value == 1_000_000_000
+    assert sheet.cell(row=3, column=issuesizeplaced_column).value == 1_250_000_000_000
+    assert sheet.cell(row=3, column=coupon_column).value == 62.33
+    assert sheet.cell(row=3, column=issuesize_column).number_format == "# ##0"
+    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "# ##0"
+    assert sheet.cell(row=3, column=coupon_column).number_format == "# ##0.00"
+
+
+
+
+def test_save_bonds_excel_converts_numeric_strings_with_narrow_nbsp(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [
+        {
+            "SHORTNAME": "Тест узкого неразрывного пробела",
+            "ISSUESIZE": "1 000 000 000",
+            "ISSUESIZEPLACED": "750 000 000",
+        }
+    ]
+
+    save_bonds_file(str(target), bonds)
+
+    workbook = load_workbook(target)
+    sheet = workbook["MOEX_BONDS"]
+    headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
+
+    issuesize_column = headers.index("ISSUESIZE") + 1
+    issuesizeplaced_column = headers.index("ISSUESIZEPLACED") + 1
+
+    assert sheet.cell(row=3, column=issuesize_column).value == 1_000_000_000
+    assert sheet.cell(row=3, column=issuesizeplaced_column).value == 750_000_000
+    assert sheet.cell(row=3, column=issuesize_column).number_format == "# ##0"
+    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "# ##0"
+
 def test_save_bonds_file_with_unsupported_extension(tmp_path: Path, bonds_sample: list[dict[str, object]]) -> None:
     target = tmp_path / "output" / "bonds.txt"
 
