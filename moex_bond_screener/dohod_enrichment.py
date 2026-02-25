@@ -28,6 +28,10 @@ NUMBER_RE = r"[+-]?\d+(?:[.,]\d+)?"
 INDEX_RE = re.compile(r"(RUONIA|CBR_RATE|Z_CURVE_RUS)\s*([+-]\s*\d+(?:[.,]\d+)?)?", re.IGNORECASE)
 TENOR_RE = re.compile(r"сроком\s+погашения\s+(\d+)\s+лет", re.IGNORECASE)
 
+DL_PAIR_RE = re.compile(
+    r"<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 @dataclass(slots=True)
 class DohodBondPayload:
@@ -388,6 +392,14 @@ def _extract_label_map(html: str) -> dict[str, str]:
         if not match:
             continue
         result[label] = _strip_html(match.group(1))
+
+    if len(result) < len(labels):
+        # На части карточек используется верстка через список определений (dt/dd) вместо таблицы.
+        for raw_label, raw_value in DL_PAIR_RE.findall(html):
+            target_label = _match_target_label(_strip_html(raw_label))
+            if not target_label or target_label in result:
+                continue
+            result[target_label] = _strip_html(raw_value)
 
     if len(result) < len(labels):
         loose = _extract_label_map_loose(html)

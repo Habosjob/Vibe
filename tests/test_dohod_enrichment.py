@@ -63,6 +63,27 @@ def test_parse_bond_payload_parses_nested_table_markup() -> None:
 
 
 
+
+
+def test_parse_bond_payload_parses_definition_list_markup() -> None:
+    html = """
+    <dl class="bond-props">
+      <dt>Цена (last/bid/ask)</dt><dd>100.10 / 100.00 / 100.35</dd>
+      <dt>Привязка к индексу</dt><dd>RUONIA + 0,45</dd>
+      <dt>Описание формулы изменяемого купона/номинала</dt><dd>Купон = RUONIA + 0,45%</dd>
+      <dt>Событие в ближ. дату</dt><dd>Оферта</dd>
+      <dt>Дата, к которой рассчит. YTM</dt><dd>11.03.2030</dd>
+    </dl>
+    """
+
+    payload = DohodEnricher.parse_bond_payload(html)
+
+    assert payload.ask_price == 100.35
+    assert payload.index_name == "RUONIA"
+    assert payload.index_spread == 0.45
+    assert payload.event_name == "оферта"
+    assert payload.ytm_date == "2030-03-11"
+
 def test_parse_bond_payload_parses_fuzzy_labels() -> None:
     html = """
     <table>
@@ -292,6 +313,7 @@ def test_fetch_with_fallback_uses_secid_when_isin_payload_empty() -> None:
     assert errors == 0
     assert payload.ask_price == 99.8
     assert calls == ["RU000A0JTYK4", "BOND500"]
+
 
 
 
