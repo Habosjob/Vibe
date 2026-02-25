@@ -167,10 +167,6 @@ class DohodEnricher:
 
         return errors
 
-    def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None) -> tuple[DohodBondPayload, int]:
-        """Совместимость со старыми сборками: запрос только по primary (ISIN-only)."""
-        return self._fetch_and_parse(primary_identifier)
-
     def _fetch_and_parse(self, secid: str) -> tuple[DohodBondPayload, int]:
         for attempt in range(1, self.config.retries + 1):
             try:
@@ -212,7 +208,7 @@ class DohodEnricher:
 
     @staticmethod
     def _resolve_secondary_identifier(bond: dict[str, Any], primary_identifier: str) -> str:
-        """Совместимость со старыми сборками: fallback отключен, всегда пусто."""
+        """Сервис ДОХОД работает только с ISIN: fallback по другим идентификаторам отключен."""
         _ = bond
         _ = primary_identifier
         return ""

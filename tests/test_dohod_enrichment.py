@@ -273,6 +273,7 @@ def test_compat_methods_for_mixed_versions_do_not_fail() -> None:
 
 
 
+
 def test_enrich_bonds_counts_empty_parsed_payload_as_error() -> None:
     config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
