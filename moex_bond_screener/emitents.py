@@ -180,15 +180,29 @@ def build_emitents_reference(
         state_store.save_secid_to_emitter_map(secid_to_emitter)
 
     bonds_started = perf_counter()
-    if progress_callback:
-        progress_callback({"phase": "market_data", "message": "Загрузка рыночных инструментов bonds"})
-    bonds_market, bonds_errors = client.fetch_market_securities("bonds")
+    bonds_market = state_store.load_market_cache("bonds") or []
+    bonds_errors = 0
+    if not bonds_market:
+        if progress_callback:
+            progress_callback({"phase": "market_data", "message": "Загрузка рыночных инструментов bonds"})
+        bonds_market, bonds_errors = client.fetch_market_securities("bonds")
+        if bonds_market:
+            state_store.save_market_cache("bonds", bonds_market)
+    elif progress_callback:
+        progress_callback({"phase": "market_data", "message": "Используем кэш рыночных инструментов bonds"})
     stage_durations["emitents_market_bonds_seconds"] = round(perf_counter() - bonds_started, 2)
 
     shares_started = perf_counter()
-    if progress_callback:
-        progress_callback({"phase": "market_data", "message": "Загрузка рыночных инструментов shares"})
-    shares_market, shares_errors = client.fetch_market_securities("shares")
+    shares_market = state_store.load_market_cache("shares") or []
+    shares_errors = 0
+    if not shares_market:
+        if progress_callback:
+            progress_callback({"phase": "market_data", "message": "Загрузка рыночных инструментов shares"})
+        shares_market, shares_errors = client.fetch_market_securities("shares")
+        if shares_market:
+            state_store.save_market_cache("shares", shares_market)
+    elif progress_callback:
+        progress_callback({"phase": "market_data", "message": "Используем кэш рыночных инструментов shares"})
     stage_durations["emitents_market_shares_seconds"] = round(perf_counter() - shares_started, 2)
     errors += bonds_errors + shares_errors
 

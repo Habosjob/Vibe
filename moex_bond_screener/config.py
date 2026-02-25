@@ -27,6 +27,8 @@ class AppConfig:
     exclusions_state_dir: str = "state"
     exclusion_window_days: int = 365
     amortization_workers: int = 8
+    storage_backend: str = "json"
+    sqlite_db_path: str = "screener_state.db"
 
 
 DEFAULT_CONFIG_PATH = Path("config.yml")

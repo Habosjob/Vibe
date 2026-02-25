@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-import json
-
-from scripts.run_emitents import _load_eligible_bonds
+from moex_bond_screener.state_store import ScreenerStateStore
 
 
-def test_load_eligible_bonds_reads_state_payload(tmp_path):
-    path = tmp_path / "eligible_bonds.json"
-    path.write_text(
-        json.dumps({"bonds": {"A": {"SECID": "A"}, "B": {"SECID": "B", "EMITTER_ID": "2"}}}),
-        encoding="utf-8",
-    )
+def test_state_store_load_eligible_bonds_json_backend(tmp_path):
+    store = ScreenerStateStore(str(tmp_path / "state"), storage_backend="json")
+    store.update_eligible_bonds([{"SECID": "A"}, {"SECID": "B", "EMITTER_ID": "2"}])
 
-    rows = _load_eligible_bonds(path)
+    rows = sorted(store.load_eligible_bonds(), key=lambda row: row["SECID"])
+
+    assert rows == [{"SECID": "A"}, {"SECID": "B", "EMITTER_ID": "2"}]
+
+
+def test_state_store_load_eligible_bonds_sqlite_backend(tmp_path):
+    store = ScreenerStateStore(str(tmp_path / "state"), storage_backend="sqlite")
+    store.update_eligible_bonds([{"SECID": "A"}, {"SECID": "B", "EMITTER_ID": "2"}])
+
+    rows = sorted(store.load_eligible_bonds(), key=lambda row: row["SECID"])
 
     assert rows == [{"SECID": "A"}, {"SECID": "B", "EMITTER_ID": "2"}]

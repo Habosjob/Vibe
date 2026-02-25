@@ -20,6 +20,7 @@ from moex_bond_screener.writer import save_emitents_excel
 
 def main() -> None:
     started = time.time()
+    started_dt = datetime.now(timezone.utc)
     logger = setup_logging()
     progress = PipelineProgress(total_stages=9)
 
@@ -31,7 +32,11 @@ def main() -> None:
     raw_store.cleanup(config.raw_ttl_hours, config.raw_max_size_mb)
 
     progress.start_stage(3, "Загрузка состояния сортировщика и чекпоинтов")
-    state_store = ScreenerStateStore(config.exclusions_state_dir)
+    state_store = ScreenerStateStore(
+        config.exclusions_state_dir,
+        storage_backend=config.storage_backend,
+        sqlite_db_path=config.sqlite_db_path,
+    )
     previous_exclusions = state_store.load_exclusions()
     bonds_checkpoint = state_store.load_checkpoint("bonds_fetch")
     raw_amortization_checkpoint = state_store.load_checkpoint("amortization")
@@ -150,6 +155,22 @@ def main() -> None:
         f"файл: {config.emitents_output_file}"
     )
     print(f"Время выполнения: {elapsed:.2f} сек")
+
+    state_store.save_run_metrics(
+        {
+            "started_at": started_dt.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": elapsed,
+            "bonds_processed": len(bonds),
+            "bonds_filtered": filtered_total,
+            "errors_count": errors + amortization_errors + emitents_result.errors,
+            "backend": config.storage_backend,
+            "notes": {
+                "eligible_bonds": len(eligible_bonds),
+                "new_emitters": emitents_result.new_emitters,
+            },
+        }
+    )
 
 
 def _prepare_amortization_checkpoint(checkpoint: dict[str, Any]) -> tuple[dict[str, Any], bool, bool]:
