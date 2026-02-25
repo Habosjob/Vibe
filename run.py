@@ -9,6 +9,7 @@ from typing import Any
 
 from moex_bond_screener.config import load_config
 from moex_bond_screener.data_quality import attach_data_status
+from moex_bond_screener.dohod_enrichment import DohodEnricher
 from moex_bond_screener.emitents import build_emitents_reference
 from moex_bond_screener.exclusion_rules import AMORTIZATION_RULE_NAME, BondExclusionFilter
 from moex_bond_screener.logging_utils import setup_logging
@@ -24,7 +25,7 @@ def main() -> None:
     started = time.time()
     started_dt = datetime.now(timezone.utc)
     logger = setup_logging()
-    progress = PipelineProgress(total_stages=9)
+    progress = PipelineProgress(total_stages=11)
 
     progress.start_stage(1, "Загрузка конфигурации")
     config = load_config()
@@ -103,25 +104,47 @@ def main() -> None:
         bonds=exclusion_result.eligible_bonds,
         previous_exclusions={},
     )
-    eligible_bonds = post_amortization_exclusion_result.eligible_bonds
+
+    progress.start_stage(7, "Обогащение данных через ДОХОД")
+    dohod_client = DohodEnricher(config=config, logger=logger, raw_store=raw_store)
+    dohod_checkpoint = state_store.load_checkpoint("dohod_enrichment")
+    dohod_errors = dohod_client.enrich_bonds(
+        post_amortization_exclusion_result.eligible_bonds,
+        checkpoint_data=dohod_checkpoint,
+        checkpoint_saver=lambda payload: state_store.save_checkpoint("dohod_enrichment", payload),
+        progress_callback=lambda data: _print_dohod_progress(data, progress),
+    )
+
+    progress.start_stage(8, "Повторная фильтрация после обогащения")
+    post_dohod_exclusion_result = exclusion_filter.apply(
+        bonds=post_amortization_exclusion_result.eligible_bonds,
+        previous_exclusions={},
+    )
+
+    eligible_bonds = post_dohod_exclusion_result.eligible_bonds
     attach_data_status(eligible_bonds)
     active_exclusions = dict(exclusion_result.active_exclusions)
     active_exclusions.update(post_amortization_exclusion_result.active_exclusions)
+    active_exclusions.update(post_dohod_exclusion_result.active_exclusions)
     excluded_by_rule = dict(exclusion_result.excluded_by_rule)
     for rule_name, count in post_amortization_exclusion_result.excluded_by_rule.items():
         excluded_by_rule[rule_name] = excluded_by_rule.get(rule_name, 0) + count
+    for rule_name, count in post_dohod_exclusion_result.excluded_by_rule.items():
+        excluded_by_rule[rule_name] = excluded_by_rule.get(rule_name, 0) + count
     skipped_by_active_exclusion = (
-        exclusion_result.skipped_by_active_exclusion + post_amortization_exclusion_result.skipped_by_active_exclusion
+        exclusion_result.skipped_by_active_exclusion
+        + post_amortization_exclusion_result.skipped_by_active_exclusion
+        + post_dohod_exclusion_result.skipped_by_active_exclusion
     )
 
-    progress.start_stage(7, "Сохранение инкрементального состояния")
+    progress.start_stage(9, "Сохранение инкрементального состояния")
     state_store.save_exclusions(active_exclusions)
     state_store.update_exclusions_history(active_exclusions)
     incremental_stats = state_store.update_eligible_bonds(eligible_bonds)
 
-    progress.start_stage(8, "Сохранение итогового файла")
+    progress.start_stage(10, "Сохранение итогового файла")
 
-    progress.start_stage(9, "Формирование справочника эмитентов")
+    progress.start_stage(11, "Формирование справочника эмитентов")
     emitents_result = build_emitents_reference(
         eligible_bonds=eligible_bonds,
         client=client,
@@ -133,7 +156,7 @@ def main() -> None:
     elapsed = time.time() - started
     summary = {
         "bonds_count": len(eligible_bonds),
-        "errors_count": errors + amortization_errors + emitents_result.errors,
+        "errors_count": errors + amortization_errors + dohod_errors + emitents_result.errors,
         "elapsed_seconds": elapsed,
         "filtered_total": len(bonds) - len(eligible_bonds),
         "excluded_by_active_exclusion": skipped_by_active_exclusion,
@@ -162,9 +185,10 @@ def main() -> None:
         "  - Amortization_start_date < "
         f"{config.exclusion_window_days} дней (включая начавшуюся): {excluded_by_rule[AMORTIZATION_RULE_NAME]}"
     )
-    print(f"Ошибок: {errors + amortization_errors + emitents_result.errors}")
+    print(f"Ошибок: {errors + amortization_errors + dohod_errors + emitents_result.errors}")
     print(f"  - ошибки загрузки списка бумаг: {errors}")
     print(f"  - ошибки запроса амортизации: {amortization_errors}")
+    print(f"  - ошибки обогащения ДОХОД: {dohod_errors}")
     print(f"  - ошибки этапа эмитентов: {emitents_result.errors}")
     print(
         "Инкрементальные изменения: "
@@ -186,7 +210,7 @@ def main() -> None:
             "elapsed_seconds": elapsed,
             "bonds_processed": len(bonds),
             "bonds_filtered": filtered_total,
-            "errors_count": errors + amortization_errors + emitents_result.errors,
+            "errors_count": errors + amortization_errors + dohod_errors + emitents_result.errors,
             "backend": config.storage_backend,
             "notes": {
                 "eligible_bonds": len(eligible_bonds),
@@ -332,6 +356,15 @@ def _print_emitents_progress(data: dict[str, Any], progress: PipelineProgress) -
         total = int(data.get("total", 0))
         progress.report_fraction(processed, total, "обработано market-description карточек")
 
+
+
+def _print_dohod_progress(data: dict[str, Any], progress: PipelineProgress) -> None:
+    message = data.get("message")
+    if message:
+        progress.tick(str(message))
+    processed = int(data.get("processed", 0))
+    total = int(data.get("total", 0))
+    progress.report_fraction(processed, total, "обработано карточек ДОХОД")
 
 def _print_amortization_progress(data: dict[str, Any], progress: PipelineProgress) -> None:
     processed = int(data.get("processed", 0))

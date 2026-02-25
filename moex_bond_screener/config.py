@@ -27,6 +27,9 @@ class AppConfig:
     exclusions_state_dir: str = "state"
     exclusion_window_days: int = 365
     amortization_workers: int = 8
+    dohod_workers: int = 12
+    dohod_request_delay_seconds: float = 0.03
+    dohod_index_values: dict[str, float] | None = None
     storage_backend: str = "sqlite"
     sqlite_db_path: str = "screener_state.db"
 

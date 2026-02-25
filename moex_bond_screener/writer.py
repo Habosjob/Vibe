@@ -66,6 +66,7 @@ SEPARATOR_FIELD = "__GROUP_SEPARATOR__"
 SEPARATOR_COLUMN_WIDTH = 18
 NUMERIC_STRING_RE = re.compile(r"^[+-]?\d[\d\s\u00A0]*(?:[.,]\d+)?$")
 UNICODE_SPACES_RE = re.compile(r"[\s\u00A0\u202F\u2007]+")
+APPROX_FILL = PatternFill(fill_type="solid", fgColor="FFF59D")
 
 
 @lru_cache(maxsize=1)
@@ -290,12 +291,13 @@ def _prepare_export_data(bonds: list[dict[str, Any]]) -> tuple[list[str], list[d
     prepared_rows: list[dict[str, Any]] = []
     for bond in bonds:
         row = dict(bond)
+        row.setdefault("_COUPONPERCENT_APPROX", False)
         if not row.get("CURRENCYID") and row.get("FACEUNIT"):
             row["CURRENCYID"] = row["FACEUNIT"]
         row.pop("FACEUNIT", None)
         prepared_rows.append(row)
 
-    fields = [field for field in fields if field != "FACEUNIT"]
+    fields = [field for field in fields if field != "FACEUNIT" and not str(field).startswith("_")]
     if "CURRENCYID" not in fields and any(row.get("CURRENCYID") for row in prepared_rows):
         fields.append("CURRENCYID")
 
@@ -366,6 +368,7 @@ def save_bonds_excel(path: str, bonds: list[dict[str, Any]], summary: dict[str, 
         sheet.append(row_values)
 
     _apply_excel_formatting(sheet)
+    _highlight_approximate_coupon(sheet, prepared_rows, excel_columns)
     _write_summary_sheet(workbook, prepared_rows, summary)
 
     workbook.save(target)
@@ -482,6 +485,24 @@ def _write_grouped_headers(sheet: Any, fields: list[str]) -> list[str]:
 
     sheet.sheet_properties.outlinePr.summaryRight = True
     return [field for _, field in columns]
+
+
+
+def _highlight_approximate_coupon(sheet: Any, prepared_rows: list[dict[str, Any]], excel_columns: list[str]) -> None:
+    try:
+        secid_col = excel_columns.index("SECID") + 1
+        coupon_col = excel_columns.index("COUPONPERCENT") + 1
+    except ValueError:
+        return
+
+    approx_secids = {str(row.get("SECID") or "") for row in prepared_rows if bool(row.get("_COUPONPERCENT_APPROX"))}
+    if not approx_secids:
+        return
+
+    for row_idx in range(3, sheet.max_row + 1):
+        secid = str(sheet.cell(row=row_idx, column=secid_col).value or "")
+        if secid in approx_secids:
+            sheet.cell(row=row_idx, column=coupon_col).fill = APPROX_FILL
 
 
 def save_bonds_csv(path: str, bonds: list[dict[str, Any]]) -> None:
