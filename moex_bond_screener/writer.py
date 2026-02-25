@@ -153,7 +153,7 @@ def _coerce_numeric_string(value: str) -> int | float | None:
     if not normalized or not NUMERIC_STRING_RE.match(normalized):
         return None
 
-    compact = normalized.replace(" ", "").replace("\u00A0", "")
+    compact = re.sub(r"\s+", "", normalized)
     if "," in compact and "." not in compact:
         compact = compact.replace(",", ".")
 

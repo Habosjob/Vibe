@@ -231,6 +231,32 @@ def test_save_bonds_excel_converts_large_numeric_strings_with_any_thousands_grou
     assert sheet.cell(row=3, column=coupon_column).number_format == "# ##0.00"
 
 
+
+
+def test_save_bonds_excel_converts_numeric_strings_with_narrow_nbsp(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [
+        {
+            "SHORTNAME": "Тест узкого неразрывного пробела",
+            "ISSUESIZE": "1 000 000 000",
+            "ISSUESIZEPLACED": "750 000 000",
+        }
+    ]
+
+    save_bonds_file(str(target), bonds)
+
+    workbook = load_workbook(target)
+    sheet = workbook["MOEX_BONDS"]
+    headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
+
+    issuesize_column = headers.index("ISSUESIZE") + 1
+    issuesizeplaced_column = headers.index("ISSUESIZEPLACED") + 1
+
+    assert sheet.cell(row=3, column=issuesize_column).value == 1_000_000_000
+    assert sheet.cell(row=3, column=issuesizeplaced_column).value == 750_000_000
+    assert sheet.cell(row=3, column=issuesize_column).number_format == "# ##0"
+    assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "# ##0"
+
 def test_save_bonds_file_with_unsupported_extension(tmp_path: Path, bonds_sample: list[dict[str, object]]) -> None:
     target = tmp_path / "output" / "bonds.txt"
 
