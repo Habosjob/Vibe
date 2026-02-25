@@ -35,3 +35,11 @@ def test_cleanup_by_size(tmp_path):
     store.cleanup(ttl_hours=100, max_size_mb=0)
 
     assert not f1.exists()
+
+
+def test_dump_html_writes_file(tmp_path):
+    store = RawStore(str(tmp_path))
+
+    store.dump_html("sample.html", "<html>ok</html>")
+
+    assert (tmp_path / "sample.html").read_text(encoding="utf-8") == "<html>ok</html>"

@@ -11,6 +11,7 @@ from moex_bond_screener.dohod_enrichment import (
     _is_payload_empty,
     _should_enrich_coupon,
     _should_enrich_offer,
+    _to_iso_date,
 )
 
 
@@ -102,6 +103,52 @@ def test_parse_bond_payload_parses_fuzzy_labels() -> None:
     assert payload.index_spread == 0.75
     assert payload.event_name == "оферта"
     assert payload.ytm_date == "2029-09-05"
+
+
+
+def test_parse_bond_payload_parses_script_values_when_labels_absent() -> None:
+    html = """
+    <script>
+      window.__BOND__ = {"ask":"101.77","ytmDate":"2031-12-01","event":"Оферта"};
+    </script>
+    <div>Формула купона: RUONIA + 0,55</div>
+    """
+
+    payload = DohodEnricher.parse_bond_payload(html)
+
+    assert payload.ask_price == 101.77
+    assert payload.index_name == "RUONIA"
+    assert payload.index_spread == 0.55
+    assert payload.event_name == "оферта"
+    assert payload.ytm_date == "2031-12-01"
+
+
+def test_fetch_and_parse_saves_empty_payload_html_even_when_raw_dump_disabled(tmp_path) -> None:
+    config = AppConfig(retries=1, raw_dump_enabled=False)
+    from moex_bond_screener.raw_store import RawStore
+
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"), raw_store=RawStore(str(tmp_path)))
+
+    html = "<html><body><h1>stub</h1></body></html>"
+
+    def fake_get_with_rate_limit(url: str, timeout: int, delay_seconds: float):
+        _ = (url, timeout, delay_seconds)
+        return _DummyResponse(html)
+
+    enricher._get_with_rate_limit = fake_get_with_rate_limit  # type: ignore[method-assign]
+
+    payload, errors = enricher._fetch_and_parse("RU000A10A7D2")
+
+    assert errors == 0
+    assert payload.ask_price is None
+    saved = tmp_path / "dohod_empty_RU000A10A7D2.html"
+    assert saved.exists()
+    assert saved.read_text(encoding="utf-8") == html
+
+
+def test_to_iso_date_accepts_ddmmyyyy_and_iso() -> None:
+    assert _to_iso_date("11.03.2030") == "2030-03-11"
+    assert _to_iso_date("2030-03-11") == "2030-03-11"
 
 def test_enrich_bonds_fills_realprice_coupon_and_offerdate() -> None:
     config = AppConfig(retries=1, dohod_index_values={"RUONIA": 13.5, "CBR_RATE": 16.0, "Z_CURVE_RUS": 11.0, "Z_CURVE_RUS_7Y": 12.3})
@@ -313,6 +360,7 @@ def test_fetch_with_fallback_uses_secid_when_isin_payload_empty() -> None:
     assert errors == 0
     assert payload.ask_price == 99.8
     assert calls == ["RU000A0JTYK4", "BOND500"]
+
 
 
 
