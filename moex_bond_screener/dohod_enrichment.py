@@ -28,6 +28,10 @@ NUMBER_RE = r"[+-]?\d+(?:[.,]\d+)?"
 INDEX_RE = re.compile(r"(RUONIA|CBR_RATE|Z_CURVE_RUS)\s*([+-]\s*\d+(?:[.,]\d+)?)?", re.IGNORECASE)
 TENOR_RE = re.compile(r"сроком\s+погашения\s+(\d+)\s+лет", re.IGNORECASE)
 
+DL_PAIR_RE = re.compile(
+    r"<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 @dataclass(slots=True)
 class DohodBondPayload:
@@ -167,10 +171,6 @@ class DohodEnricher:
 
         return errors
 
-    def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None) -> tuple[DohodBondPayload, int]:
-        """Совместимость со старыми сборками: запрос только по primary (ISIN-only)."""
-        return self._fetch_and_parse(primary_identifier)
-
     def _fetch_and_parse(self, secid: str) -> tuple[DohodBondPayload, int]:
         for attempt in range(1, self.config.retries + 1):
             try:
@@ -212,7 +212,7 @@ class DohodEnricher:
 
     @staticmethod
     def _resolve_secondary_identifier(bond: dict[str, Any], primary_identifier: str) -> str:
-        """Совместимость со старыми сборками: fallback отключен, всегда пусто."""
+        """Сервис ДОХОД работает только с ISIN: fallback по другим идентификаторам отключен."""
         _ = bond
         _ = primary_identifier
         return ""
@@ -392,6 +392,14 @@ def _extract_label_map(html: str) -> dict[str, str]:
         if not match:
             continue
         result[label] = _strip_html(match.group(1))
+
+    if len(result) < len(labels):
+        # На части карточек используется верстка через список определений (dt/dd) вместо таблицы.
+        for raw_label, raw_value in DL_PAIR_RE.findall(html):
+            target_label = _match_target_label(_strip_html(raw_label))
+            if not target_label or target_label in result:
+                continue
+            result[target_label] = _strip_html(raw_value)
 
     if len(result) < len(labels):
         loose = _extract_label_map_loose(html)
