@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import requests
@@ -17,7 +17,7 @@ from .raw_store import RawStore
 ProgressCallback = Callable[[dict[str, Any]], None]
 CheckpointSaver = Callable[[dict[str, Any]], None]
 
-AMORTIZATION_CHECKPOINT_VERSION = 2
+AMORTIZATION_CHECKPOINT_VERSION = 3
 
 
 class MoexClient:
@@ -206,7 +206,14 @@ class MoexClient:
                     progress_processed += len(secid_to_indices.get(secid, []))
 
                     if checkpoint_saver:
-                        checkpoint_saver({"version": AMORTIZATION_CHECKPOINT_VERSION, "processed": processed, "completed": False})
+                        checkpoint_saver(
+                            {
+                                "version": AMORTIZATION_CHECKPOINT_VERSION,
+                                "processed": processed,
+                                "completed": False,
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
 
                     if progress_callback:
                         progress_callback(
@@ -220,7 +227,14 @@ class MoexClient:
                         )
 
         if checkpoint_saver:
-            checkpoint_saver({"version": AMORTIZATION_CHECKPOINT_VERSION, "processed": processed, "completed": True})
+            checkpoint_saver(
+                {
+                    "version": AMORTIZATION_CHECKPOINT_VERSION,
+                    "processed": processed,
+                    "completed": True,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
         return errors
 
