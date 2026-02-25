@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ UNWANTED_FIELDS = {
     "MINSTEP",
     "LOTVALUE",
     "FACEVALUEONSETTLEDATE",
+    "SECTORID",
 }
 GROUP_ORDER = [
     "Служебная информация",
@@ -42,10 +44,37 @@ GROUP_ORDER = [
 ]
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
-GROUP_FILL = PatternFill(fill_type="solid", fgColor="7EA6D8")
 GROUP_FONT = Font(color="000000", bold=True)
 ROW_FILL = PatternFill(fill_type="solid", fgColor="F2F7FF")
-SEPARATOR_FILL = PatternFill(fill_type="solid", fgColor="D9E1F2")
+GROUP_COLORS = {
+    "Служебная информация": "D9E1F2",
+    "Торги и доходность": "E2F0D9",
+    "Купоны и номинал": "FCE4D6",
+    "Даты": "FFF2CC",
+    "Прочее": "E4DFEC",
+}
+
+INTEGER_TOKENS = (
+    "VOLUME",
+    "ISSUE",
+    "LOTSIZE",
+    "COUNT",
+    "NUM",
+    "QTY",
+    "QUANTITY",
+    "VALUE",
+)
+
+DECIMAL_TOKENS = (
+    "PRICE",
+    "YIELD",
+    "COUPON",
+    "ACCRUED",
+    "ACCINT",
+    "DURATION",
+    "SPREAD",
+    "RATE",
+)
 
 
 def _resolve_fields(bonds: list[dict[str, Any]]) -> list[str]:
@@ -63,7 +92,9 @@ def _resolve_fields(bonds: list[dict[str, Any]]) -> list[str]:
 
 def _group_name(field: str) -> str:
     upper = field.upper()
-    if upper in {"SECID", "SHORTNAME", "ISIN", "CURRENCYID", "FACEUNIT", "BONDNAME", "EMITTER"}:
+    if upper == "CURRENCYID":
+        return "Купоны и номинал"
+    if upper in {"SHORTNAME", "ISIN", "FACEUNIT", "BONDNAME", "EMITTER"}:
         return "Служебная информация"
     if any(token in upper for token in ["PRICE", "YIELD", "WAPRICE", "DURATION", "SPREAD"]):
         return "Торги и доходность"
@@ -89,10 +120,34 @@ def _format_value(field: str, value: Any) -> Any:
     if isinstance(value, (datetime, date)):
         return value.strftime("%d.%m.%Y")
 
-    if isinstance(value, str) and "DATE" in field.upper() and _is_iso_date(value):
-        return datetime.strptime(value, "%Y-%m-%d").strftime("%d.%m.%Y")
+    if isinstance(value, str):
+        if value == "0000-00-00":
+            return ""
+        if "DATE" in field.upper() and _is_iso_date(value):
+            return datetime.strptime(value, "%Y-%m-%d").strftime("%d.%m.%Y")
 
     return value
+
+
+def _is_numeric_like(value: Any) -> bool:
+    return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+
+
+def _excel_number_format(field: str, values: list[Any]) -> str | None:
+    numeric_values = [value for value in values if _is_numeric_like(value)]
+    if not numeric_values:
+        return None
+
+    upper = field.upper()
+    has_fraction = any(abs(float(value) - int(float(value))) > 1e-9 for value in numeric_values)
+
+    if any(token in upper for token in DECIMAL_TOKENS):
+        return "# ##0,00"
+    if any(token in upper for token in INTEGER_TOKENS) and not has_fraction:
+        return "# ##0"
+    if not has_fraction:
+        return "# ##0"
+    return None
 
 
 def _prepare_export_data(bonds: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, Any]]]:
@@ -124,6 +179,10 @@ def _prepare_export_data(bonds: list[dict[str, Any]]) -> tuple[list[str], list[d
     for field in deduplicated_fields:
         grouped[_group_name(field)].append(field)
 
+    if "SECID" in grouped["Служебная информация"]:
+        grouped["Служебная информация"].remove("SECID")
+        grouped["Прочее"].append("SECID")
+
     ordered_fields: list[str] = []
     for group_name in GROUP_ORDER:
         ordered_fields.extend(grouped[group_name])
@@ -131,8 +190,8 @@ def _prepare_export_data(bonds: list[dict[str, Any]]) -> tuple[list[str], list[d
     return ordered_fields, prepared_rows
 
 
-def _build_columns_with_separators(fields: list[str]) -> list[tuple[str, str]]:
-    columns_with_separators: list[tuple[str, str]] = []
+def _build_columns(fields: list[str]) -> list[tuple[str, str]]:
+    columns: list[tuple[str, str]] = []
     grouped: dict[str, list[str]] = {name: [] for name in GROUP_ORDER}
     for field in fields:
         grouped[_group_name(field)].append(field)
@@ -141,12 +200,10 @@ def _build_columns_with_separators(fields: list[str]) -> list[tuple[str, str]]:
         group_fields = grouped[group_name]
         if not group_fields:
             continue
-        if columns_with_separators:
-            columns_with_separators.append(("Разделитель", "|"))
         for field in group_fields:
-            columns_with_separators.append((group_name, field))
+            columns.append((group_name, field))
 
-    return columns_with_separators
+    return columns
 
 
 def save_bonds_excel(path: str, bonds: list[dict[str, Any]]) -> None:
@@ -163,10 +220,7 @@ def save_bonds_excel(path: str, bonds: list[dict[str, Any]]) -> None:
     for bond in prepared_rows:
         row_values: list[Any] = []
         for field in excel_columns:
-            if field == "|":
-                row_values.append("")
-            else:
-                row_values.append(_format_value(field, bond.get(field, "")))
+            row_values.append(_format_value(field, bond.get(field, "")))
         sheet.append(row_values)
 
     _apply_excel_formatting(sheet)
@@ -181,14 +235,11 @@ def _apply_excel_formatting(sheet: Any) -> None:
 
     for cell in sheet[1]:
         if cell.value:
-            cell.fill = GROUP_FILL
+            cell.fill = PatternFill(fill_type="solid", fgColor=GROUP_COLORS.get(cell.value, "7EA6D8"))
             cell.font = GROUP_FONT
-            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     for cell in sheet[header_row]:
-        if cell.value == "|":
-            cell.fill = SEPARATOR_FILL
-            continue
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -199,17 +250,23 @@ def _apply_excel_formatting(sheet: Any) -> None:
                 sheet.cell(row=row_idx, column=col_idx).fill = ROW_FILL
 
     for col_idx in range(1, max_col + 1):
-        if sheet.cell(row=2, column=col_idx).value == "|":
-            for row_idx in range(1, max_row + 1):
-                sheet.cell(row=row_idx, column=col_idx).fill = SEPARATOR_FILL
-            sheet.column_dimensions[get_column_letter(col_idx)].width = 3
-
-    for col_idx in range(1, max_col + 1):
         column_letter = get_column_letter(col_idx)
         values = [sheet.cell(row=row_idx, column=col_idx).value for row_idx in range(1, max_row + 1)]
         max_len = max((len(str(value)) for value in values if value is not None), default=0)
-        sheet.column_dimensions[column_letter].width = min(max(max_len + 2, 10), 50)
+        sheet.column_dimensions[column_letter].width = min(max(max_len + 2, 10), 28)
 
+        field_name = sheet.cell(row=2, column=col_idx).value
+        if not field_name:
+            continue
+        data_values = [sheet.cell(row=row_idx, column=col_idx).value for row_idx in range(3, max_row + 1)]
+        number_format = _excel_number_format(str(field_name), data_values)
+        if number_format:
+            for row_idx in range(3, max_row + 1):
+                value = sheet.cell(row=row_idx, column=col_idx).value
+                if _is_numeric_like(value):
+                    sheet.cell(row=row_idx, column=col_idx).number_format = number_format
+
+    sheet.row_dimensions[1].height = 42
     sheet.freeze_panes = "A3"
     sheet.auto_filter.ref = f"A2:{get_column_letter(max_col)}{max_row}"
 
@@ -220,33 +277,15 @@ def _write_grouped_headers(sheet: Any, fields: list[str]) -> list[str]:
         sheet.append([])
         return []
 
-    columns_with_separators = _build_columns_with_separators(fields)
-    sheet.append([group for group, _ in columns_with_separators])
-    sheet.append([field for _, field in columns_with_separators])
+    columns = _build_columns(fields)
+    sheet.append([group for group, _ in columns])
+    sheet.append([field for _, field in columns])
 
-    start_col = 1
-    current_group = None
-    for index, (group_name, field_name) in enumerate(columns_with_separators, start=1):
-        if field_name == "|":
-            sheet.column_dimensions[get_column_letter(index)].outlineLevel = 0
-            continue
-        if group_name != current_group:
-            if current_group is not None:
-                sheet.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=index - 1)
-            current_group = group_name
-            start_col = index
+    for index, (_, _) in enumerate(columns, start=1):
         sheet.column_dimensions[get_column_letter(index)].outlineLevel = 1
 
-    if current_group is not None:
-        sheet.merge_cells(
-            start_row=1,
-            start_column=start_col,
-            end_row=1,
-            end_column=len(columns_with_separators),
-        )
-
     sheet.sheet_properties.outlinePr.summaryRight = True
-    return [field for _, field in columns_with_separators]
+    return [field for _, field in columns]
 
 
 def save_bonds_csv(path: str, bonds: list[dict[str, Any]]) -> None:
