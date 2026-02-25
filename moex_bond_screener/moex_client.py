@@ -26,6 +26,7 @@ class MoexClient:
         self.raw_store = raw_store
         self._request_lock = threading.Lock()
         self._next_request_ts = 0.0
+        self._thread_local = threading.local()
 
     def fetch_all_bonds(
         self,
@@ -189,7 +190,12 @@ class MoexClient:
                 }
                 for future in as_completed(futures):
                     secid = futures[future]
-                    date_value, request_errors = future.result()
+                    try:
+                        date_value, request_errors = future.result()
+                    except Exception as error:  # noqa: BLE001
+                        self.logger.exception("Необработанная ошибка в задаче амортизации secid=%s: %s", secid, error)
+                        date_value, request_errors = "", 1
+
                     errors += request_errors
                     processed[secid] = date_value
                     for idx in secid_to_indices.get(secid, []):
@@ -279,6 +285,16 @@ class MoexClient:
                 if attempt == self.config.retries:
                     return "", 1
                 time.sleep(self.config.amortization_request_delay_seconds * attempt)
+            except Exception as error:  # noqa: BLE001
+                self.logger.warning(
+                    "Ошибка обработки ответа амортизации secid=%s попытка=%s: %s",
+                    secid,
+                    attempt,
+                    error,
+                )
+                if attempt == self.config.retries:
+                    return "", 1
+                time.sleep(self.config.amortization_request_delay_seconds * attempt)
 
         return "", 1
 
@@ -350,6 +366,32 @@ class MoexClient:
                 return None
             return only_date_str
 
+            value_prc: float | None = None
+            if value_prc_idx is not None and len(row) > value_prc_idx:
+                raw_value_prc = row[value_prc_idx]
+                try:
+                    value_prc = float(raw_value_prc)
+                except (TypeError, ValueError):
+                    value_prc = None
+
+            parsed_items.append((parsed_date, value_prc))
+            if value_prc is None or value_prc < 99.999:
+                partial_dates.append(parsed_date)
+
+        if partial_dates:
+            return min(partial_dates).strftime("%Y-%m-%d")
+
+        if not parsed_items:
+            return None
+
+        if len(parsed_items) == 1:
+            only_date, only_value_prc = parsed_items[0]
+            only_date_str = only_date.strftime("%Y-%m-%d")
+            is_full_redemption = only_value_prc is not None and only_value_prc >= 99.999
+            if is_full_redemption or (matdate and only_date_str == matdate):
+                return None
+            return only_date_str
+
         if value_prc_idx is not None:
             # Если VALUEPRC есть и частичных выплат нет, это погашения, а не амортизация.
             return None
@@ -374,4 +416,15 @@ class MoexClient:
         if sleep_for > 0:
             time.sleep(sleep_for)
 
-        return self.session.get(url, params=params, timeout=timeout)
+        session = self._get_thread_session()
+        return session.get(url, params=params, timeout=timeout)
+
+    def _get_thread_session(self) -> requests.Session:
+        if threading.current_thread() is threading.main_thread():
+            return self.session
+
+        thread_session = getattr(self._thread_local, "session", None)
+        if thread_session is None:
+            thread_session = requests.Session()
+            self._thread_local.session = thread_session
+        return thread_session

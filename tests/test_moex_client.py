@@ -187,6 +187,7 @@ def test_enrich_amortization_start_dates_fills_earliest_date(monkeypatch):
         )
 
     monkeypatch.setattr(client.session, "get", fake_get)
+    monkeypatch.setattr(client, "_get_thread_session", lambda: client.session)
     bonds = [{"SECID": "A", "MATDATE": "2028-01-01"}]
 
     errors = client.enrich_amortization_start_dates(bonds)
@@ -238,6 +239,7 @@ def test_enrich_amortization_start_dates_deduplicates_secid_requests(monkeypatch
         )
 
     monkeypatch.setattr(client.session, "get", fake_get)
+    monkeypatch.setattr(client, "_get_thread_session", lambda: client.session)
     bonds = [
         {"SECID": "A", "MATDATE": "2030-01-01"},
         {"SECID": "A", "MATDATE": "2030-01-01"},
@@ -287,6 +289,38 @@ def test_client_uses_separate_delays_for_pages_and_amortizations(monkeypatch):
     client._fetch_amortization_start_date("A")
 
     assert captured == [0.15, 0.02]
+
+
+
+def test_enrich_amortization_continues_on_worker_exception(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0, amortization_request_delay_seconds=0, amortization_workers=2)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    def fake_fetch(secid: str, matdate: str = ""):
+        if secid == "B":
+            raise ValueError("bad payload")
+        return "2026-01-01", 0
+
+    monkeypatch.setattr(client, "_fetch_amortization_start_date", fake_fetch)
+
+    bonds = [{"SECID": "A"}, {"SECID": "B"}]
+    errors = client.enrich_amortization_start_dates(bonds)
+
+    assert errors == 1
+    assert bonds[0]["Amortization_start_date"] == "2026-01-01"
+    assert bonds[1]["Amortization_start_date"] == ""
+
+
+def test_get_thread_session_returns_dedicated_session_for_worker_thread():
+    config = AppConfig(retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker_session = pool.submit(client._get_thread_session).result()
+
+    assert worker_session is not client.session
 
 def test_fetch_all_bonds_resumes_from_checkpoint(monkeypatch):
     config = AppConfig(page_size=2, retries=1, request_delay_seconds=0)
