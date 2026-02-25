@@ -86,8 +86,10 @@ class DohodEnricher:
         pending: list[str] = []
         for identifier in identifier_to_bonds:
             if fresh_cache and not index_changed and identifier in processed:
-                self._apply_cached(identifier_to_bonds[identifier], processed[identifier], index_values)
-                continue
+                cached_payload = processed.get(identifier)
+                if self._is_cached_payload_usable(cached_payload):
+                    self._apply_cached(identifier_to_bonds[identifier], processed[identifier], index_values)
+                    continue
             pending.append(identifier)
 
         self.last_stats.bonds_total = len(identifier_to_bonds)
@@ -241,6 +243,18 @@ class DohodEnricher:
         if checkpoint.get("version") != DOHOD_CHECKPOINT_VERSION:
             return {}
         return checkpoint
+
+    @staticmethod
+    def _is_cached_payload_usable(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        ask_price = payload.get("ask_price")
+        index_name = str(payload.get("index_name") or "").strip()
+        ytm_date = str(payload.get("ytm_date") or "").strip()
+        event_name = str(payload.get("event_name") or "").strip()
+        if isinstance(ask_price, (int, float)):
+            return True
+        return bool(index_name or ytm_date or event_name)
 
     def _apply_cached(self, bonds: list[dict[str, Any]], payload: dict[str, Any], index_values: dict[str, float]) -> None:
         ask_price = payload.get("ask_price")

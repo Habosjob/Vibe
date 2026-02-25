@@ -131,6 +131,47 @@ def test_enrich_bonds_uses_fresh_checkpoint_without_requests() -> None:
     assert bonds[0]["RealPrice"] == 100.5
 
 
+def test_enrich_bonds_refetches_when_cached_payload_is_empty() -> None:
+    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0})
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    called = {"count": 0}
+
+    def fake_fetch(identifier: str):
+        called["count"] += 1
+        assert identifier == "RU1"
+        return DohodBondPayload(101.2, "RUONIA", 0.3, None, "", "2028-05-01"), 0
+
+    enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
+
+    checkpoint = {
+        "version": DOHOD_CHECKPOINT_VERSION,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "completed": True,
+        "index_values": {"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0},
+        "bonds": {
+            "RU1": {
+                "ask_price": None,
+                "index_name": "",
+                "index_spread": 0.0,
+                "index_tenor_years": None,
+                "event_name": "",
+                "ytm_date": "",
+            }
+        },
+    }
+    bonds = [{"SECID": "RU1", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2030-01-01"}]
+
+    errors = enricher.enrich_bonds(bonds, checkpoint_data=checkpoint)
+
+    assert errors == 0
+    assert called["count"] == 1
+    assert enricher.last_stats.cache_hits == 0
+    assert enricher.last_stats.requested == 1
+    assert bonds[0]["COUPONPERCENT"] == 15.3
+    assert bonds[0]["OFFERDATE"] == "2028-05-01"
+
+
 def test_enrich_bonds_falls_back_to_secid_when_isin_missing() -> None:
     config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
