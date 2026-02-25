@@ -100,4 +100,5 @@ def test_exclusion_filter_keeps_permanent_exclusion_on_rerun() -> None:
 
     assert result.eligible_bonds == []
     assert result.skipped_by_active_exclusion == 1
+    assert result.skipped_by_active_rule[AMORTIZATION_RULE_NAME] == 1
     assert result.active_exclusions["A"]["exclude_until"] == PERMANENT_EXCLUDE_UNTIL

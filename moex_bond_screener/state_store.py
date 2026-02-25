@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ class ScreenerStateStore:
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         self.emitents_registry_path = self.base_path / "emitents_registry.json"
         self.secid_to_emitter_path = self.base_path / "secid_to_emitter.json"
+        self.exclusions_history_path = self.base_path / "exclusions_history.json"
 
         self.db_path = self.base_path / sqlite_db_path
         if self.storage_backend == "sqlite":
@@ -59,6 +60,45 @@ class ScreenerStateStore:
             self._save_exclusions_sqlite(exclusions)
             return
         self._save_json(self.exclusions_path, {"exclusions": exclusions})
+
+    def update_exclusions_history(
+        self,
+        active_exclusions: dict[str, dict[str, str]],
+        current_day: date | None = None,
+    ) -> dict[str, dict[str, str]]:
+        today = (current_day or date.today()).isoformat()
+        history = self.load_exclusions_history()
+
+        for secid, details in active_exclusions.items():
+            existing = history.get(secid, {})
+            first_excluded_at = str(existing.get("first_excluded_at") or today)
+            history[secid] = {
+                "first_excluded_at": first_excluded_at,
+                "last_rule": str(details.get("rule") or "manual"),
+                "last_exclude_until": str(details.get("exclude_until") or ""),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        self._save_json(self.exclusions_history_path, {"history": history})
+        return history
+
+    def load_exclusions_history(self) -> dict[str, dict[str, str]]:
+        payload = self._load_json(self.exclusions_history_path)
+        history = payload.get("history", {}) if isinstance(payload, dict) else {}
+        if not isinstance(history, dict):
+            return {}
+
+        normalized: dict[str, dict[str, str]] = {}
+        for secid, details in history.items():
+            if not isinstance(details, dict):
+                continue
+            normalized[str(secid)] = {
+                "first_excluded_at": str(details.get("first_excluded_at") or ""),
+                "last_rule": str(details.get("last_rule") or "manual"),
+                "last_exclude_until": str(details.get("last_exclude_until") or ""),
+                "updated_at": str(details.get("updated_at") or ""),
+            }
+        return normalized
 
     def update_eligible_bonds(self, bonds: list[dict[str, Any]]) -> IncrementalStats:
         if self.storage_backend == "sqlite":
@@ -239,6 +279,40 @@ class ScreenerStateStore:
                 (started_at, finished_at, elapsed_seconds, bonds_processed, bonds_filtered, errors_count, backend, notes),
             )
             conn.commit()
+
+    def load_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        if self.storage_backend != "sqlite":
+            return []
+
+        safe_limit = max(1, int(limit))
+        query = (
+            "SELECT id, started_at, finished_at, elapsed_seconds, bonds_processed, bonds_filtered, errors_count, backend, notes "
+            "FROM runs ORDER BY id DESC LIMIT ?"
+        )
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(query, (safe_limit,)).fetchall()
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            notes_raw = str(row[8] or "{}")
+            try:
+                notes = json.loads(notes_raw)
+            except json.JSONDecodeError:
+                notes = {"raw": notes_raw}
+            result.append(
+                {
+                    "id": int(row[0]),
+                    "started_at": str(row[1]),
+                    "finished_at": str(row[2]),
+                    "elapsed_seconds": float(row[3]),
+                    "bonds_processed": int(row[4]),
+                    "bonds_filtered": int(row[5]),
+                    "errors_count": int(row[6]),
+                    "backend": str(row[7]),
+                    "notes": notes,
+                }
+            )
+        return result
 
     def _load_eligible_bonds_map_json(self) -> dict[str, dict[str, Any]]:
         current = self._load_json(self.eligible_bonds_path)

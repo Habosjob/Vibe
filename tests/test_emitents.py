@@ -260,3 +260,27 @@ def test_build_emitents_reference_marks_quality_and_infers_emitters_from_market(
     assert row["missing_full_name"] == "1"
     assert row["missing_inn"] == "1"
     assert row["Флаг качества"] == "warning"
+
+
+def test_build_emitents_reference_keeps_old_emitters_when_no_new_bonds(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    store.save_emitents_registry({"111": {"full_name": "Старый Эмитент", "inn": "7701000000"}})
+    monkeypatch.setattr(client, "fetch_market_securities", lambda market: ([], 0))
+
+    result = build_emitents_reference(eligible_bonds=[], client=client, state_store=store)
+
+    assert result.processed_emitters == 1
+    assert result.rows == [
+        {
+            "Полное наименование": "Старый Эмитент",
+            "ИНН": "7701000000",
+            "Тикеры акций": "",
+            "ISIN облигаций": "",
+            "missing_full_name": "0",
+            "missing_inn": "0",
+            "Флаг качества": "ok",
+        }
+    ]

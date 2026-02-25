@@ -37,7 +37,7 @@ def build_emitents_reference(
     secid_to_emitter = state_store.load_secid_to_emitter_map()
     secid_samples = _pick_emitter_samples(eligible_bonds, secid_to_emitter)
     total_samples = len(secid_samples.known_emitters) + len(secid_samples.unknown_emitters)
-    discovered_emitters: set[str] = set()
+    discovered_emitters: set[str] = set(registry.keys())
     errors = 0
     new_emitters = 0
     registry_changed = False

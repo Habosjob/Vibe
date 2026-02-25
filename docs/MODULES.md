@@ -3,13 +3,19 @@
 ## `run.py`
 - Назначение: запуск полного сценария без аргументов.
 - Вход: `config.yml` (опционально), сеть, состояние в `state/`.
-- Выход: `output/moex_bonds.xlsx` (лист `MOEX_BONDS` + лист `SUMMARY`), `output/emitents.xlsx` (лист `EMITENTS`), `logs/latest.log`, `state/exclusions.json`, `state/eligible_bonds.json`, `state/emitents_registry.json`, `state/secid_to_emitter.json`, чекпоинты `state/checkpoints/*.json`, опционально `raw/*.json`.
+- Выход: `output/moex_bonds.xlsx` (лист `MOEX_BONDS` + лист `SUMMARY`), `output/emitents.xlsx` (лист `EMITENTS`), `logs/latest.log`, `state/exclusions.json`, `state/exclusions_history.json`, `state/eligible_bonds.json`, `state/emitents_registry.json`, `state/secid_to_emitter.json`, чекпоинты `state/checkpoints/*.json`, опционально `raw/*.json`.
 - Как менять конфиг: правьте `config.yml` (см. `docs/CONFIG.md`).
 
 ## `scripts/run_emitents.py`
 - Назначение: отдельный запуск только этапа справочника эмитентов (без полного пересчета скринера).
 - Вход: состояние `eligible_bonds` из выбранного бэкенда (`json` или `sqlite`), `config.yml`, сеть.
 - Выход: `output/emitents.xlsx` + обновление кэша эмитентов.
+
+
+## `scripts/show_runs.py`
+- Назначение: быстрый просмотр истории запусков из SQLite-таблицы `runs` в табличном виде или JSON.
+- Вход: `config.yml`, состояние `storage_backend=sqlite`.
+- Выход: печать отчета в консоль (`table`/`json`).
 
 ## `moex_bond_screener/config.py`
 - Назначение: загрузка конфигурации и дефолтов.

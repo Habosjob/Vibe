@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -42,4 +42,4 @@ def load_config(path: Path | None = None) -> AppConfig:
     with config_path.open("r", encoding="utf-8") as file:
         data: dict[str, Any] = yaml.safe_load(file) or {}
 
-    return AppConfig(**{**AppConfig().__dict__, **data})
+    return AppConfig(**{**asdict(AppConfig()), **data})

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any
 
 from moex_bond_screener.config import load_config
@@ -47,8 +48,23 @@ def main() -> None:
     if amortization_checkpoint_invalidated:
         state_store.clear_checkpoint("amortization")
 
+    rebuild_lock_path = Path(config.exclusions_state_dir) / "checkpoints" / "amortization_rebuild.lock"
+
     progress.start_stage(4, "Загрузка облигаций с MOEX")
     client = MoexClient(config=config, logger=logger, raw_store=raw_store)
+
+    if rebuild_lock_path.exists():
+        progress.tick("Найден lock-файл полного пересбора амортизаций: выполняем только этап амортизации")
+        _run_amortization_rebuild_mode(
+            state_store=state_store,
+            client=client,
+            progress=progress,
+            lock_path=rebuild_lock_path,
+            started=started,
+            started_dt=started_dt,
+            backend=config.storage_backend,
+        )
+        return
 
     if bonds_checkpoint and not bonds_checkpoint.get("completed", False):
         progress.tick("Найден чекпоинт списка облигаций — продолжаем с последнего успешного шага")
@@ -81,6 +97,7 @@ def main() -> None:
         checkpoint_saver=lambda payload: state_store.save_checkpoint("amortization", payload),
         progress_callback=lambda data: _print_amortization_progress(data, progress),
     )
+    amortization_checkpoint_latest = state_store.load_checkpoint("amortization")
 
     post_amortization_exclusion_result = exclusion_filter.apply(
         bonds=exclusion_result.eligible_bonds,
@@ -99,6 +116,7 @@ def main() -> None:
 
     progress.start_stage(7, "Сохранение инкрементального состояния")
     state_store.save_exclusions(active_exclusions)
+    state_store.update_exclusions_history(active_exclusions)
     incremental_stats = state_store.update_eligible_bonds(eligible_bonds)
 
     progress.start_stage(8, "Сохранение итогового файла")
@@ -119,11 +137,14 @@ def main() -> None:
         "elapsed_seconds": elapsed,
         "filtered_total": len(bonds) - len(eligible_bonds),
         "excluded_by_active_exclusion": skipped_by_active_exclusion,
+        "excluded_amortization_permanent_reused": exclusion_result.skipped_by_active_rule.get(AMORTIZATION_RULE_NAME, 0),
         "excluded_buyback_lt_1y": excluded_by_rule["buyback_lt_1y"],
         "excluded_offer_lt_1y": excluded_by_rule["offer_lt_1y"],
         "excluded_calloption_lt_1y": excluded_by_rule["calloption_lt_1y"],
         "excluded_mat_lt_1y": excluded_by_rule["mat_lt_1y"],
         "excluded_amortization_started_or_lt_1y_permanent": excluded_by_rule[AMORTIZATION_RULE_NAME],
+        "amortization_cache_hits": int(amortization_checkpoint_latest.get("cache_stats", {}).get("hits", 0)),
+        "amortization_cache_misses": int(amortization_checkpoint_latest.get("cache_stats", {}).get("misses", 0)),
     }
     summary.update(emitents_result.stage_durations)
     save_bonds_file(config.output_file, eligible_bonds, summary=summary)
@@ -170,6 +191,66 @@ def main() -> None:
             "notes": {
                 "eligible_bonds": len(eligible_bonds),
                 "new_emitters": emitents_result.new_emitters,
+                "excluded_amortization_permanent_reused": exclusion_result.skipped_by_active_rule.get(
+                    AMORTIZATION_RULE_NAME, 0
+                ),
+                "amortization_cache_hits": int(amortization_checkpoint_latest.get("cache_stats", {}).get("hits", 0)),
+                "amortization_cache_misses": int(
+                    amortization_checkpoint_latest.get("cache_stats", {}).get("misses", 0)
+                ),
+            },
+        }
+    )
+
+
+def _run_amortization_rebuild_mode(
+    state_store: ScreenerStateStore,
+    client: MoexClient,
+    progress: PipelineProgress,
+    lock_path: Path,
+    started: float,
+    started_dt: datetime,
+    backend: str,
+) -> None:
+    eligible_bonds = state_store.load_eligible_bonds()
+    if not eligible_bonds:
+        print("Режим пересбора амортизаций: eligible_bonds пуст, пересбор не требуется.")
+        lock_path.unlink(missing_ok=True)
+        return
+
+    progress.start_stage(5, "Пересбор кэша амортизаций")
+    amortization_errors = client.enrich_amortization_start_dates(
+        eligible_bonds,
+        checkpoint_data={},
+        checkpoint_saver=lambda payload: state_store.save_checkpoint("amortization", payload),
+        progress_callback=lambda data: _print_amortization_progress(data, progress),
+    )
+    state_store.update_eligible_bonds(eligible_bonds)
+    checkpoint = state_store.load_checkpoint("amortization")
+    cache_stats = checkpoint.get("cache_stats", {}) if isinstance(checkpoint, dict) else {}
+    lock_path.unlink(missing_ok=True)
+
+    elapsed = time.time() - started
+    print("\nГотово.")
+    print("Выполнен режим полного пересбора только амортизаций.")
+    print(f"Обработано бумаг: {len(eligible_bonds)}")
+    print(f"Ошибок амортизации: {amortization_errors}")
+    print(f"cache_hits/cache_misses: {int(cache_stats.get('hits', 0))}/{int(cache_stats.get('misses', 0))}")
+    print(f"Время выполнения: {elapsed:.2f} сек")
+
+    state_store.save_run_metrics(
+        {
+            "started_at": started_dt.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": elapsed,
+            "bonds_processed": len(eligible_bonds),
+            "bonds_filtered": 0,
+            "errors_count": amortization_errors,
+            "backend": backend,
+            "notes": {
+                "mode": "amortization_rebuild",
+                "amortization_cache_hits": int(cache_stats.get("hits", 0)),
+                "amortization_cache_misses": int(cache_stats.get("misses", 0)),
             },
         }
     )
@@ -204,9 +285,18 @@ def _prepare_amortization_checkpoint(checkpoint: dict[str, Any]) -> tuple[dict[s
         return {}, True, False
 
     normalized = {str(secid): str(value or "") for secid, value in processed.items() if str(secid).strip()}
+    cache_stats_raw = checkpoint.get("cache_stats", {})
+    cache_stats = {"date": "", "hits": 0, "misses": 0}
+    if isinstance(cache_stats_raw, dict):
+        cache_stats = {
+            "date": str(cache_stats_raw.get("date") or ""),
+            "hits": int(cache_stats_raw.get("hits") or 0),
+            "misses": int(cache_stats_raw.get("misses") or 0),
+        }
     return {
         "version": AMORTIZATION_CHECKPOINT_VERSION,
         "processed": normalized,
+        "cache_stats": cache_stats,
         "updated_at": updated_at.isoformat(),
         "completed": bool(checkpoint.get("completed", False)),
     }, False, True

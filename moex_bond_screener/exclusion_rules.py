@@ -23,6 +23,7 @@ class ExclusionResult:
     excluded_by_rule: dict[str, int]
     restored_after_expiration: int
     skipped_by_active_exclusion: int
+    skipped_by_active_rule: dict[str, int]
 
 
 class BondExclusionFilter:
@@ -44,6 +45,7 @@ class BondExclusionFilter:
         excluded_by_rule[AMORTIZATION_RULE_NAME] = 0
         restored_after_expiration = 0
         skipped_by_active_exclusion = 0
+        skipped_by_active_rule: dict[str, int] = {}
 
         for bond in bonds:
             secid = str(bond.get("SECID") or "").strip()
@@ -54,21 +56,25 @@ class BondExclusionFilter:
             prev_exclusion = previous_exclusions.get(secid)
             prev_until_raw = str((prev_exclusion or {}).get("exclude_until", ""))
             if prev_exclusion and prev_until_raw == PERMANENT_EXCLUDE_UNTIL:
+                rule_name = str(prev_exclusion.get("rule", "manual"))
                 active_exclusions[secid] = {
-                    "rule": str(prev_exclusion.get("rule", "manual")),
+                    "rule": rule_name,
                     "exclude_until": PERMANENT_EXCLUDE_UNTIL,
                 }
                 skipped_by_active_exclusion += 1
+                skipped_by_active_rule[rule_name] = skipped_by_active_rule.get(rule_name, 0) + 1
                 continue
 
             if prev_exclusion and self._parse_date(prev_until_raw):
                 prev_until = self._parse_date(prev_until_raw)
                 if prev_until and prev_until > current_day:
+                    rule_name = str(prev_exclusion.get("rule", "manual"))
                     active_exclusions[secid] = {
-                        "rule": str(prev_exclusion.get("rule", "manual")),
+                        "rule": rule_name,
                         "exclude_until": prev_until.isoformat(),
                     }
                     skipped_by_active_exclusion += 1
+                    skipped_by_active_rule[rule_name] = skipped_by_active_rule.get(rule_name, 0) + 1
                     continue
 
             if prev_exclusion:
@@ -119,6 +125,7 @@ class BondExclusionFilter:
             excluded_by_rule=excluded_by_rule,
             restored_after_expiration=restored_after_expiration,
             skipped_by_active_exclusion=skipped_by_active_exclusion,
+            skipped_by_active_rule=skipped_by_active_rule,
         )
 
     @staticmethod
