@@ -252,3 +252,21 @@ def test_should_enrich_offer_without_event_name_if_not_maturity() -> None:
 def test_is_payload_empty_helper_for_backward_compatibility() -> None:
     assert _is_payload_empty(DohodBondPayload(None, "", 0.0, None, "", "")) is True
     assert _is_payload_empty(DohodBondPayload(99.9, "", 0.0, None, "", "")) is False
+
+
+
+def test_compat_methods_for_mixed_versions_do_not_fail() -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    def fake_fetch(identifier: str):
+        assert identifier == "RU000A0ZZTL5"
+        return DohodBondPayload(100.0, "", 0.0, None, "", ""), 0
+
+    enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
+
+    payload, errors = enricher._fetch_with_fallback("RU000A0ZZTL5", "SU26228RMFS5")
+
+    assert errors == 0
+    assert payload.ask_price == 100.0
+    assert enricher._resolve_secondary_identifier({"ISIN": "RU1", "SECID": "SU1"}, "RU1") == ""
