@@ -268,6 +268,19 @@ def test_extract_earliest_amortization_date_single_partial_valueprc_is_amortizat
     assert result == "2029-02-01"
 
 
+def test_extract_earliest_amortization_date_multiple_rows_no_name_error_regression():
+    payload = {
+        "amortizations": {
+            "columns": ["amortdate", "valueprc"],
+            "data": [["2028-04-01", 25], ["2030-05-01", 100]],
+        }
+    }
+
+    result = MoexClient._extract_earliest_amortization_date(payload, matdate="2030-05-01")
+
+    assert result == "2028-04-01"
+
+
 def test_client_uses_separate_delays_for_pages_and_amortizations(monkeypatch):
     config = AppConfig(
         retries=1,
