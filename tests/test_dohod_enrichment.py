@@ -135,6 +135,39 @@ def test_parse_bond_payload_parses_russian_index_aliases() -> None:
 
 
 
+
+
+def test_parse_bond_payload_parses_hyphenated_and_russian_alias_indexes() -> None:
+    html = """
+    <table>
+      <tr><th>Привязка к индексу</th><td>Z-CURVE-RUS + 1,10</td></tr>
+      <tr><th>Описание формулы изменяемого купона/номинала</th><td>Купон = Z-CURVE-RUS + 1,10%</td></tr>
+    </table>
+    """
+
+    payload = DohodEnricher.parse_bond_payload(html)
+
+    assert payload.index_name == "Z_CURVE_RUS"
+    assert payload.index_spread == 1.1
+
+
+def test_resolve_index_values_normalizes_hyphenated_keys() -> None:
+    config = AppConfig(
+        retries=1,
+        dohod_index_values={
+            "z-curve-rus": "14,20",
+            "key-rate": "16,00",
+            "r-uonia": "15,40",
+        },
+    )
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    index_values = enricher._resolve_index_values({})
+
+    assert index_values["Z_CURVE_RUS"] == 14.2
+    assert index_values["CBR_RATE"] == 16.0
+    assert index_values["RUONIA"] == 15.4
+
 def test_parse_bond_payload_parses_script_values_when_labels_absent() -> None:
     html = """
     <script>
@@ -375,6 +408,52 @@ def test_enrich_bonds_skips_coupon_enrichment_when_index_base_missing() -> None:
     assert bonds[0]["COUPONPERCENT"] == ""
     assert "_COUPONPERCENT_APPROX" not in bonds[0]
     assert enricher.last_stats.coupon_skipped_no_base == 1
+
+
+def test_enrich_bonds_aggregates_repeated_missing_base_warnings(caplog) -> None:
+    caplog.set_level(logging.WARNING)
+    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0})
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    checkpoint = {
+        "version": DOHOD_CHECKPOINT_VERSION,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "completed": True,
+        "index_values": {"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0},
+        "bonds": {
+            "RU1": {
+                "ask_price": 101.0,
+                "index_name": "CBR_RATE",
+                "index_spread": 1.5,
+                "index_tenor_years": None,
+                "event_name": "",
+                "ytm_date": "",
+            },
+            "RU2": {
+                "ask_price": 102.0,
+                "index_name": "CBR_RATE",
+                "index_spread": 1.5,
+                "index_tenor_years": None,
+                "event_name": "",
+                "ytm_date": "",
+            },
+        },
+    }
+    bonds = [
+        {"ISIN": "RU1", "SECID": "RU1", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2033-10-12"},
+        {"ISIN": "RU2", "SECID": "RU2", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2033-10-12"},
+    ]
+
+    errors = enricher.enrich_bonds(bonds, checkpoint_data=checkpoint)
+
+    assert errors == 0
+    assert enricher.last_stats.coupon_skipped_no_base == 2
+    missing_base_logs = [r for r in caplog.records if "Пропуск расчета COUPONPERCENT" in r.message]
+    assert len(missing_base_logs) == 1
+    summary_logs = [r for r in caplog.records if "COUPONPERCENT пропущен из-за отсутствия базовой ставки" in r.message]
+    assert len(summary_logs) == 1
+    assert "всего=2" in summary_logs[0].message
+    assert "CBR_RATE@1.5000: 2" in summary_logs[0].message
 
 
 def test_enrich_bonds_skips_record_without_isin() -> None:
