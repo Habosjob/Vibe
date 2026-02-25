@@ -4,7 +4,13 @@ import logging
 from datetime import datetime, timezone
 
 from moex_bond_screener.config import AppConfig
-from moex_bond_screener.dohod_enrichment import DOHOD_CHECKPOINT_VERSION, DohodBondPayload, DohodEnricher
+from moex_bond_screener.dohod_enrichment import (
+    DOHOD_CHECKPOINT_VERSION,
+    DohodBondPayload,
+    DohodEnricher,
+    _should_enrich_coupon,
+    _should_enrich_offer,
+)
 
 
 class _DummyResponse:
@@ -52,6 +58,40 @@ def test_enrich_bonds_fills_realprice_coupon_and_offerdate() -> None:
     assert bonds[0]["COUPONPERCENT"] == 13.0
     assert bonds[0]["_COUPONPERCENT_APPROX"] is True
     assert bonds[0]["OFFERDATE"] == "2027-08-26"
+    assert enricher.last_stats.coupon_added == 1
+    assert enricher.last_stats.offer_added == 1
+    assert enricher.last_stats.realprice_added == 1
+
+
+def test_enrich_bonds_overrides_zero_coupon_and_updates_offer_without_event() -> None:
+    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 15.2, "CBR_RATE": 16.0, "Z_CURVE_RUS": 11.0})
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    def fake_fetch(identifier: str):
+        assert identifier == "RU000A0ZZTL5"
+        return DohodBondPayload(101.1, "RUONIA", 0.4, None, "", "2027-08-26"), 0
+
+    enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
+
+    bonds = [
+        {
+            "SECID": "SU26228RMFS5",
+            "ISIN": "RU000A0ZZTL5",
+            "COUPONPERCENT": "0",
+            "OFFERDATE": "",
+            "MATDATE": "2030-01-01",
+            "RealPrice": 100.0,
+        }
+    ]
+    errors = enricher.enrich_bonds(bonds)
+
+    assert errors == 0
+    assert bonds[0]["COUPONPERCENT"] == 15.6
+    assert bonds[0]["OFFERDATE"] == "2027-08-26"
+    assert bonds[0]["RealPrice"] == 101.1
+    assert enricher.last_stats.coupon_updated == 1
+    assert enricher.last_stats.offer_added == 1
+    assert enricher.last_stats.realprice_updated == 1
 
 
 def test_enrich_bonds_uses_fresh_checkpoint_without_requests() -> None:
@@ -109,3 +149,17 @@ def test_enrich_bonds_falls_back_to_secid_when_isin_missing() -> None:
     assert errors == 0
     assert called == ["SU26228RMFS5"]
     assert bonds[0]["RealPrice"] == 101.0
+
+
+def test_should_enrich_coupon_for_zero_and_empty_markers() -> None:
+    assert _should_enrich_coupon("", "RUONIA") is True
+    assert _should_enrich_coupon("—", "RUONIA") is True
+    assert _should_enrich_coupon("0", "RUONIA") is True
+    assert _should_enrich_coupon("2.5", "RUONIA") is False
+    assert _should_enrich_coupon("", "") is False
+
+
+def test_should_enrich_offer_without_event_name_if_not_maturity() -> None:
+    assert _should_enrich_offer("", "2028-01-01", "2030-01-01", "") is True
+    assert _should_enrich_offer("", "2030-01-01", "2030-01-01", "") is False
+    assert _should_enrich_offer("", "2028-01-01", "2030-01-01", "погашение") is False
