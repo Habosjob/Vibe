@@ -121,3 +121,35 @@ def test_build_emitents_reference_recovers_when_eligible_missing_emitter_id(monk
     assert result.processed_emitters == 2
     assert result.new_emitters == 2
     assert sorted(row["ИНН"] for row in result.rows) == ["7701111111", "7702222222"]
+
+
+def test_build_emitents_reference_requests_one_card_per_known_emitter(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    eligible_bonds = [
+        {"SECID": "BOND1", "EMITTER_ID": "111"},
+        {"SECID": "BOND2", "EMITTER_ID": "111"},
+        {"SECID": "BOND3", "EMITTER_ID": "111"},
+        {"SECID": "BOND4", "EMITTER_ID": "222"},
+        {"SECID": "BOND5", "EMITTER_ID": "222"},
+    ]
+
+    calls: list[str] = []
+
+    def fake_description(secid: str):
+        calls.append(secid)
+        if secid == "BOND1":
+            return {"EMITTER_ID": "111", "EMITTER_FULL_NAME": "Первый", "EMITTER_INN": "7701111111"}, 0
+        return {"EMITTER_ID": "222", "EMITTER_FULL_NAME": "Второй", "EMITTER_INN": "7702222222"}, 0
+
+    monkeypatch.setattr(client, "fetch_security_description", fake_description)
+    monkeypatch.setattr(client, "fetch_market_securities", lambda market: ([], 0))
+
+    result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=store)
+
+    assert result.errors == 0
+    assert result.processed_emitters == 2
+    assert set(calls) == {"BOND1", "BOND4"}
+    assert len(calls) == 2
