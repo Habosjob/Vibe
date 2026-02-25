@@ -37,6 +37,19 @@ class DohodBondPayload:
     ytm_date: str
 
 
+@dataclass(slots=True)
+class DohodEnrichmentStats:
+    bonds_total: int = 0
+    cache_hits: int = 0
+    requested: int = 0
+    realprice_added: int = 0
+    realprice_updated: int = 0
+    coupon_added: int = 0
+    coupon_updated: int = 0
+    offer_added: int = 0
+    offer_updated: int = 0
+
+
 class DohodEnricher:
     def __init__(self, config: AppConfig, logger: logging.Logger, raw_store: RawStore | None = None) -> None:
         self.config = config
@@ -46,6 +59,7 @@ class DohodEnricher:
         self._request_lock = threading.Lock()
         self._next_request_ts = 0.0
         self._thread_local = threading.local()
+        self.last_stats = DohodEnrichmentStats()
 
     def enrich_bonds(
         self,
@@ -54,6 +68,7 @@ class DohodEnricher:
         checkpoint_saver: DohodCheckpointSaver | None = None,
         progress_callback: DohodProgressCallback | None = None,
     ) -> int:
+        self.last_stats = DohodEnrichmentStats()
         checkpoint = self._normalize_checkpoint(checkpoint_data or {})
         previous_payload = checkpoint.get("bonds", {})
         processed: dict[str, dict[str, Any]] = dict(previous_payload) if isinstance(previous_payload, dict) else {}
@@ -71,9 +86,15 @@ class DohodEnricher:
         pending: list[str] = []
         for identifier in identifier_to_bonds:
             if fresh_cache and not index_changed and identifier in processed:
-                self._apply_cached(identifier_to_bonds[identifier], processed[identifier], index_values)
-                continue
+                cached_payload = processed.get(identifier)
+                if self._is_cached_payload_usable(cached_payload):
+                    self._apply_cached(identifier_to_bonds[identifier], processed[identifier], index_values)
+                    continue
             pending.append(identifier)
+
+        self.last_stats.bonds_total = len(identifier_to_bonds)
+        self.last_stats.cache_hits = len(identifier_to_bonds) - len(pending)
+        self.last_stats.requested = len(pending)
 
         errors = 0
         processed_count = len(identifier_to_bonds) - len(pending)
@@ -223,6 +244,18 @@ class DohodEnricher:
             return {}
         return checkpoint
 
+    @staticmethod
+    def _is_cached_payload_usable(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        ask_price = payload.get("ask_price")
+        index_name = str(payload.get("index_name") or "").strip()
+        ytm_date = str(payload.get("ytm_date") or "").strip()
+        event_name = str(payload.get("event_name") or "").strip()
+        if isinstance(ask_price, (int, float)):
+            return True
+        return bool(index_name or ytm_date or event_name)
+
     def _apply_cached(self, bonds: list[dict[str, Any]], payload: dict[str, Any], index_values: dict[str, float]) -> None:
         ask_price = payload.get("ask_price")
         index_name = str(payload.get("index_name") or "")
@@ -233,20 +266,38 @@ class DohodEnricher:
 
         for bond in bonds:
             if isinstance(ask_price, (int, float)):
-                bond["RealPrice"] = float(ask_price)
+                new_real_price = float(ask_price)
+                old_real_price = bond.get("RealPrice")
+                if old_real_price in (None, ""):
+                    self.last_stats.realprice_added += 1
+                elif old_real_price != new_real_price:
+                    self.last_stats.realprice_updated += 1
+                bond["RealPrice"] = new_real_price
 
             coupon_raw = str(bond.get("COUPONPERCENT") or "").strip()
-            if not coupon_raw and index_name:
+            if _should_enrich_coupon(coupon_raw, index_name):
                 base_rate = float(index_values.get(index_name, 0.0))
                 if index_name == "Z_CURVE_RUS" and index_tenor_years:
                     base_rate = float(index_values.get(f"Z_CURVE_RUS_{index_tenor_years}Y", base_rate))
-                bond["COUPONPERCENT"] = round(base_rate + index_spread, 4)
+                new_coupon = round(base_rate + index_spread, 4)
+                old_coupon = _as_float_or_none(bond.get("COUPONPERCENT"))
+                if coupon_raw in ("", "-", "—", "нет", "n/a", "na", "none", "null", "nan"):
+                    self.last_stats.coupon_added += 1
+                elif old_coupon is None:
+                    self.last_stats.coupon_added += 1
+                elif abs(old_coupon - new_coupon) > 1e-9:
+                    self.last_stats.coupon_updated += 1
+                bond["COUPONPERCENT"] = new_coupon
                 bond["_COUPONPERCENT_APPROX"] = True
 
             offer_date = str(bond.get("OFFERDATE") or "")
             mat_date = str(bond.get("MATDATE") or "")
-            if not offer_date and ytm_date and event_name and "погаш" not in event_name:
+            if _should_enrich_offer(offer_date, ytm_date, mat_date, event_name):
                 if ytm_date != mat_date:
+                    if offer_date:
+                        self.last_stats.offer_updated += 1
+                    else:
+                        self.last_stats.offer_added += 1
                     bond["OFFERDATE"] = ytm_date
 
     def _get_with_rate_limit(self, url: str, timeout: int, delay_seconds: float) -> requests.Response:
@@ -342,3 +393,33 @@ def _to_iso_date(raw: str) -> str:
         return datetime.strptime(value, "%d.%m.%Y").strftime("%Y-%m-%d")
     except ValueError:
         return ""
+
+
+def _as_float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", ".").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _should_enrich_coupon(coupon_raw: str, index_name: str) -> bool:
+    if not index_name:
+        return False
+    normalized = coupon_raw.strip().lower()
+    if normalized in {"", "-", "—", "нет", "n/a", "na", "none", "null", "nan"}:
+        return True
+    numeric = _as_float_or_none(coupon_raw)
+    return numeric is not None and numeric <= 0
+
+
+def _should_enrich_offer(offer_date: str, ytm_date: str, mat_date: str, event_name: str) -> bool:
+    if not ytm_date:
+        return False
+    if ytm_date == mat_date:
+        return False
+    if offer_date == ytm_date:
+        return False
+    event = event_name.strip().lower()
+    return "погаш" not in event
