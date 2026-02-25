@@ -12,6 +12,8 @@ DATE_RULES: list[tuple[str, str]] = [
     ("CALLOPTIONDATE", "calloption_lt_1y"),
     ("MATDATE", "mat_lt_1y"),
 ]
+PERMANENT_EXCLUDE_UNTIL = "permanent"
+AMORTIZATION_RULE_NAME = "amortization_started_or_lt_1y_permanent"
 
 
 @dataclass(slots=True)
@@ -39,6 +41,7 @@ class BondExclusionFilter:
         eligible_bonds: list[dict[str, Any]] = []
         active_exclusions: dict[str, dict[str, str]] = {}
         excluded_by_rule = {rule_name: 0 for _, rule_name in DATE_RULES}
+        excluded_by_rule[AMORTIZATION_RULE_NAME] = 0
         restored_after_expiration = 0
         skipped_by_active_exclusion = 0
 
@@ -49,8 +52,17 @@ class BondExclusionFilter:
                 continue
 
             prev_exclusion = previous_exclusions.get(secid)
-            if prev_exclusion and self._parse_date(prev_exclusion.get("exclude_until", "")):
-                prev_until = self._parse_date(prev_exclusion["exclude_until"])
+            prev_until_raw = str((prev_exclusion or {}).get("exclude_until", ""))
+            if prev_exclusion and prev_until_raw == PERMANENT_EXCLUDE_UNTIL:
+                active_exclusions[secid] = {
+                    "rule": str(prev_exclusion.get("rule", "manual")),
+                    "exclude_until": PERMANENT_EXCLUDE_UNTIL,
+                }
+                skipped_by_active_exclusion += 1
+                continue
+
+            if prev_exclusion and self._parse_date(prev_until_raw):
+                prev_until = self._parse_date(prev_until_raw)
                 if prev_until and prev_until > current_day:
                     active_exclusions[secid] = {
                         "rule": str(prev_exclusion.get("rule", "manual")),
@@ -78,8 +90,28 @@ class BondExclusionFilter:
                     matched = True
                     break
 
-            if not matched:
-                eligible_bonds.append(bond)
+            if matched:
+                continue
+
+            amortization_start = self._parse_date(
+                str(
+                    bond.get("Amortization_start_date")
+                    or bond.get("AMORTIZATION_START_DATE")
+                    or bond.get("AMORTIZATIONSTARTDATE")
+                    or ""
+                )
+            )
+            if amortization_start:
+                days_left = (amortization_start - current_day).days
+                if days_left < self.days_threshold:
+                    active_exclusions[secid] = {
+                        "rule": AMORTIZATION_RULE_NAME,
+                        "exclude_until": PERMANENT_EXCLUDE_UNTIL,
+                    }
+                    excluded_by_rule[AMORTIZATION_RULE_NAME] += 1
+                    continue
+
+            eligible_bonds.append(bond)
 
         return ExclusionResult(
             eligible_bonds=eligible_bonds,
