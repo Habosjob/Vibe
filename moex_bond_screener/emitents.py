@@ -176,17 +176,37 @@ def build_emitents_reference(
     if secid_cache_changed:
         state_store.save_secid_to_emitter_map(secid_to_emitter)
 
-    bonds_started = perf_counter()
-    bonds_market = state_store.load_market_cache("bonds") or []
+    bonds_market: list[dict[str, Any]] = []
     bonds_errors = 0
-    if not bonds_market:
-        if progress_callback:
-            progress_callback({"phase": "market_data", "message": "Загрузка рыночных инструментов bonds"})
-        bonds_market, bonds_errors = client.fetch_market_securities("bonds")
-        if bonds_market:
-            state_store.save_market_cache("bonds", bonds_market)
+    bonds_started = perf_counter()
+    unresolved_bonds = _count_bonds_without_emitter(eligible_bonds, secid_to_emitter)
+    bonds_without_isin = _count_bonds_without_isin(eligible_bonds)
+    need_bonds_market = unresolved_bonds > 0 or bonds_without_isin > 0
+    if need_bonds_market:
+        bonds_market = state_store.load_market_cache("bonds") or []
+        if not bonds_market:
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "market_data",
+                        "message": (
+                            "Загрузка рыночных инструментов bonds "
+                            f"(без EMITTER_ID: {unresolved_bonds}, без ISIN: {bonds_without_isin})"
+                        ),
+                    }
+                )
+            bonds_market, bonds_errors = client.fetch_market_securities("bonds")
+            if bonds_market:
+                state_store.save_market_cache("bonds", bonds_market)
+        elif progress_callback:
+            progress_callback({"phase": "market_data", "message": "Используем кэш рыночных инструментов bonds"})
     elif progress_callback:
-        progress_callback({"phase": "market_data", "message": "Используем кэш рыночных инструментов bonds"})
+        progress_callback(
+            {
+                "phase": "market_data",
+                "message": "Пропускаем рынок bonds: EMITTER_ID/ISSUER_ID и ISIN уже заполнены в итоговых бумагах",
+            }
+        )
     stage_durations["emitents_market_bonds_seconds"] = round(perf_counter() - bonds_started, 2)
 
     shares_started = perf_counter()
@@ -203,7 +223,13 @@ def build_emitents_reference(
     stage_durations["emitents_market_shares_seconds"] = round(perf_counter() - shares_started, 2)
     errors += bonds_errors + shares_errors
 
-    bond_map = _collect_market_instruments(bonds_market, instrument_key="ISIN")
+    bond_map = _collect_bond_isins_by_emitter(eligible_bonds, secid_to_emitter)
+    if bonds_market:
+        market_bond_map = _collect_market_instruments(bonds_market, instrument_key="ISIN")
+        for emitter_id, isins in market_bond_map.items():
+            existing = set(bond_map.get(emitter_id, []))
+            existing.update(isins)
+            bond_map[emitter_id] = sorted(existing)
     share_map = _collect_market_instruments(shares_market, instrument_key="SECID")
     discovered_emitters.update(_infer_emitters_from_market(eligible_bonds, bonds_market, shares_market, secid_to_emitter))
 
@@ -248,12 +274,12 @@ def _pick_emitter_samples(eligible_bonds: list[dict[str, Any]], secid_to_emitter
     unknown_emitters: set[str] = set()
     for bond in eligible_bonds:
         secid = str(bond.get("SECID") or "").strip()
-        emitter_id = str(
+        emitter_id = _normalize_emitter_id(
             bond.get("EMITTER_ID")
             or bond.get("ISSUER_ID")
             or secid_to_emitter.get(secid, "")
             or ""
-        ).strip()
+        )
         if not secid:
             continue
 
@@ -271,7 +297,13 @@ def _pick_emitter_samples(eligible_bonds: list[dict[str, Any]], secid_to_emitter
 def _collect_market_instruments(rows: list[dict[str, Any]], instrument_key: str) -> dict[str, list[str]]:
     instruments: dict[str, set[str]] = {}
     for row in rows:
-        emitter_id = str(row.get("EMITTER_ID") or "").strip()
+        emitter_id = _normalize_emitter_id(
+            row.get("EMITTER_ID")
+            or row.get("ISSUER_ID")
+            or row.get("EMITTERID")
+            or row.get("ISSUERID")
+            or ""
+        )
         instrument = str(row.get(instrument_key) or "").strip()
         if not emitter_id or not instrument:
             continue
@@ -290,7 +322,13 @@ def _infer_emitters_from_market(
     by_isin: dict[str, str] = {}
 
     for row in [*bonds_market, *shares_market]:
-        emitter_id = str(row.get("EMITTER_ID") or "").strip()
+        emitter_id = _normalize_emitter_id(
+            row.get("EMITTER_ID")
+            or row.get("ISSUER_ID")
+            or row.get("EMITTERID")
+            or row.get("ISSUERID")
+            or ""
+        )
         if not emitter_id:
             continue
         secid = str(row.get("SECID") or "").strip()
@@ -304,15 +342,62 @@ def _infer_emitters_from_market(
     for bond in eligible_bonds:
         secid = str(bond.get("SECID") or "").strip()
         isin = str(bond.get("ISIN") or "").strip()
-        emitter_id = str(
+        emitter_id = _normalize_emitter_id(
             bond.get("EMITTER_ID")
             or bond.get("ISSUER_ID")
             or secid_to_emitter.get(secid, "")
             or by_secid.get(secid, "")
             or by_isin.get(isin, "")
             or ""
-        ).strip()
+        )
         if emitter_id:
             inferred.add(emitter_id)
 
     return inferred
+
+
+def _collect_bond_isins_by_emitter(eligible_bonds: list[dict[str, Any]], secid_to_emitter: dict[str, str]) -> dict[str, list[str]]:
+    by_emitter: dict[str, set[str]] = {}
+    for bond in eligible_bonds:
+        secid = str(bond.get("SECID") or "").strip()
+        isin = str(bond.get("ISIN") or "").strip()
+        emitter_id = _normalize_emitter_id(
+            bond.get("EMITTER_ID")
+            or bond.get("ISSUER_ID")
+            or secid_to_emitter.get(secid, "")
+            or ""
+        )
+        if not emitter_id or not isin:
+            continue
+        by_emitter.setdefault(emitter_id, set()).add(isin)
+    return {emitter_id: sorted(isins) for emitter_id, isins in by_emitter.items()}
+
+
+def _count_bonds_without_emitter(eligible_bonds: list[dict[str, Any]], secid_to_emitter: dict[str, str]) -> int:
+    unresolved = 0
+    for bond in eligible_bonds:
+        secid = str(bond.get("SECID") or "").strip()
+        emitter_id = _normalize_emitter_id(
+            bond.get("EMITTER_ID")
+            or bond.get("ISSUER_ID")
+            or secid_to_emitter.get(secid, "")
+            or ""
+        )
+        if not emitter_id:
+            unresolved += 1
+    return unresolved
+
+
+def _count_bonds_without_isin(eligible_bonds: list[dict[str, Any]]) -> int:
+    return sum(1 for bond in eligible_bonds if not str(bond.get("ISIN") or "").strip())
+
+
+def _normalize_emitter_id(raw_value: Any) -> str:
+    value = str(raw_value or "").strip()
+    if not value:
+        return ""
+    if value.endswith(".0"):
+        integer_part = value[:-2]
+        if integer_part.isdigit():
+            return integer_part
+    return value
