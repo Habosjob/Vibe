@@ -347,6 +347,36 @@ def test_enrich_bonds_recalculates_legacy_spread_only_coupon_from_cache() -> Non
     assert bonds[0]["_COUPONPERCENT_APPROX"] is True
 
 
+def test_enrich_bonds_skips_coupon_enrichment_when_index_base_missing() -> None:
+    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0})
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    checkpoint = {
+        "version": DOHOD_CHECKPOINT_VERSION,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "completed": True,
+        "index_values": {"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0},
+        "bonds": {
+            "RU000A105KW6": {
+                "ask_price": 101.0,
+                "index_name": "CBR_RATE",
+                "index_spread": 1.5,
+                "index_tenor_years": None,
+                "event_name": "",
+                "ytm_date": "",
+            }
+        },
+    }
+    bonds = [{"ISIN": "RU000A105KW6", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2033-10-12"}]
+
+    errors = enricher.enrich_bonds(bonds, checkpoint_data=checkpoint)
+
+    assert errors == 0
+    assert bonds[0]["COUPONPERCENT"] == ""
+    assert "_COUPONPERCENT_APPROX" not in bonds[0]
+    assert enricher.last_stats.coupon_skipped_no_base == 1
+
+
 def test_enrich_bonds_skips_record_without_isin() -> None:
     config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))

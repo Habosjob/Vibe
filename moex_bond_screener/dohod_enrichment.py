@@ -63,6 +63,7 @@ class DohodEnrichmentStats:
     realprice_updated: int = 0
     coupon_added: int = 0
     coupon_updated: int = 0
+    coupon_skipped_no_base: int = 0
     offer_added: int = 0
     offer_updated: int = 0
     parse_empty_payloads: int = 0
@@ -388,6 +389,20 @@ class DohodEnricher:
 
             coupon_raw = str(bond.get("COUPONPERCENT") or "").strip()
             base_rate = float(index_values.get(index_name, 0.0))
+            if index_name == "Z_CURVE_RUS" and index_tenor_years:
+                base_rate = float(index_values.get(f"Z_CURVE_RUS_{index_tenor_years}Y", base_rate))
+
+            if index_name and base_rate <= 0:
+                self.last_stats.coupon_skipped_no_base += 1
+                self.logger.warning(
+                    "Пропуск расчета COUPONPERCENT: нет базовой ставки для index=%s spread=%.4f isin=%s secid=%s",
+                    index_name,
+                    index_spread,
+                    str(bond.get("ISIN") or "").strip(),
+                    str(bond.get("SECID") or "").strip(),
+                )
+                continue
+
             if _should_enrich_coupon(
                 coupon_raw=coupon_raw,
                 index_name=index_name,
@@ -395,8 +410,6 @@ class DohodEnricher:
                 index_spread=index_spread,
                 approx_flag=bool(bond.get("_COUPONPERCENT_APPROX")),
             ):
-                if index_name == "Z_CURVE_RUS" and index_tenor_years:
-                    base_rate = float(index_values.get(f"Z_CURVE_RUS_{index_tenor_years}Y", base_rate))
                 new_coupon = round(base_rate + index_spread, 4)
                 old_coupon = _as_float_or_none(bond.get("COUPONPERCENT"))
                 if coupon_raw in ("", "-", "—", "нет", "n/a", "na", "none", "null", "nan"):
