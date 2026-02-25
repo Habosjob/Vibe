@@ -9,7 +9,8 @@
 ## Параметры
 - `base_url` — URL ISS API MOEX.
 - `timeout_seconds` — таймаут HTTP-запросов.
-- `request_delay_seconds` — задержка между запросами (rate-limit).
+- `request_delay_seconds` — задержка между запросами загрузки списка бумаг (rate-limit).
+- `amortization_request_delay_seconds` — отдельная задержка между запросами `bondization` (по умолчанию `0.02`), чтобы ускорять именно этап амортизаций без риска перегруза API.
 - `retries` — количество повторов при ошибке.
 - `page_size` — размер страницы API.
 - `output_file` — путь к итоговому файлу (`.xlsx` по умолчанию, опционально `.csv`).

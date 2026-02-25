@@ -110,7 +110,6 @@ class MoexClient:
                     }
                 )
             start = next_start
-            time.sleep(self.config.request_delay_seconds)
 
         if checkpoint_saver:
             checkpoint_saver(
@@ -230,6 +229,7 @@ class MoexClient:
                     self.config.base_url,
                     params=params,
                     timeout=self.config.timeout_seconds,
+                    delay_seconds=self.config.request_delay_seconds,
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -259,6 +259,7 @@ class MoexClient:
                     url,
                     params=params,
                     timeout=self.config.timeout_seconds,
+                    delay_seconds=self.config.amortization_request_delay_seconds,
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -277,7 +278,7 @@ class MoexClient:
                 )
                 if attempt == self.config.retries:
                     return "", 1
-                time.sleep(self.config.request_delay_seconds * attempt)
+                time.sleep(self.config.amortization_request_delay_seconds * attempt)
 
         return "", 1
 
@@ -295,8 +296,8 @@ class MoexClient:
         if date_idx is None:
             return None
 
-        parsed_dates: list[datetime] = []
-        non_full_redemption_dates: list[datetime] = []
+        parsed_items: list[tuple[datetime, float | None]] = []
+        partial_dates: list[datetime] = []
         for row in rows:
             if len(row) <= date_idx:
                 continue
@@ -323,21 +324,46 @@ class MoexClient:
         if non_full_redemption_dates:
             return min(non_full_redemption_dates).strftime("%Y-%m-%d")
 
-        if not parsed_dates:
+            value_prc: float | None = None
+            if value_prc_idx is not None and len(row) > value_prc_idx:
+                raw_value_prc = row[value_prc_idx]
+                try:
+                    value_prc = float(raw_value_prc)
+                except (TypeError, ValueError):
+                    value_prc = None
+
+            parsed_items.append((parsed_date, value_prc))
+            if value_prc is None or value_prc < 99.999:
+                partial_dates.append(parsed_date)
+
+        if partial_dates:
+            return min(partial_dates).strftime("%Y-%m-%d")
+
+        if not parsed_items:
             return None
 
-        if len(parsed_dates) == 1:
-            only_date = parsed_dates[0].strftime("%Y-%m-%d")
-            if matdate and only_date == matdate:
+        if len(parsed_items) == 1:
+            only_date, only_value_prc = parsed_items[0]
+            only_date_str = only_date.strftime("%Y-%m-%d")
+            is_full_redemption = only_value_prc is not None and only_value_prc >= 99.999
+            if is_full_redemption or (matdate and only_date_str == matdate):
                 return None
+            return only_date_str
 
-            if value_prc_idx is not None:
-                return None
+        if value_prc_idx is not None:
+            # Если VALUEPRC есть и частичных выплат нет, это погашения, а не амортизация.
+            return None
 
-        return min(parsed_dates).strftime("%Y-%m-%d")
+        return min(date for date, _ in parsed_items).strftime("%Y-%m-%d")
 
-    def _get_with_rate_limit(self, url: str, params: dict[str, Any], timeout: int) -> requests.Response:
-        delay = max(0.0, float(self.config.request_delay_seconds))
+    def _get_with_rate_limit(
+        self,
+        url: str,
+        params: dict[str, Any],
+        timeout: int,
+        delay_seconds: float,
+    ) -> requests.Response:
+        delay = max(0.0, float(delay_seconds))
         sleep_for = 0.0
         if delay > 0:
             with self._request_lock:

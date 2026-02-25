@@ -1,6 +1,7 @@
 base_url: "https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json"
 timeout_seconds: 20
 request_delay_seconds: 0.15
+amortization_request_delay_seconds: 0.02
 retries: 3
 page_size: 100
 output_file: "output/moex_bonds.xlsx"

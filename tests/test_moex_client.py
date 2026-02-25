@@ -251,6 +251,43 @@ def test_enrich_amortization_start_dates_deduplicates_secid_requests(monkeypatch
     assert bonds[1]["Amortization_start_date"] == "2027-12-01"
 
 
+
+
+def test_extract_earliest_amortization_date_single_partial_valueprc_is_amortization():
+    payload = {
+        "amortizations": {
+            "columns": ["amortdate", "valueprc"],
+            "data": [["2029-02-01", 15]],
+        }
+    }
+
+    result = MoexClient._extract_earliest_amortization_date(payload, matdate="2030-05-01")
+
+    assert result == "2029-02-01"
+
+
+def test_client_uses_separate_delays_for_pages_and_amortizations(monkeypatch):
+    config = AppConfig(
+        retries=1,
+        request_delay_seconds=0.15,
+        amortization_request_delay_seconds=0.02,
+    )
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    captured: list[float] = []
+
+    def fake_rate_limited_get(url, params, timeout, delay_seconds):
+        captured.append(delay_seconds)
+        if "bondization" in url:
+            return DummyResponse({"amortizations": {"columns": ["amortdate"], "data": []}})
+        return DummyResponse({"securities": {"columns": ["SECID"], "data": []}})
+
+    monkeypatch.setattr(client, "_get_with_rate_limit", fake_rate_limited_get)
+
+    client._fetch_page(0)
+    client._fetch_amortization_start_date("A")
+
+    assert captured == [0.15, 0.02]
+
 def test_fetch_all_bonds_resumes_from_checkpoint(monkeypatch):
     config = AppConfig(page_size=2, retries=1, request_delay_seconds=0)
     client = MoexClient(config=config, logger=logging.getLogger("test"))
