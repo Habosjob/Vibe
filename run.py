@@ -327,6 +327,10 @@ def _print_emitents_progress(data: dict[str, Any], progress: PipelineProgress) -
         processed = int(data.get("processed", 0))
         total = int(data.get("total", 0))
         progress.report_fraction(processed, total, "обработано профилей эмитентов")
+    elif phase == "market_descriptions":
+        processed = int(data.get("processed", 0))
+        total = int(data.get("total", 0))
+        progress.report_fraction(processed, total, "обработано market-description карточек")
 
 
 def _print_amortization_progress(data: dict[str, Any], progress: PipelineProgress) -> None:
