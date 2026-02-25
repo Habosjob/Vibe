@@ -2,8 +2,8 @@
 
 ## `run.py`
 - Назначение: запуск полного сценария без аргументов.
-- Вход: `config.yml` (опционально), сеть.
-- Выход: `output/moex_bonds.xlsx` (лист `MOEX_BONDS` + лист `SUMMARY`), `logs/latest.log`, опционально `raw/*.json`.
+- Вход: `config.yml` (опционально), сеть, состояние в `state/`.
+- Выход: `output/moex_bonds.xlsx` (лист `MOEX_BONDS` + лист `SUMMARY`), `logs/latest.log`, `state/exclusions.json`, `state/eligible_bonds.json`, опционально `raw/*.json`.
 - Как менять конфиг: правьте `config.yml` (см. `docs/CONFIG.md`).
 
 ## `moex_bond_screener/config.py`
@@ -16,6 +16,16 @@
 - Вход: `AppConfig`, logger.
 - Выход: список облигаций + число ошибок.
 
+## `moex_bond_screener/exclusion_rules.py`
+- Назначение: сортировщик исключений по датам (`BUYBACKDATE`, `OFFERDATE`, `CALLOPTIONDATE`, `MATDATE`) с сохранением порядка правил.
+- Вход: список облигаций + ранее сохраненные исключения.
+- Выход: допущенные бумаги, актуальные исключения, статистика фильтрации по правилам.
+
+## `moex_bond_screener/state_store.py`
+- Назначение: инкрементальное состояние (исключения + кэш допущенных бумаг).
+- Вход: список допущенных бумаг и/или словарь исключений.
+- Выход: `state/exclusions.json`, `state/eligible_bonds.json`, статистика изменений.
+
 ## `moex_bond_screener/raw_store.py`
 - Назначение: сохранять raw JSON и чистить папку `raw/` по TTL/размеру.
 - Вход: payload строкой, настройки TTL/лимита.
@@ -23,7 +33,7 @@
 
 ## `moex_bond_screener/writer.py`
 - Назначение: запись итогового Excel (`.xlsx`) или CSV (`.csv`) с очисткой лишних колонок, объединением дублей, нормализацией числовых строк (в т.ч. с пробелами/неразрывными пробелами), форматированием дат и группировкой столбцов (с разделителями и сворачиванием/разворачиванием в Excel).
-- Вход: список словарей с облигациями; для Excel дополнительно можно передать метрики запуска (`bonds_count`, `errors_count`, `elapsed_seconds`) для листа `SUMMARY`.
+- Вход: список словарей с облигациями; для Excel можно передать метрики запуска (`bonds_count`, `errors_count`, `elapsed_seconds`, метрики фильтров) для листа `SUMMARY`.
 - Выход: Excel/CSV-файл.
 
 ## `moex_bond_screener/logging_utils.py`

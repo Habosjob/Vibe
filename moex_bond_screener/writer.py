@@ -197,17 +197,31 @@ def _write_summary_sheet(workbook: Workbook, prepared_rows: list[dict[str, Any]]
     payload = _summary_metrics(prepared_rows, summary)
     summary_sheet = workbook.create_sheet("SUMMARY", 0)
     summary_sheet.append(["Параметр", "Значение"])
-    summary_sheet.append(["Дата и время формирования", payload["generated_at"]])
-    summary_sheet.append(["Количество бумаг", int(payload["bonds_count"])])
-    summary_sheet.append(["Количество ошибок", int(payload["errors_count"])])
-    summary_sheet.append(["Время выполнения, сек", float(payload["elapsed_seconds"])])
+
+    base_rows = [
+        ("Дата и время формирования", payload["generated_at"]),
+        ("Количество бумаг", int(payload["bonds_count"])),
+        ("Количество ошибок", int(payload["errors_count"])),
+        ("Время выполнения, сек", float(payload["elapsed_seconds"])),
+    ]
+
+    known = {"generated_at", "bonds_count", "errors_count", "elapsed_seconds"}
+    extra_rows: list[tuple[str, Any]] = []
+    for key, value in payload.items():
+        if key in known:
+            continue
+        title = key.replace("_", " ").strip().capitalize()
+        extra_rows.append((title, value))
+
+    for label, value in [*base_rows, *extra_rows]:
+        summary_sheet.append([label, value])
 
     for cell in summary_sheet[1]:
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    summary_sheet.column_dimensions["A"].width = 34
+    summary_sheet.column_dimensions["A"].width = 42
     summary_sheet.column_dimensions["B"].width = 24
     summary_sheet["B2"].number_format = "DD.MM.YYYY HH:MM:SS"
     summary_sheet["B5"].number_format = "0.00"

@@ -22,6 +22,8 @@ class AppConfig:
     raw_dump_enabled: bool = False
     raw_ttl_hours: int = 24
     raw_max_size_mb: int = 50
+    exclusions_state_dir: str = "state"
+    exclusion_window_days: int = 365
 
 
 DEFAULT_CONFIG_PATH = Path("config.yml")
