@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from moex_bond_screener.config import load_config
@@ -32,7 +33,7 @@ def main() -> None:
     previous_exclusions = state_store.load_exclusions()
     bonds_checkpoint = state_store.load_checkpoint("bonds_fetch")
     raw_amortization_checkpoint = state_store.load_checkpoint("amortization")
-    amortization_checkpoint, amortization_checkpoint_invalidated = _prepare_amortization_checkpoint(
+    amortization_checkpoint, amortization_checkpoint_invalidated, amortization_cache_fresh = _prepare_amortization_checkpoint(
         raw_amortization_checkpoint
     )
     if amortization_checkpoint_invalidated:
@@ -58,9 +59,13 @@ def main() -> None:
 
     progress.start_stage(6, "Обогащение датой начала амортизации")
     if amortization_checkpoint_invalidated:
-        progress.tick("Найден устаревший чекпоинт амортизации — старый кэш сброшен, пересчитываем этап")
+        progress.tick("Найден устаревший кэш амортизации — старые данные сброшены, пересчитываем этап")
+    elif amortization_cache_fresh:
+        progress.tick("Кэш амортизации свежий (до 24 часов) — повторные запросы выполняются только для новых SECID")
     elif amortization_checkpoint and not amortization_checkpoint.get("completed", False):
         progress.tick("Найден чекпоинт амортизации — пропускаем уже обработанные SECID")
+    elif amortization_checkpoint:
+        progress.tick("Кэш амортизации старше 24 часов — обновляем данные")
 
     amortization_errors = client.enrich_amortization_start_dates(
         exclusion_result.eligible_bonds,
@@ -68,7 +73,6 @@ def main() -> None:
         checkpoint_saver=lambda payload: state_store.save_checkpoint("amortization", payload),
         progress_callback=lambda data: _print_amortization_progress(data, progress),
     )
-    state_store.clear_checkpoint("amortization")
 
     post_amortization_exclusion_result = exclusion_filter.apply(
         bonds=exclusion_result.eligible_bonds,
@@ -131,24 +135,41 @@ def main() -> None:
     print(f"Время выполнения: {elapsed:.2f} сек")
 
 
-def _prepare_amortization_checkpoint(checkpoint: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+def _prepare_amortization_checkpoint(checkpoint: dict[str, Any]) -> tuple[dict[str, Any], bool, bool]:
     if not checkpoint:
-        return {}, False
+        return {}, False, False
 
     version = checkpoint.get("version")
     if version != AMORTIZATION_CHECKPOINT_VERSION:
-        return {}, True
+        return {}, True, False
 
     processed = checkpoint.get("processed")
     if not isinstance(processed, dict):
-        return {}, True
+        return {}, True, False
+
+    updated_at_raw = checkpoint.get("updated_at")
+    if not isinstance(updated_at_raw, str):
+        return {}, True, False
+
+    try:
+        updated_at = datetime.fromisoformat(updated_at_raw)
+    except ValueError:
+        return {}, True, False
+
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+
+    is_fresh = datetime.now(timezone.utc) - updated_at <= timedelta(hours=24)
+    if not is_fresh:
+        return {}, True, False
 
     normalized = {str(secid): str(value or "") for secid, value in processed.items() if str(secid).strip()}
     return {
         "version": AMORTIZATION_CHECKPOINT_VERSION,
         "processed": normalized,
+        "updated_at": updated_at.isoformat(),
         "completed": bool(checkpoint.get("completed", False)),
-    }, False
+    }, False, True
 
 
 def _print_fetch_progress(data: dict[str, Any], progress: PipelineProgress) -> None:

@@ -400,3 +400,20 @@ def test_enrich_amortization_checkpoint_saves_only_successful_secids(monkeypatch
     assert bonds[1]["Amortization_start_date"] == ""
     assert saved_payloads[-1]["version"] == AMORTIZATION_CHECKPOINT_VERSION
     assert saved_payloads[-1]["processed"] == {"A": "2026-01-01"}
+
+
+def test_enrich_amortization_checkpoint_contains_updated_at(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0, amortization_request_delay_seconds=0, amortization_workers=1)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    monkeypatch.setattr(client, "_fetch_amortization_start_date", lambda secid, matdate="": ("", 0))
+
+    saved_payloads: list[dict] = []
+    bonds = [{"SECID": "A"}]
+    errors = client.enrich_amortization_start_dates(
+        bonds,
+        checkpoint_saver=lambda payload: saved_payloads.append(payload),
+    )
+
+    assert errors == 0
+    assert isinstance(saved_payloads[-1].get("updated_at"), str)
