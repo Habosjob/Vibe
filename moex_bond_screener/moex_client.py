@@ -23,6 +23,7 @@ class MoexClient:
         bonds: list[dict[str, Any]] = []
         errors = 0
         start = 0
+        seen_secids: set[str] = set()
 
         while True:
             self.logger.info("Запрос страницы MOEX: start=%s", start)
@@ -32,7 +33,31 @@ class MoexClient:
             if not page_data:
                 break
 
-            bonds.extend(page_data)
+            new_items: list[dict[str, Any]] = []
+            for item in page_data:
+                secid = item.get("SECID")
+                if not secid or secid not in seen_secids:
+                    if secid:
+                        seen_secids.add(secid)
+                    new_items.append(item)
+
+            bonds.extend(new_items)
+
+            if start > 0 and not new_items:
+                self.logger.warning(
+                    "Пагинация MOEX вернула дубликаты для start=%s. Останавливаемся, чтобы избежать бесконечного цикла.",
+                    start,
+                )
+                break
+
+            if start == 0 and len(page_data) > self.config.page_size:
+                self.logger.info(
+                    "MOEX вернула %s строк за один запрос (больше page_size=%s). Считаем, что получен полный список.",
+                    len(page_data),
+                    self.config.page_size,
+                )
+                break
+
             if len(page_data) < self.config.page_size:
                 break
             start += self.config.page_size

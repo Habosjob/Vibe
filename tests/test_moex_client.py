@@ -52,3 +52,52 @@ def test_fetch_page_retries_and_reports_error(monkeypatch):
 
     assert page == []
     assert errors == 1
+
+
+def test_fetch_all_bonds_stops_when_pagination_repeats_data(monkeypatch):
+    config = AppConfig(page_size=2, retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    response = DummyResponse(
+        {"securities": {"columns": ["SECID", "SHORTNAME"], "data": [["A", "Bond A"], ["B", "Bond B"]]}}
+    )
+    calls = {"count": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] > 2:
+            raise AssertionError("Вероятный бесконечный цикл пагинации")
+        return response
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+    bonds, errors = client.fetch_all_bonds()
+
+    assert errors == 0
+    assert calls["count"] == 2
+    assert [item["SECID"] for item in bonds] == ["A", "B"]
+
+
+def test_fetch_all_bonds_stops_when_moex_returns_all_rows_at_once(monkeypatch):
+    config = AppConfig(page_size=2, retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    response = DummyResponse(
+        {
+            "securities": {
+                "columns": ["SECID", "SHORTNAME"],
+                "data": [["A", "Bond A"], ["B", "Bond B"], ["C", "Bond C"]],
+            }
+        }
+    )
+    calls = {"count": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["count"] += 1
+        return response
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+    bonds, errors = client.fetch_all_bonds()
+
+    assert errors == 0
+    assert calls["count"] == 1
+    assert [item["SECID"] for item in bonds] == ["A", "B", "C"]
