@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -45,7 +46,8 @@ def test_save_bonds_file_as_excel(tmp_path: Path, bonds_sample: list[dict[str, o
     shortname_column = headers.index("SHORTNAME") + 1
     matdate_column = headers.index("MATDATE") + 1
     assert sheet.cell(row=3, column=shortname_column).value == "ОФЗ 26218"
-    assert sheet.cell(row=3, column=matdate_column).value == "16.05.2029"
+    assert sheet.cell(row=3, column=matdate_column).value == datetime(2029, 5, 16)
+    assert sheet.cell(row=3, column=matdate_column).number_format == "DD.MM.YYYY"
 
 
 def test_save_bonds_file_as_csv_with_bom(tmp_path: Path, bonds_sample: list[dict[str, object]]) -> None:
@@ -72,7 +74,7 @@ def test_save_bonds_excel_applies_readable_formatting(tmp_path: Path, bonds_samp
     assert sheet.auto_filter.ref == f"A2:{sheet.cell(row=2, column=sheet.max_column).column_letter}3"
     assert sheet["A1"].font.bold is True
     assert sheet.column_dimensions["B"].width >= 10
-    assert sheet["A3"].fill.fgColor.rgb == "00F2F7FF"
+    assert sheet["B3"].fill.fgColor.rgb == "00F2F7FF"
     assert sheet["A1"].alignment.wrap_text is True
     assert sheet.row_dimensions[1].height == 42
 
@@ -154,7 +156,14 @@ def test_save_bonds_excel_keeps_separator_columns_and_group_outline(tmp_path: Pa
     assert data_columns_outline
     assert headers[first_separator] == "SHORTNAME"
 
-def test_save_bonds_excel_formats_only_issue_size_columns_and_empty_zero_dates(tmp_path: Path) -> None:
+    separator_letter = sheet.cell(row=2, column=first_separator).column_letter
+    separator_fill_row_2 = sheet.cell(row=2, column=first_separator).fill.fgColor.rgb
+    separator_fill_last_row = sheet.cell(row=sheet.max_row, column=first_separator).fill.fgColor.rgb
+    assert separator_letter
+    assert separator_fill_row_2 == separator_fill_last_row
+
+
+def test_save_bonds_excel_formats_numeric_columns_and_empty_zero_dates(tmp_path: Path) -> None:
     target = tmp_path / "output" / "bonds.xlsx"
     bonds = [
         {
@@ -162,7 +171,10 @@ def test_save_bonds_excel_formats_only_issue_size_columns_and_empty_zero_dates(t
             "ISSUESIZE": 1000000000,
             "ISSUESIZEPLACED": 950000000,
             "COUPONVALUE": 62.33,
+            "BIDVALUE": 100500.556,
+            "ACCRUEDINT": 100500,
             "MATDATE": "0000-00-00",
+            "NEXTCOUPON": "2027-01-01",
         }
     ]
 
@@ -175,12 +187,19 @@ def test_save_bonds_excel_formats_only_issue_size_columns_and_empty_zero_dates(t
     issuesize_column = headers.index("ISSUESIZE") + 1
     issuesizeplaced_column = headers.index("ISSUESIZEPLACED") + 1
     coupon_column = headers.index("COUPONVALUE") + 1
+    bidvalue_column = headers.index("BIDVALUE") + 1
+    accruedint_column = headers.index("ACCRUEDINT") + 1
     matdate_column = headers.index("MATDATE") + 1
+    nextcoupon_column = headers.index("NEXTCOUPON") + 1
 
     assert sheet.cell(row=3, column=matdate_column).value in ("", None)
     assert sheet.cell(row=3, column=issuesize_column).number_format == "# ##0"
     assert sheet.cell(row=3, column=issuesizeplaced_column).number_format == "# ##0"
-    assert sheet.cell(row=3, column=coupon_column).number_format == "General"
+    assert sheet.cell(row=3, column=coupon_column).number_format == "# ##0.00"
+    assert sheet.cell(row=3, column=bidvalue_column).number_format == "# ##0.00"
+    assert sheet.cell(row=3, column=accruedint_column).number_format == "# ##0"
+    assert sheet.cell(row=3, column=nextcoupon_column).value == datetime(2027, 1, 1)
+    assert sheet.cell(row=3, column=nextcoupon_column).number_format == "DD.MM.YYYY"
 
 
 def test_save_bonds_file_with_unsupported_extension(tmp_path: Path, bonds_sample: list[dict[str, object]]) -> None:

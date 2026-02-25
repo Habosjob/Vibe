@@ -54,7 +54,6 @@ GROUP_COLORS = {
     "Прочее": "E4DFEC",
 }
 
-THOUSANDS_SEPARATOR_FIELDS = {"ISSUESIZE", "ISSUESIZEPLACED"}
 SEPARATOR_FIELD = "__GROUP_SEPARATOR__"
 SEPARATOR_COLUMN_WIDTH = 18
 
@@ -95,6 +94,28 @@ def _is_iso_date(value: str) -> bool:
         return False
 
 
+def _is_date_field(field: str) -> bool:
+    upper = field.upper()
+    return "DATE" in upper or any(token in upper for token in ["MAT", "OFFER", "BEGIN", "END", "COUPON"])
+
+
+def _coerce_excel_date(field: str, value: Any) -> Any:
+    """Возвращает значение даты в типе datetime для корректной группировки в фильтрах Excel."""
+    if isinstance(value, datetime):
+        return value
+
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+
+    if isinstance(value, str):
+        if value == "0000-00-00":
+            return ""
+        if _is_date_field(field) and _is_iso_date(value):
+            return datetime.strptime(value, "%Y-%m-%d")
+
+    return value
+
+
 def _format_value(field: str, value: Any) -> Any:
     if value is None:
         return ""
@@ -105,10 +126,20 @@ def _format_value(field: str, value: Any) -> Any:
     if isinstance(value, str):
         if value == "0000-00-00":
             return ""
-        if "DATE" in field.upper() and _is_iso_date(value):
+        if _is_date_field(field) and _is_iso_date(value):
             return datetime.strptime(value, "%Y-%m-%d").strftime("%d.%m.%Y")
 
     return value
+
+
+def _format_excel_value(field: str, value: Any) -> Any:
+    if value is None:
+        return ""
+
+    excel_date = _coerce_excel_date(field, value)
+    if excel_date == "":
+        return ""
+    return excel_date
 
 
 def _is_numeric_like(value: Any) -> bool:
@@ -120,11 +151,19 @@ def _excel_number_format(field: str, values: list[Any]) -> str | None:
     if not numeric_values:
         return None
 
-    upper = field.upper()
     has_fraction = any(abs(float(value) - int(float(value))) > 1e-9 for value in numeric_values)
+    if has_fraction:
+        return "# ##0.00"
+    return "# ##0"
 
-    if upper in THOUSANDS_SEPARATOR_FIELDS and not has_fraction:
-        return "# ##0"
+
+def _excel_date_format(field: str, values: list[Any]) -> str | None:
+    if not _is_date_field(field):
+        return None
+
+    if any(isinstance(value, datetime) for value in values):
+        return "DD.MM.YYYY"
+
     return None
 
 
@@ -202,7 +241,7 @@ def save_bonds_excel(path: str, bonds: list[dict[str, Any]]) -> None:
             if field == SEPARATOR_FIELD:
                 row_values.append("")
                 continue
-            row_values.append(_format_value(field, bond.get(field, "")))
+            row_values.append(_format_excel_value(field, bond.get(field, "")))
         sheet.append(row_values)
 
     _apply_excel_formatting(sheet)
@@ -234,10 +273,22 @@ def _apply_excel_formatting(sheet: Any) -> None:
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
+    separator_columns: set[int] = set()
+    for col_idx in range(1, max_col + 1):
+        field_name = sheet.cell(row=2, column=col_idx).value
+        if field_name in ("", None):
+            separator_columns.add(col_idx)
+
     for row_idx in range(3, max_row + 1):
         if row_idx % 2 == 1:
             for col_idx in range(1, max_col + 1):
                 sheet.cell(row=row_idx, column=col_idx).fill = ROW_FILL
+
+    for col_idx in separator_columns:
+        group_name = sheet.cell(row=1, column=col_idx).value
+        fill = PatternFill(fill_type="solid", fgColor=GROUP_COLORS.get(group_name, "D9E1F2"))
+        for row_idx in range(1, max_row + 1):
+            sheet.cell(row=row_idx, column=col_idx).fill = fill
 
     for col_idx in range(1, max_col + 1):
         column_letter = get_column_letter(col_idx)
@@ -258,6 +309,13 @@ def _apply_excel_formatting(sheet: Any) -> None:
                 value = sheet.cell(row=row_idx, column=col_idx).value
                 if _is_numeric_like(value):
                     sheet.cell(row=row_idx, column=col_idx).number_format = number_format
+
+        date_format = _excel_date_format(str(field_name), data_values)
+        if date_format:
+            for row_idx in range(3, max_row + 1):
+                value = sheet.cell(row=row_idx, column=col_idx).value
+                if isinstance(value, datetime):
+                    sheet.cell(row=row_idx, column=col_idx).number_format = date_format
 
     sheet.row_dimensions[1].height = 42
     sheet.freeze_panes = "A3"
