@@ -308,6 +308,21 @@ class MoexClient:
                 parsed_date = datetime.strptime(raw_date, "%Y-%m-%d")
             except ValueError:
                 continue
+            parsed_dates.append(parsed_date)
+
+            value_prc: float | None = None
+            if value_prc_idx is not None and len(row) > value_prc_idx:
+                raw_value_prc = row[value_prc_idx]
+                try:
+                    value_prc = float(raw_value_prc)
+                except (TypeError, ValueError):
+                    value_prc = None
+
+            if value_prc is None or value_prc < 99.999:
+                non_full_redemption_dates.append(parsed_date)
+
+        if non_full_redemption_dates:
+            return min(non_full_redemption_dates).strftime("%Y-%m-%d")
 
             value_prc: float | None = None
             if value_prc_idx is not None and len(row) > value_prc_idx:
