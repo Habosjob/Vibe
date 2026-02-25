@@ -8,6 +8,7 @@ from moex_bond_screener.dohod_enrichment import (
     DOHOD_CHECKPOINT_VERSION,
     DohodBondPayload,
     DohodEnricher,
+    _extract_ytm_date_from_html,
     _is_payload_empty,
     _should_enrich_coupon,
     _should_enrich_offer,
@@ -21,6 +22,17 @@ class _DummyResponse:
 
     def raise_for_status(self) -> None:
         return None
+
+
+class _DummyJsonResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return self._payload
 
 
 def test_parse_bond_payload_parses_prices_index_and_event() -> None:
@@ -103,6 +115,23 @@ def test_parse_bond_payload_parses_fuzzy_labels() -> None:
     assert payload.index_spread == 0.75
     assert payload.event_name == "оферта"
     assert payload.ytm_date == "2029-09-05"
+
+
+def test_parse_bond_payload_parses_russian_index_aliases() -> None:
+    html = """
+    <table>
+      <tr><th>Цена (last / bid / ask):</th><td>101,10 / 100,90</td></tr>
+      <tr><th>Привязка к индексу:</th><td>КЛЮЧЕВАЯ СТАВКА ЦБ + 1,50</td></tr>
+      <tr><th>Описание формулы изменяемого купона/номинала:</th><td>Купон = КБД ОФЗ + 0,75%</td></tr>
+      <tr><th>Событие в ближ дату:</th><td>Оферта</td></tr>
+      <tr><th>Дата к которой рассчит YTM:</th><td>05.09.2029</td></tr>
+    </table>
+    """
+
+    payload = DohodEnricher.parse_bond_payload(html)
+
+    assert payload.index_name == "CBR_RATE"
+    assert payload.index_spread == 1.5
 
 
 
@@ -314,6 +343,51 @@ def test_should_enrich_offer_without_event_name_if_not_maturity() -> None:
     assert _should_enrich_offer("", "2028-01-01", "2030-01-01", "") is True
     assert _should_enrich_offer("", "2030-01-01", "2030-01-01", "") is False
     assert _should_enrich_offer("", "2028-01-01", "2030-01-01", "погашение") is False
+    assert _should_enrich_offer("", "2020-01-01", "2030-01-01", "") is False
+
+
+def test_extract_ytm_date_from_html_ignores_unrelated_dates() -> None:
+    html = """
+    <div>Дата размещения: 09.06.2014</div>
+    <div>Дюрация: 2.3</div>
+    """
+
+    assert _extract_ytm_date_from_html(html) == ""
+
+
+def test_resolve_index_values_autoloads_cbr_key_rate(monkeypatch) -> None:
+    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 15.2, "CBR_RATE": 0.0, "Z_CURVE_RUS": 13.0})
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    monkeypatch.setattr(
+        enricher.session,
+        "get",
+        lambda *args, **kwargs: _DummyJsonResponse({"date": "2026-02-25", "value": 15.5}),
+    )
+
+    index_values = enricher._resolve_index_values({})
+
+    assert index_values["CBR_RATE"] == 15.5
+
+
+def test_resolve_index_values_accepts_comma_and_russian_aliases() -> None:
+    config = AppConfig(
+        retries=1,
+        dohod_index_values={
+            "RUONIA": "16,15",
+            "Ключевая ставка ЦБ": "15,00",
+            "КБД ОФЗ": "14,35",
+            "Z_CURVE_RUS_7Y": "13,25",
+        },
+    )
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    index_values = enricher._resolve_index_values({})
+
+    assert index_values["RUONIA"] == 16.15
+    assert index_values["CBR_RATE"] == 15.0
+    assert index_values["Z_CURVE_RUS"] == 14.35
+    assert index_values["Z_CURVE_RUS_7Y"] == 13.25
 
 
 
@@ -337,7 +411,7 @@ def test_compat_methods_for_mixed_versions_do_not_fail() -> None:
 
     assert errors == 0
     assert payload.ask_price == 100.0
-    assert enricher._resolve_secondary_identifier({"ISIN": "RU1", "SECID": "SU1"}, "RU1") == "SU1"
+    assert enricher._resolve_secondary_identifier({"ISIN": "RU1", "SECID": "SU1"}, "RU1") == ""
 
 
 def test_fetch_with_fallback_uses_secid_when_isin_payload_empty() -> None:
