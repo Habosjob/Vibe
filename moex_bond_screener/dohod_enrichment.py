@@ -208,14 +208,9 @@ class DohodEnricher:
 
     @staticmethod
     def _resolve_secondary_identifier(bond: dict[str, Any], primary_identifier: str) -> str:
-        """Возвращает fallback-идентификатор для DOHOD, если он отличается от ISIN."""
-        candidates = (
-            str(bond.get("SECID") or "").strip(),
-            str(bond.get("REGNUMBER") or "").strip(),
-        )
-        for candidate in candidates:
-            if candidate and candidate != primary_identifier:
-                return candidate
+        """Сервис ДОХОД работает только с ISIN: fallback по другим идентификаторам отключен."""
+        _ = bond
+        _ = primary_identifier
         return ""
 
     @staticmethod

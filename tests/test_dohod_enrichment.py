@@ -295,6 +295,7 @@ def test_fetch_with_fallback_uses_secid_when_isin_payload_empty() -> None:
 
 
 
+
 def test_enrich_bonds_counts_empty_parsed_payload_as_error() -> None:
     config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
