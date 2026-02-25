@@ -224,3 +224,27 @@ def test_should_enrich_offer_without_event_name_if_not_maturity() -> None:
     assert _should_enrich_offer("", "2028-01-01", "2030-01-01", "") is True
     assert _should_enrich_offer("", "2030-01-01", "2030-01-01", "") is False
     assert _should_enrich_offer("", "2028-01-01", "2030-01-01", "погашение") is False
+
+
+def test_enrich_bonds_uses_secondary_identifier_when_primary_fails() -> None:
+    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 14.0, "CBR_RATE": 16.0, "Z_CURVE_RUS": 11.0})
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    calls: list[str] = []
+
+    def fake_fetch(identifier: str):
+        calls.append(identifier)
+        if identifier == "RU000A0ZZTL5":
+            return DohodBondPayload(None, "", 0.0, None, "", ""), 1
+        return DohodBondPayload(102.4, "RUONIA", 0.2, None, "", "2029-03-10"), 0
+
+    enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
+
+    bonds = [{"SECID": "SU26228RMFS5", "ISIN": "RU000A0ZZTL5", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2030-01-01"}]
+    errors = enricher.enrich_bonds(bonds)
+
+    assert errors == 0
+    assert calls == ["RU000A0ZZTL5", "SU26228RMFS5"]
+    assert bonds[0]["RealPrice"] == 102.4
+    assert bonds[0]["COUPONPERCENT"] == 14.2
+    assert bonds[0]["OFFERDATE"] == "2029-03-10"
