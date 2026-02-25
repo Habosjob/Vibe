@@ -34,9 +34,10 @@ def test_fetch_all_bonds_pagination(monkeypatch):
         return responses.pop(0)
 
     monkeypatch.setattr(client.session, "get", fake_get)
-    bonds, errors = client.fetch_all_bonds()
+    bonds, errors, completed = client.fetch_all_bonds()
 
     assert errors == 0
+    assert completed is True
     assert [item["SECID"] for item in bonds] == ["A", "B", "C"]
 
 
@@ -48,10 +49,11 @@ def test_fetch_page_retries_and_reports_error(monkeypatch):
         raise requests.RequestException("boom")
 
     monkeypatch.setattr(client.session, "get", always_fail)
-    page, errors = client._fetch_page(0)
+    page, errors, failed = client._fetch_page(0)
 
     assert page == []
     assert errors == 1
+    assert failed is True
 
 
 def test_fetch_all_bonds_stops_when_pagination_repeats_data(monkeypatch):
@@ -70,9 +72,10 @@ def test_fetch_all_bonds_stops_when_pagination_repeats_data(monkeypatch):
         return response
 
     monkeypatch.setattr(client.session, "get", fake_get)
-    bonds, errors = client.fetch_all_bonds()
+    bonds, errors, completed = client.fetch_all_bonds()
 
     assert errors == 0
+    assert completed is True
     assert calls["count"] == 2
     assert [item["SECID"] for item in bonds] == ["A", "B"]
 
@@ -96,9 +99,10 @@ def test_fetch_all_bonds_stops_when_moex_returns_all_rows_at_once(monkeypatch):
         return response
 
     monkeypatch.setattr(client.session, "get", fake_get)
-    bonds, errors = client.fetch_all_bonds()
+    bonds, errors, completed = client.fetch_all_bonds()
 
     assert errors == 0
+    assert completed is True
     assert calls["count"] == 1
     assert [item["SECID"] for item in bonds] == ["A", "B", "C"]
 
@@ -124,9 +128,10 @@ def test_fetch_page_requests_all_columns_without_securities_columns(monkeypatch)
 
     monkeypatch.setattr(client.session, "get", fake_get)
 
-    page, errors = client._fetch_page(0)
+    page, errors, failed = client._fetch_page(0)
 
     assert errors == 0
+    assert failed is False
     assert page == [{"SECID": "A", "SHORTNAME": "Bond A", "MATDATE": "2030-01-01"}]
     assert captured["url"] == config.base_url
     assert captured["timeout"] == config.timeout_seconds
@@ -185,6 +190,48 @@ def test_enrich_amortization_start_dates_fills_earliest_date(monkeypatch):
     bonds = [{"SECID": "A"}]
 
     errors = client.enrich_amortization_start_dates(bonds)
+
+    assert errors == 0
+    assert bonds[0]["Amortization_start_date"] == "2025-06-01"
+
+
+def test_fetch_all_bonds_resumes_from_checkpoint(monkeypatch):
+    config = AppConfig(page_size=2, retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    captured: list[dict] = []
+
+    def fake_get(url, params, timeout):
+        assert params["start"] == 2
+        return DummyResponse({"securities": {"columns": ["SECID"], "data": [["C"]]}})
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    bonds, errors, completed = client.fetch_all_bonds(
+        checkpoint_data={"bonds": [{"SECID": "A"}, {"SECID": "B"}], "next_start": 2, "seen_secids": ["A", "B"]},
+        checkpoint_saver=lambda payload: captured.append(payload),
+    )
+
+    assert errors == 0
+    assert completed is True
+    assert [bond["SECID"] for bond in bonds] == ["A", "B", "C"]
+    assert captured[-1]["completed"] is True
+
+
+def test_enrich_amortization_uses_checkpoint_without_requests(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    def should_not_be_called(*args, **kwargs):
+        raise AssertionError("HTTP запрос не должен выполняться для уже обработанного SECID")
+
+    monkeypatch.setattr(client.session, "get", should_not_be_called)
+    bonds = [{"SECID": "A"}]
+
+    errors = client.enrich_amortization_start_dates(
+        bonds,
+        checkpoint_data={"processed": {"A": "2025-06-01"}, "completed": False},
+    )
 
     assert errors == 0
     assert bonds[0]["Amortization_start_date"] == "2025-06-01"
