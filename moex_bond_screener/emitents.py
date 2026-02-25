@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .moex_client import MoexClient
 from .state_store import ScreenerStateStore
@@ -21,6 +21,7 @@ def build_emitents_reference(
     eligible_bonds: list[dict[str, Any]],
     client: MoexClient,
     state_store: ScreenerStateStore,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> EmitentsBuildResult:
     """Собирает справочник эмитентов для итоговых облигаций.
 
@@ -31,31 +32,74 @@ def build_emitents_reference(
 
     registry = state_store.load_emitents_registry()
     secid_samples = _pick_emitter_samples(eligible_bonds)
+    total_samples = len(secid_samples)
     discovered_emitters: set[str] = set()
     errors = 0
     new_emitters = 0
     registry_changed = False
 
-    for secid in sorted(secid_samples):
+    if progress_callback:
+        progress_callback(
+            {
+                "phase": "sample_descriptions",
+                "processed": 0,
+                "total": total_samples,
+                "message": "Сбор описаний эмитентов по итоговым бумагам",
+            }
+        )
+
+    for index, secid in enumerate(sorted(secid_samples), start=1):
         emitter_id = secid_samples[secid]
         cached = registry.get(emitter_id) if emitter_id else None
         if emitter_id and cached and cached.get("full_name") and cached.get("inn"):
             discovered_emitters.add(emitter_id)
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "sample_descriptions",
+                        "processed": index,
+                        "total": total_samples,
+                    }
+                )
             continue
 
         details, fetch_errors = client.fetch_security_description(secid)
         errors += fetch_errors
         if fetch_errors:
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "sample_descriptions",
+                        "processed": index,
+                        "total": total_samples,
+                    }
+                )
             continue
 
         if not emitter_id:
             emitter_id = str(details.get("EMITTER_ID") or details.get("ISSUER_ID") or "").strip()
         if not emitter_id:
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "sample_descriptions",
+                        "processed": index,
+                        "total": total_samples,
+                    }
+                )
             continue
         discovered_emitters.add(emitter_id)
 
         cached = registry.get(emitter_id)
         if cached and cached.get("full_name") and cached.get("inn"):
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "sample_descriptions",
+                        "processed": index,
+                        "total": total_samples,
+                    }
+                )
             continue
 
         full_name = str(details.get("EMITTER_FULL_NAME") or "").strip()
@@ -66,6 +110,14 @@ def build_emitents_reference(
             inn = str(cached.get("inn") or "")
 
         if not full_name and not inn:
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "sample_descriptions",
+                        "processed": index,
+                        "total": total_samples,
+                    }
+                )
             continue
 
         if emitter_id not in registry:
@@ -76,10 +128,23 @@ def build_emitents_reference(
             "inn": inn,
         }
 
+        if progress_callback:
+            progress_callback(
+                {
+                    "phase": "sample_descriptions",
+                    "processed": index,
+                    "total": total_samples,
+                }
+            )
+
     if registry_changed:
         state_store.save_emitents_registry(registry)
 
+    if progress_callback:
+        progress_callback({"phase": "market_data", "message": "Загрузка рыночных инструментов bonds"})
     bonds_market, bonds_errors = client.fetch_market_securities("bonds")
+    if progress_callback:
+        progress_callback({"phase": "market_data", "message": "Загрузка рыночных инструментов shares"})
     shares_market, shares_errors = client.fetch_market_securities("shares")
     errors += bonds_errors + shares_errors
 
