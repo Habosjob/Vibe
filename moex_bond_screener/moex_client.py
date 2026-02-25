@@ -314,8 +314,9 @@ class MoexClient:
                 if not columns or not rows:
                     return {}, 0
 
-                name_idx = columns.index("name") if "name" in columns else None
-                value_idx = columns.index("value") if "value" in columns else None
+                normalized_columns = [str(column).strip().lower() for column in columns]
+                name_idx = normalized_columns.index("name") if "name" in normalized_columns else None
+                value_idx = normalized_columns.index("value") if "value" in normalized_columns else None
                 if name_idx is None or value_idx is None:
                     return {}, 0
 
