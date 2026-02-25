@@ -54,27 +54,9 @@ GROUP_COLORS = {
     "Прочее": "E4DFEC",
 }
 
-INTEGER_TOKENS = (
-    "VOLUME",
-    "ISSUE",
-    "LOTSIZE",
-    "COUNT",
-    "NUM",
-    "QTY",
-    "QUANTITY",
-    "VALUE",
-)
-
-DECIMAL_TOKENS = (
-    "PRICE",
-    "YIELD",
-    "COUPON",
-    "ACCRUED",
-    "ACCINT",
-    "DURATION",
-    "SPREAD",
-    "RATE",
-)
+THOUSANDS_SEPARATOR_FIELDS = {"ISSUESIZE", "ISSUESIZEPLACED"}
+SEPARATOR_FIELD = "__GROUP_SEPARATOR__"
+SEPARATOR_COLUMN_WIDTH = 18
 
 
 def _resolve_fields(bonds: list[dict[str, Any]]) -> list[str]:
@@ -141,11 +123,7 @@ def _excel_number_format(field: str, values: list[Any]) -> str | None:
     upper = field.upper()
     has_fraction = any(abs(float(value) - int(float(value))) > 1e-9 for value in numeric_values)
 
-    if any(token in upper for token in DECIMAL_TOKENS):
-        return "# ##0,00"
-    if any(token in upper for token in INTEGER_TOKENS) and not has_fraction:
-        return "# ##0"
-    if not has_fraction:
+    if upper in THOUSANDS_SEPARATOR_FIELDS and not has_fraction:
         return "# ##0"
     return None
 
@@ -200,6 +178,7 @@ def _build_columns(fields: list[str]) -> list[tuple[str, str]]:
         group_fields = grouped[group_name]
         if not group_fields:
             continue
+        columns.append((group_name, SEPARATOR_FIELD))
         for field in group_fields:
             columns.append((group_name, field))
 
@@ -220,6 +199,9 @@ def save_bonds_excel(path: str, bonds: list[dict[str, Any]]) -> None:
     for bond in prepared_rows:
         row_values: list[Any] = []
         for field in excel_columns:
+            if field == SEPARATOR_FIELD:
+                row_values.append("")
+                continue
             row_values.append(_format_value(field, bond.get(field, "")))
         sheet.append(row_values)
 
@@ -239,7 +221,15 @@ def _apply_excel_formatting(sheet: Any) -> None:
             cell.font = GROUP_FONT
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    for cell in sheet[header_row]:
+    for col_idx, cell in enumerate(sheet[header_row], start=1):
+        if not cell.value:
+            group_name = sheet.cell(row=1, column=col_idx).value
+            if group_name:
+                cell.fill = PatternFill(fill_type="solid", fgColor=GROUP_COLORS.get(group_name, "D9E1F2"))
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                sheet.column_dimensions[get_column_letter(col_idx)].width = SEPARATOR_COLUMN_WIDTH
+            continue
+
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -253,11 +243,14 @@ def _apply_excel_formatting(sheet: Any) -> None:
         column_letter = get_column_letter(col_idx)
         values = [sheet.cell(row=row_idx, column=col_idx).value for row_idx in range(1, max_row + 1)]
         max_len = max((len(str(value)) for value in values if value is not None), default=0)
-        sheet.column_dimensions[column_letter].width = min(max(max_len + 2, 10), 28)
+        width = min(max(max_len + 2, 10), 28)
 
         field_name = sheet.cell(row=2, column=col_idx).value
         if not field_name:
+            sheet.column_dimensions[column_letter].width = max(width, SEPARATOR_COLUMN_WIDTH)
             continue
+
+        sheet.column_dimensions[column_letter].width = width
         data_values = [sheet.cell(row=row_idx, column=col_idx).value for row_idx in range(3, max_row + 1)]
         number_format = _excel_number_format(str(field_name), data_values)
         if number_format:
@@ -278,11 +271,34 @@ def _write_grouped_headers(sheet: Any, fields: list[str]) -> list[str]:
         return []
 
     columns = _build_columns(fields)
-    sheet.append([group for group, _ in columns])
-    sheet.append([field for _, field in columns])
+    sheet.append([group if field == SEPARATOR_FIELD else "" for group, field in columns])
+    sheet.append(["" if field == SEPARATOR_FIELD else field for _, field in columns])
 
-    for index, (_, _) in enumerate(columns, start=1):
-        sheet.column_dimensions[get_column_letter(index)].outlineLevel = 1
+    current_group: str | None = None
+    group_start = 0
+    group_end = 0
+
+    for index, (group_name, field_name) in enumerate(columns, start=1):
+        column_letter = get_column_letter(index)
+        if field_name == SEPARATOR_FIELD:
+            sheet.column_dimensions[column_letter].outlineLevel = 0
+            if current_group is not None and group_start > 0:
+                for col in range(group_start, group_end + 1):
+                    letter = get_column_letter(col)
+                    sheet.column_dimensions[letter].outlineLevel = 1
+                    sheet.column_dimensions[letter].hidden = False
+            current_group = group_name
+            group_start = index + 1
+            group_end = index
+            continue
+
+        group_end = index
+
+    if current_group is not None and group_start > 0 and group_end >= group_start:
+        for col in range(group_start, group_end + 1):
+            letter = get_column_letter(col)
+            sheet.column_dimensions[letter].outlineLevel = 1
+            sheet.column_dimensions[letter].hidden = False
 
     sheet.sheet_properties.outlinePr.summaryRight = True
     return [field for _, field in columns]
