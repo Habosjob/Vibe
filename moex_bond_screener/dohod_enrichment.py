@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timezone, timedelta
 from html import unescape
+from xml.etree import ElementTree
 from typing import Any, Callable
 
 import requests
@@ -56,7 +57,6 @@ class DohodBondPayload:
     index_tenor_years: int | None
     event_name: str
     ytm_date: str
-    index_base_rate: float | None = None
 
 
 @dataclass(slots=True)
@@ -143,7 +143,7 @@ class DohodEnricher:
                     payload, request_errors = future.result()
                 except Exception as exc:  # noqa: BLE001
                     self.logger.exception("Ошибка обработки ДОХОД instrument=%s: %s", identifier, exc)
-                    payload, request_errors = DohodBondPayload(None, "", 0.0, None, "", "", None), 1
+                    payload, request_errors = DohodBondPayload(None, "", 0.0, None, "", ""), 1
 
                 if request_errors == 0 and _is_payload_empty(payload):
                     self.last_stats.parse_empty_payloads += 1
@@ -156,7 +156,6 @@ class DohodEnricher:
                         "ask_price": payload.ask_price,
                         "index_name": payload.index_name,
                         "index_spread": payload.index_spread,
-                        "index_base_rate": payload.index_base_rate,
                         "index_tenor_years": payload.index_tenor_years,
                         "event_name": payload.event_name,
                         "ytm_date": payload.ytm_date,
@@ -212,10 +211,10 @@ class DohodEnricher:
             except requests.RequestException as error:
                 self.logger.warning("Ошибка запроса ДОХОД instrument=%s попытка=%s: %s", secid, attempt, error)
                 if attempt == self.config.retries:
-                    return DohodBondPayload(None, "", 0.0, None, "", "", None), 1
+                    return DohodBondPayload(None, "", 0.0, None, "", ""), 1
                 time.sleep(float(getattr(self.config, "dohod_request_delay_seconds", 0.05)) * attempt)
 
-        return DohodBondPayload(None, "", 0.0, None, "", "", None), 1
+        return DohodBondPayload(None, "", 0.0, None, "", ""), 1
 
     def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None) -> tuple[DohodBondPayload, int]:
         payload, errors = self._fetch_and_parse(primary_identifier)
@@ -269,71 +268,72 @@ class DohodEnricher:
         if not ytm_date:
             ytm_date = _extract_ytm_date_from_html(html)
 
-        index_base_rate = _extract_index_base_rate_from_html(html, index_name)
-
-        return DohodBondPayload(ask_price, index_name, spread, tenor_years, event_name, ytm_date, index_base_rate)
+        return DohodBondPayload(ask_price, index_name, spread, tenor_years, event_name, ytm_date)
 
     def _resolve_index_values(self, checkpoint: dict[str, Any]) -> dict[str, float]:
-        configured = getattr(self.config, "dohod_index_values", None)
-        if isinstance(configured, dict):
-            normalized: dict[str, float] = {}
-            for key, value in configured.items():
-                parsed = _as_float_or_none(value)
-                if parsed is None:
-                    continue
-                normalized[_normalize_index_name(str(key))] = parsed
-            normalized.setdefault("RUONIA", 0.0)
-            normalized.setdefault("CBR_RATE", 0.0)
-            normalized.setdefault("Z_CURVE_RUS", 0.0)
-            self._inject_cbr_rate(normalized)
-            self._backfill_missing_bases(normalized)
-            return normalized
+        live_values = self._fetch_live_index_values()
         previous = checkpoint.get("index_values", {})
         normalized = {
-            "RUONIA": _as_float_or_none((previous or {}).get("RUONIA")) or 0.0,
-            "CBR_RATE": _as_float_or_none((previous or {}).get("CBR_RATE")) or 0.0,
-            "Z_CURVE_RUS": _as_float_or_none((previous or {}).get("Z_CURVE_RUS")) or 0.0,
+            "RUONIA": live_values.get("RUONIA") or _as_float_or_none((previous or {}).get("RUONIA")) or 0.0,
+            "CBR_RATE": live_values.get("CBR_RATE") or _as_float_or_none((previous or {}).get("CBR_RATE")) or 0.0,
+            "Z_CURVE_RUS": live_values.get("Z_CURVE_RUS") or _as_float_or_none((previous or {}).get("Z_CURVE_RUS")) or 0.0,
         }
-        for key, value in (previous or {}).items():
+        for key, value in {**(previous or {}), **live_values}.items():
             normalized_key = _normalize_index_name(str(key))
-            if normalized_key in {"RUONIA", "CBR_RATE", "Z_CURVE_RUS"}:
-                continue
             parsed = _as_float_or_none(value)
             if parsed is None:
                 continue
             normalized[normalized_key] = parsed
-        self._inject_cbr_rate(normalized)
-        self._backfill_missing_bases(normalized)
         return normalized
 
-    def _backfill_missing_bases(self, index_values: dict[str, float]) -> None:
-        cbr_rate = float(index_values.get("CBR_RATE") or 0.0)
-        if cbr_rate <= 0:
-            return
+    def _fetch_live_index_values(self) -> dict[str, float]:
+        index_values: dict[str, float] = {}
 
-        if float(index_values.get("RUONIA") or 0.0) <= 0:
-            index_values["RUONIA"] = cbr_rate
-            self.logger.info("RUONIA не задана: используем CBR_RATE=%.4f как временную базу", cbr_rate)
+        key_rate = self._fetch_cbr_metric(getattr(self.config, "cbr_key_rate_url", ""), metric_name="CBR_RATE")
+        if key_rate is not None:
+            index_values["CBR_RATE"] = key_rate
 
-        if float(index_values.get("Z_CURVE_RUS") or 0.0) <= 0:
-            index_values["Z_CURVE_RUS"] = cbr_rate
-            self.logger.info("Z_CURVE_RUS не задана: используем CBR_RATE=%.4f как временную базу", cbr_rate)
+        ruonia = self._fetch_cbr_metric(getattr(self.config, "cbr_ruonia_url", ""), metric_name="RUONIA")
+        if ruonia is not None:
+            index_values["RUONIA"] = ruonia
 
-    def _inject_cbr_rate(self, index_values: dict[str, float]) -> None:
-        configured = float(index_values.get("CBR_RATE") or 0.0)
-        if configured > 0:
-            return
+        z_curve_values = self._fetch_moex_z_curve_values()
+        index_values.update(z_curve_values)
+        return index_values
 
-        live_rate = self._fetch_cbr_key_rate()
-        if live_rate is None:
-            return
-        index_values["CBR_RATE"] = live_rate
-        self.logger.info("CBR_RATE обновлена автоматически по данным ЦБ: %.4f", live_rate)
-
-    def _fetch_cbr_key_rate(self) -> float | None:
-        url = str(getattr(self.config, "cbr_key_rate_url", "") or "").strip()
-        if not url:
+    def _fetch_cbr_metric(self, url: str, metric_name: str) -> float | None:
+        target_url = str(url or "").strip()
+        if not target_url:
             return None
+
+        timeout = int(getattr(self.config, "cbr_key_rate_timeout_seconds", 10) or 10)
+        try:
+            response = self.session.get(target_url, timeout=timeout)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            self.logger.warning("Не удалось получить %s из ЦБ (%s): %s", metric_name, target_url, exc)
+            return None
+
+        try:
+            payload = response.json()
+            value = _extract_numeric_value(payload)
+        except ValueError:
+            value = None
+
+        if value is None:
+            value = _extract_numeric_value(response.text)
+
+        if value is None or value <= 0 or value > 100:
+            self.logger.warning("Не удалось распарсить %s из ЦБ (%s)", metric_name, target_url)
+            return None
+
+        self.logger.info("%s обновлена по первоисточнику: %.4f", metric_name, value)
+        return value
+
+    def _fetch_moex_z_curve_values(self) -> dict[str, float]:
+        url = str(getattr(self.config, "z_curve_moex_url", "") or "").strip()
+        if not url:
+            return {}
 
         timeout = int(getattr(self.config, "cbr_key_rate_timeout_seconds", 10) or 10)
         try:
@@ -341,22 +341,21 @@ class DohodEnricher:
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, ValueError) as exc:
-            self.logger.warning("Не удалось получить актуальную ключевую ставку ЦБ (%s): %s", url, exc)
-            return None
+            self.logger.warning("Не удалось получить Z_CURVE_RUS с MOEX (%s): %s", url, exc)
+            return {}
 
-        if not isinstance(payload, dict):
-            return None
-        raw_value = payload.get("value")
-        if raw_value is None:
-            raw_value = payload.get("rate")
-        if raw_value is None:
-            raw_value = payload.get("key_rate")
+        curve_points = _extract_z_curve_points(payload)
+        if not curve_points:
+            self.logger.warning("MOEX вернул пустые данные Z_CURVE_RUS (%s)", url)
+            return {}
 
-        try:
-            value = float(str(raw_value).replace(",", ".").strip())
-        except (TypeError, ValueError):
-            return None
-        return value if value > 0 else None
+        result: dict[str, float] = {}
+        for tenor_years, rate in curve_points.items():
+            result[f"Z_CURVE_RUS_{tenor_years}Y"] = rate
+
+        result["Z_CURVE_RUS"] = result.get("Z_CURVE_RUS_1Y") or next(iter(result.values()))
+        self.logger.info("Z_CURVE_RUS обновлена по MOEX: %s точек", len(curve_points))
+        return result
 
     @staticmethod
     def _has_index_changed(current: dict[str, float], previous: dict[str, Any]) -> bool:
@@ -400,7 +399,6 @@ class DohodEnricher:
         ask_price = payload.get("ask_price")
         index_name = str(payload.get("index_name") or "")
         index_spread = float(payload.get("index_spread") or 0.0)
-        index_base_rate = _as_float_or_none(payload.get("index_base_rate"))
         index_tenor_years = payload.get("index_tenor_years")
         event_name = str(payload.get("event_name") or "")
         ytm_date = str(payload.get("ytm_date") or "")
@@ -419,9 +417,6 @@ class DohodEnricher:
             base_rate = float(index_values.get(index_name, 0.0))
             if index_name == "Z_CURVE_RUS" and index_tenor_years:
                 base_rate = float(index_values.get(f"Z_CURVE_RUS_{index_tenor_years}Y", base_rate))
-            if index_base_rate is not None and index_base_rate > 0:
-                base_rate = float(index_base_rate)
-
             if index_name and base_rate <= 0:
                 self.last_stats.coupon_skipped_no_base += 1
                 self._log_missing_base_warning(index_name, index_spread, bond)
@@ -693,6 +688,87 @@ def _extract_index_base_rate_from_html(html: str, index_name: str) -> float | No
             return value
     return None
 
+
+
+
+def _extract_numeric_value(raw: Any) -> float | None:
+    if isinstance(raw, dict):
+        for key in ("value", "rate", "key_rate", "close", "cbr_rate", "ruonia"):
+            if key in raw:
+                parsed = _as_float_or_none(raw.get(key))
+                if parsed is not None:
+                    return parsed
+        for value in raw.values():
+            parsed = _extract_numeric_value(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    if isinstance(raw, list):
+        for item in reversed(raw):
+            parsed = _extract_numeric_value(item)
+            if parsed is not None:
+                return parsed
+        return None
+
+    if isinstance(raw, (int, float)):
+        return float(raw)
+
+    text = str(raw or "").strip()
+    if not text:
+        return None
+
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError:
+        root = None
+
+    if root is not None:
+        values: list[float] = []
+        for node in root.iter():
+            parsed = _as_float_or_none(node.text)
+            if parsed is not None:
+                values.append(parsed)
+        candidates = [value for value in values if 0 < value <= 100]
+        if candidates:
+            return candidates[-1]
+
+    numbers = re.findall(NUMBER_RE, text)
+    if not numbers:
+        return None
+    filtered = [parsed for parsed in (_as_float_or_none(number) for number in numbers) if parsed is not None and 0 < parsed <= 100]
+    return filtered[-1] if filtered else None
+
+
+def _extract_z_curve_points(payload: dict[str, Any]) -> dict[int, float]:
+    if not isinstance(payload, dict):
+        return {}
+
+    securities = payload.get("securities")
+    if not isinstance(securities, dict):
+        return {}
+
+    columns = [str(column).upper() for column in securities.get("columns", [])]
+    data = securities.get("data", [])
+    if not isinstance(data, list):
+        return {}
+
+    term_index = next((idx for idx, name in enumerate(columns) if name in {"TERM", "YEAR", "YEARS", "DURATION"}), None)
+    value_index = next((idx for idx, name in enumerate(columns) if name in {"VALUE", "YIELD", "RATE", "VAL"}), None)
+    if term_index is None or value_index is None:
+        return {}
+
+    points: dict[int, float] = {}
+    for row in data:
+        if not isinstance(row, list):
+            continue
+        tenor = _as_float_or_none(row[term_index] if term_index < len(row) else None)
+        value = _as_float_or_none(row[value_index] if value_index < len(row) else None)
+        if tenor is None or value is None or value <= 0:
+            continue
+        points[int(round(tenor))] = value
+
+    return points
 
 def _parse_tenor_years(raw: str) -> int | None:
     if not raw:

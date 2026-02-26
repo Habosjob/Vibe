@@ -16,12 +16,9 @@ amortization_workers: 8
 dohod_workers: 12
 dohod_request_delay_seconds: 0.03
 cbr_key_rate_url: "https://www.cbr-xml-daily.ru/key_rate/"
+cbr_ruonia_url: "https://www.cbr.ru/hd_base/ruonia/dynamics/"
+z_curve_moex_url: "https://iss.moex.com/iss/engines/stock/zcyc/securities.json?iss.meta=off"
 cbr_key_rate_timeout_seconds: 10
-# dohod_index_values:
-#   RUONIA: 15.12
-#   CBR_RATE: 16.0
-#   Z_CURVE_RUS: 14.8
-#   Z_CURVE_RUS_7Y: 13.9
 
 storage_backend: "sqlite"
 sqlite_db_path: "screener_state.db"

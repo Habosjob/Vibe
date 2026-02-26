@@ -29,9 +29,10 @@ class AppConfig:
     amortization_workers: int = 8
     dohod_workers: int = 12
     dohod_request_delay_seconds: float = 0.03
-    dohod_index_values: dict[str, float] | None = None
     cbr_key_rate_url: str = "https://www.cbr-xml-daily.ru/key_rate/"
+    cbr_ruonia_url: str = "https://www.cbr.ru/hd_base/ruonia/dynamics/"
     cbr_key_rate_timeout_seconds: int = 10
+    z_curve_moex_url: str = "https://iss.moex.com/iss/engines/stock/zcyc/securities.json?iss.meta=off"
     storage_backend: str = "sqlite"
     sqlite_db_path: str = "screener_state.db"
 

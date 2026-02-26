@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -16,6 +17,8 @@ from moex_bond_screener.dohod_enrichment import (
 )
 
 
+
+
 class _DummyResponse:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -27,6 +30,7 @@ class _DummyResponse:
 class _DummyJsonResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self._payload = payload
+        self.text = json.dumps(payload)
 
     def raise_for_status(self) -> None:
         return None
@@ -152,22 +156,16 @@ def test_parse_bond_payload_parses_hyphenated_and_russian_alias_indexes() -> Non
 
 
 def test_resolve_index_values_normalizes_hyphenated_keys() -> None:
-    config = AppConfig(
-        retries=1,
-        dohod_index_values={
-            "z-curve-rus": "14,20",
-            "key-rate": "16,00",
-            "r-uonia": "15,40",
-        },
-    )
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {}  # type: ignore[method-assign]
 
-    index_values = enricher._resolve_index_values({})
+    checkpoint = {"index_values": {"z-curve-rus": "14,20", "key-rate": "16,00", "r-uonia": "15,40"}}
+    index_values = enricher._resolve_index_values(checkpoint)
 
     assert index_values["Z_CURVE_RUS"] == 14.2
     assert index_values["CBR_RATE"] == 16.0
     assert index_values["RUONIA"] == 15.4
-
 
 
 def test_parse_bond_payload_extracts_index_base_rate_from_text() -> None:
@@ -183,24 +181,24 @@ def test_parse_bond_payload_extracts_index_base_rate_from_text() -> None:
 
     assert payload.index_name == "RUONIA"
     assert payload.index_spread == 1.25
-    assert payload.index_base_rate == 15.4
 
 
-def test_enrich_bonds_uses_index_base_rate_from_dohod_payload_when_config_base_missing() -> None:
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 0.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 0.0})
+def test_enrich_bonds_uses_live_base_rate_when_formula_present() -> None:
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 15.4, "CBR_RATE": 16.0, "Z_CURVE_RUS": 14.0}  # type: ignore[method-assign]
 
     checkpoint = {
         "version": DOHOD_CHECKPOINT_VERSION,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "completed": True,
-        "index_values": {"RUONIA": 0.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 0.0},
+        "index_values": {"RUONIA": 15.4, "CBR_RATE": 16.0, "Z_CURVE_RUS": 14.0},
         "bonds": {
             "RU_BASE": {
                 "ask_price": 100.0,
                 "index_name": "RUONIA",
                 "index_spread": 1.25,
-                "index_base_rate": 15.4,
                 "index_tenor_years": None,
                 "event_name": "",
                 "ytm_date": "",
@@ -260,8 +258,9 @@ def test_to_iso_date_accepts_ddmmyyyy_and_iso() -> None:
     assert _to_iso_date("2030-03-11") == "2030-03-11"
 
 def test_enrich_bonds_fills_realprice_coupon_and_offerdate() -> None:
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 13.5, "CBR_RATE": 16.0, "Z_CURVE_RUS": 11.0, "Z_CURVE_RUS_7Y": 12.3})
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 13.5, "CBR_RATE": 16.0, "Z_CURVE_RUS": 11.0, "Z_CURVE_RUS_7Y": 12.3}  # type: ignore[method-assign]
 
     def fake_fetch(identifier: str):
         assert identifier == "RU000A0ZZTL5"
@@ -283,8 +282,9 @@ def test_enrich_bonds_fills_realprice_coupon_and_offerdate() -> None:
 
 
 def test_enrich_bonds_overrides_zero_coupon_and_updates_offer_without_event() -> None:
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 15.2, "CBR_RATE": 16.0, "Z_CURVE_RUS": 11.0})
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 15.2, "CBR_RATE": 16.0, "Z_CURVE_RUS": 11.0}  # type: ignore[method-assign]
 
     def fake_fetch(identifier: str):
         assert identifier == "RU000A0ZZTL5"
@@ -314,8 +314,9 @@ def test_enrich_bonds_overrides_zero_coupon_and_updates_offer_without_event() ->
 
 
 def test_enrich_bonds_uses_fresh_checkpoint_without_requests() -> None:
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0})
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0}  # type: ignore[method-assign]
 
     called = {"count": 0}
 
@@ -351,8 +352,9 @@ def test_enrich_bonds_uses_fresh_checkpoint_without_requests() -> None:
 
 
 def test_enrich_bonds_refetches_when_cached_payload_is_empty() -> None:
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0})
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0}  # type: ignore[method-assign]
 
     called = {"count": 0}
 
@@ -392,8 +394,9 @@ def test_enrich_bonds_refetches_when_cached_payload_is_empty() -> None:
 
 
 def test_enrich_bonds_recalculates_legacy_spread_only_coupon_from_cache() -> None:
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 16.0, "CBR_RATE": 15.5, "Z_CURVE_RUS": 14.0})
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 16.0, "CBR_RATE": 15.5, "Z_CURVE_RUS": 14.0}  # type: ignore[method-assign]
 
     checkpoint = {
         "version": DOHOD_CHECKPOINT_VERSION,
@@ -428,8 +431,9 @@ def test_enrich_bonds_recalculates_legacy_spread_only_coupon_from_cache() -> Non
 
 
 def test_enrich_bonds_skips_coupon_enrichment_when_index_base_missing() -> None:
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0})
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0}  # type: ignore[method-assign]
 
     checkpoint = {
         "version": DOHOD_CHECKPOINT_VERSION,
@@ -459,8 +463,9 @@ def test_enrich_bonds_skips_coupon_enrichment_when_index_base_missing() -> None:
 
 def test_enrich_bonds_aggregates_repeated_missing_base_warnings(caplog) -> None:
     caplog.set_level(logging.WARNING)
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0})
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0}  # type: ignore[method-assign]
 
     checkpoint = {
         "version": DOHOD_CHECKPOINT_VERSION,
@@ -552,8 +557,8 @@ def test_extract_ytm_date_from_html_ignores_unrelated_dates() -> None:
     assert _extract_ytm_date_from_html(html) == ""
 
 
-def test_resolve_index_values_autoloads_cbr_key_rate(monkeypatch) -> None:
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 15.2, "CBR_RATE": 0.0, "Z_CURVE_RUS": 13.0})
+def test_fetch_cbr_metric_parses_json_value(monkeypatch) -> None:
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
 
     monkeypatch.setattr(
@@ -562,26 +567,19 @@ def test_resolve_index_values_autoloads_cbr_key_rate(monkeypatch) -> None:
         lambda *args, **kwargs: _DummyJsonResponse({"date": "2026-02-25", "value": 15.5}),
     )
 
-    index_values = enricher._resolve_index_values({})
+    value = enricher._fetch_cbr_metric("https://cbr.example/key-rate", metric_name="CBR_RATE")
 
-    assert index_values["CBR_RATE"] == 15.5
-    assert index_values["RUONIA"] == 15.2
-    assert index_values["Z_CURVE_RUS"] == 13.0
+    assert value == 15.5
 
 
 def test_resolve_index_values_accepts_comma_and_russian_aliases() -> None:
-    config = AppConfig(
-        retries=1,
-        dohod_index_values={
-            "RUONIA": "16,15",
-            "Ключевая ставка ЦБ": "15,00",
-            "КБД ОФЗ": "14,35",
-            "Z_CURVE_RUS_7Y": "13,25",
-        },
-    )
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {}  # type: ignore[method-assign]
 
-    index_values = enricher._resolve_index_values({})
+    index_values = enricher._resolve_index_values(
+        {"index_values": {"RUONIA": "16,15", "Ключевая ставка ЦБ": "15,00", "КБД ОФЗ": "14,35", "Z_CURVE_RUS_7Y": "13,25"}}
+    )
 
     assert index_values["RUONIA"] == 16.15
     assert index_values["CBR_RATE"] == 15.0
@@ -589,15 +587,29 @@ def test_resolve_index_values_accepts_comma_and_russian_aliases() -> None:
     assert index_values["Z_CURVE_RUS_7Y"] == 13.25
 
 
-def test_enrich_bonds_uses_cbr_fallback_base_for_ruonia_and_zcurve(monkeypatch) -> None:
-    config = AppConfig(retries=1, dohod_index_values={"RUONIA": 0.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 0.0})
+def test_fetch_moex_z_curve_values_builds_tenor_map(monkeypatch) -> None:
+    config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
 
-    monkeypatch.setattr(
-        enricher.session,
-        "get",
-        lambda *args, **kwargs: _DummyJsonResponse({"value": 16.2}),
-    )
+    payload = {
+        "securities": {
+            "columns": ["term", "value"],
+            "data": [[1, 13.1], [7, 12.4]],
+        }
+    }
+    monkeypatch.setattr(enricher.session, "get", lambda *args, **kwargs: _DummyJsonResponse(payload))
+
+    values = enricher._fetch_moex_z_curve_values()
+
+    assert values["Z_CURVE_RUS_1Y"] == 13.1
+    assert values["Z_CURVE_RUS_7Y"] == 12.4
+    assert values["Z_CURVE_RUS"] == 13.1
+
+
+def test_enrich_bonds_uses_live_ruonia_base_for_coupon() -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 16.2, "CBR_RATE": 16.2, "Z_CURVE_RUS": 14.0}  # type: ignore[method-assign]
 
     def fake_fetch(identifier: str):
         assert identifier == "RU1"
