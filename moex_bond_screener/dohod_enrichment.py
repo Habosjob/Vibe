@@ -61,6 +61,8 @@ class DohodBondPayload:
     real_price: float | None = None
     coupon_type: str = ""
     lesenka: str = ""
+    formula_source: str = ""
+    offer_source: str = ""
 
 
 @dataclass(slots=True)
@@ -79,6 +81,8 @@ class DohodEnrichmentStats:
     corpbonds_realprice_added: int = 0
     corpbonds_coupontype_added: int = 0
     corpbonds_lesenka_added: int = 0
+    corpbonds_offerdate_added: int = 0
+    corpbonds_coupon_formula_applied: int = 0
 
 
 class DohodEnricher:
@@ -174,6 +178,8 @@ class DohodEnricher:
                         "ytm_date": payload.ytm_date,
                         "coupon_type": payload.coupon_type,
                         "lesenka": payload.lesenka,
+                        "formula_source": payload.formula_source,
+                        "offer_source": payload.offer_source,
                     }
                     processed[identifier] = serialized
                     self._apply_cached(identifier_to_bonds[identifier], serialized, index_values)
@@ -238,9 +244,11 @@ class DohodEnricher:
                     payload.index_name = corpbonds_payload.index_name
                     payload.index_spread = corpbonds_payload.index_spread
                     payload.index_tenor_years = corpbonds_payload.index_tenor_years
+                    payload.formula_source = "corpbonds"
                 if corpbonds_payload.ytm_date:
                     payload.ytm_date = corpbonds_payload.ytm_date
                     payload.event_name = "оферта"
+                    payload.offer_source = "corpbonds"
                 return payload, 0
             except requests.RequestException as error:
                 self.logger.warning("Ошибка запроса ДОХОД instrument=%s попытка=%s: %s", isin, attempt, error)
@@ -336,7 +344,7 @@ class DohodEnricher:
             ytm_date = _to_iso_date(offer_date_raw)
             event_name = "оферта"
 
-        return DohodBondPayload(ask_price=ask_price, index_name=index_name, index_spread=spread, index_tenor_years=tenor_years, event_name=event_name, ytm_date=ytm_date, real_price=real_price, coupon_type=coupon_type, lesenka=lesenka)
+        return DohodBondPayload(ask_price=ask_price, index_name=index_name, index_spread=spread, index_tenor_years=tenor_years, event_name=event_name, ytm_date=ytm_date, real_price=real_price, coupon_type=coupon_type, lesenka=lesenka, formula_source="corpbonds" if formula_value else "", offer_source="corpbonds" if offer_date_raw and ytm_date else "")
 
     @staticmethod
     def parse_corpbonds_payload(html: str) -> DohodBondPayload:
@@ -353,7 +361,7 @@ class DohodEnricher:
         if offer_date_raw and offer_date_raw.strip().lower() not in {"нет", "нет данных", "no", "n/a"}:
             ytm_date = _to_iso_date(offer_date_raw)
             event_name = "оферта"
-        return DohodBondPayload(index_name=index_name, index_spread=spread, index_tenor_years=tenor_years, event_name=event_name, ytm_date=ytm_date, real_price=real_price, coupon_type=coupon_type, lesenka=lesenka)
+        return DohodBondPayload(index_name=index_name, index_spread=spread, index_tenor_years=tenor_years, event_name=event_name, ytm_date=ytm_date, real_price=real_price, coupon_type=coupon_type, lesenka=lesenka, formula_source="corpbonds" if formula_value else "", offer_source="corpbonds" if ytm_date else "")
 
     def _resolve_index_values(self, checkpoint: dict[str, Any]) -> dict[str, float]:
         live_values = self._fetch_live_index_values()
@@ -517,6 +525,8 @@ class DohodEnricher:
         ytm_date = str(payload.get("ytm_date") or "")
         coupon_type = str(payload.get("coupon_type") or "").strip()
         lesenka = str(payload.get("lesenka") or "").strip()
+        formula_source = str(payload.get("formula_source") or "").strip()
+        offer_source = str(payload.get("offer_source") or "").strip()
 
         for bond in bonds:
             if isinstance(real_price, (int, float)) and float(real_price) > 0:
@@ -565,6 +575,8 @@ class DohodEnricher:
                     self.last_stats.coupon_updated += 1
                 bond["COUPONPERCENT"] = new_coupon
                 bond["_COUPONPERCENT_APPROX"] = True
+                if formula_source == "corpbonds":
+                    self.last_stats.corpbonds_coupon_formula_applied += 1
 
             offer_date = str(bond.get("OFFERDATE") or "")
             mat_date = str(bond.get("MATDATE") or "")
@@ -575,6 +587,8 @@ class DohodEnricher:
                     else:
                         self.last_stats.offer_added += 1
                     bond["OFFERDATE"] = ytm_date
+                    if offer_source == "corpbonds":
+                        self.last_stats.corpbonds_offerdate_added += 1
 
     def _get_with_rate_limit(self, url: str, timeout: int, delay_seconds: float) -> requests.Response:
         sleep_for = 0.0
@@ -817,7 +831,7 @@ def _canonicalize_corpbonds_label(raw_label: str) -> str:
         return "Купон лесенкой"
     if "формула купона" in label:
         return "Формула купона"
-    if "дата ближайшей оферты" in label:
+    if "дата ближайшей оферты" in label or "дата оферты" in label or "ближайшая оферта" in label:
         return "Дата ближайшей оферты"
     return raw_label.strip()
 

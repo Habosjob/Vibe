@@ -31,6 +31,7 @@ def build_emitents_reference(
     state_store: ScreenerStateStore,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     forced_blacklist_emitters: set[str] | None = None,
+    manual_overrides: dict[str, dict[str, str]] | None = None,
 ) -> EmitentsBuildResult:
     """Собирает справочник эмитентов для итоговых облигаций.
 
@@ -40,6 +41,18 @@ def build_emitents_reference(
     """
 
     registry = state_store.load_emitents_registry()
+    for emitter_id, override in (manual_overrides or {}).items():
+        details = registry.get(emitter_id, {})
+        scorerate = str((override or {}).get("scorerate") or "").strip()
+        datescore = str((override or {}).get("datescore") or "").strip()
+        if scorerate not in SCORE_VALUES:
+            scorerate = str(details.get("scorerate") or "").strip()
+        registry[emitter_id] = {
+            "full_name": str(details.get("full_name") or "").strip(),
+            "inn": str(details.get("inn") or "").strip(),
+            "scorerate": scorerate,
+            "datescore": datescore or str(details.get("datescore") or "").strip(),
+        }
     secid_to_emitter = state_store.load_secid_to_emitter_map()
     secid_samples = _pick_emitter_samples(eligible_bonds, secid_to_emitter)
     total_descriptions = len(secid_samples.unknown_emitters)

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 
-from moex_bond_screener.writer import save_bonds_file, save_emitents_excel
+from moex_bond_screener.writer import load_emitents_manual_overrides, save_bonds_file, save_emitents_excel
 
 
 @pytest.fixture
@@ -469,3 +469,28 @@ def test_save_bonds_excel_keeps_mandatory_corpbonds_and_default_columns(tmp_path
     assert "RealPrice" in headers
     assert "CouponType" in headers
     assert "Lesenka" in headers
+
+
+def test_load_emitents_manual_overrides_reads_scorerate_and_datescore(tmp_path: Path) -> None:
+    target = tmp_path / "emitents.xlsx"
+    save_emitents_excel(
+        str(target),
+        [
+            {
+                "Полное наименование": "ПАО Тест",
+                "ИНН": "7701000000",
+                "Scorerate": "Redlist",
+                "DateScore": "2026-02-26",
+                "Тикеры акций": "",
+                "ISIN облигаций": "",
+                "EMITTER_ID": "111",
+                "missing_full_name": "0",
+                "missing_inn": "0",
+                "Флаг качества": "ok",
+            }
+        ],
+    )
+
+    overrides = load_emitents_manual_overrides(str(target))
+
+    assert overrides == {"111": {"scorerate": "Redlist", "datescore": "2026-02-26"}}
