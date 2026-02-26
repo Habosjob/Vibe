@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime
 from time import perf_counter
 from typing import Any, Callable
 
 from .moex_client import MoexClient
 from .state_store import ScreenerStateStore
 
+
+
+SCORE_VALUES = {"", "Blacklist", "Redlist", "Yellowlist", "Greenlist"}
 
 @dataclass(slots=True)
 class EmitentsBuildResult:
@@ -18,6 +22,7 @@ class EmitentsBuildResult:
     processed_emitters: int
     new_emitters: int
     stage_durations: dict[str, float]
+    scorerate_by_emitter: dict[str, str]
 
 
 def build_emitents_reference(
@@ -25,6 +30,7 @@ def build_emitents_reference(
     client: MoexClient,
     state_store: ScreenerStateStore,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    forced_blacklist_emitters: set[str] | None = None,
 ) -> EmitentsBuildResult:
     """Собирает справочник эмитентов для итоговых облигаций.
 
@@ -167,6 +173,8 @@ def build_emitents_reference(
                 registry[emitter_id] = {
                     "full_name": full_name,
                     "inn": inn,
+                    "scorerate": str(cached.get("scorerate") or ""),
+                    "datescore": str(cached.get("datescore") or ""),
                 }
                 discovered_emitters.add(emitter_id)
 
@@ -290,6 +298,8 @@ def build_emitents_reference(
                 registry[emitter_id] = {
                     "full_name": full_name,
                     "inn": inn,
+                    "scorerate": str(cached.get("scorerate") or ""),
+                    "datescore": str(cached.get("datescore") or ""),
                 }
 
         state_store.save_emitents_registry(registry)
@@ -305,10 +315,34 @@ def build_emitents_reference(
     discovered_emitters.update(_infer_emitters_from_market(eligible_bonds, bonds_market, shares_market, secid_to_emitter))
 
     rows: list[dict[str, str]] = []
+    scorerate_by_emitter: dict[str, str] = {}
+    today = datetime.now().date().isoformat()
+    forced_blacklist_emitters = forced_blacklist_emitters or set()
+
     for emitter_id in sorted(discovered_emitters):
         details = registry.get(emitter_id, {})
         full_name = str(details.get("full_name") or "").strip()
         inn = str(details.get("inn") or "").strip()
+        previous_score = str(details.get("scorerate") or "").strip()
+        if previous_score not in SCORE_VALUES:
+            previous_score = ""
+
+        scorerate = previous_score
+        if emitter_id in forced_blacklist_emitters:
+            scorerate = "Blacklist"
+
+        datescore = str(details.get("datescore") or "").strip()
+        if scorerate != previous_score:
+            datescore = today
+
+        registry[emitter_id] = {
+            "full_name": full_name,
+            "inn": inn,
+            "scorerate": scorerate,
+            "datescore": datescore,
+        }
+        scorerate_by_emitter[emitter_id] = scorerate
+
         missing_full_name = "1" if not full_name else "0"
         missing_inn = "1" if not inn else "0"
         quality_flag = "ok" if missing_full_name == "0" and missing_inn == "0" else "warning"
@@ -316,8 +350,11 @@ def build_emitents_reference(
             {
                 "Полное наименование": full_name,
                 "ИНН": inn,
+                "Scorerate": scorerate,
+                "DateScore": datescore,
                 "Тикеры акций": ", ".join(share_map.get(emitter_id, [])),
                 "ISIN облигаций": ", ".join(bond_map.get(emitter_id, [])),
+                "EMITTER_ID": emitter_id,
                 "missing_full_name": missing_full_name,
                 "missing_inn": missing_inn,
                 "Флаг качества": quality_flag,
@@ -325,12 +362,14 @@ def build_emitents_reference(
         )
 
     rows.sort(key=lambda item: (item["Полное наименование"], item["ИНН"]))
+    state_store.save_emitents_registry(registry)
     return EmitentsBuildResult(
         rows=rows,
         errors=errors,
         processed_emitters=len(discovered_emitters),
         new_emitters=new_emitters,
         stage_durations=stage_durations,
+        scorerate_by_emitter=scorerate_by_emitter,
     )
 
 

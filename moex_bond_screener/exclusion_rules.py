@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 DATE_RULES: list[tuple[str, str]] = [
@@ -16,6 +16,8 @@ PERMANENT_EXCLUDE_UNTIL = "permanent"
 AMORTIZATION_RULE_NAME = "amortization_started_or_lt_1y_permanent"
 STRUCTURAL_BOND_RULE_NAME = "structural_bond_permanent"
 STRUCTURAL_BOND_TYPE = "Структурная облигация"
+HASDEFAULT_RULE_NAME = "hasdefault_permanent"
+QUALIFIED_ONLY_RULE_NAME = "qualified_investors_temp"
 
 
 @dataclass(slots=True)
@@ -31,8 +33,9 @@ class ExclusionResult:
 class BondExclusionFilter:
     """Применяет правила исключения по датам и хранит причины для отчета."""
 
-    def __init__(self, days_threshold: int) -> None:
+    def __init__(self, days_threshold: int, qualified_investor_days: int = 30) -> None:
         self.days_threshold = days_threshold
+        self.qualified_investor_days = max(1, int(qualified_investor_days))
 
     def apply(
         self,
@@ -46,6 +49,8 @@ class BondExclusionFilter:
         excluded_by_rule = {rule_name: 0 for _, rule_name in DATE_RULES}
         excluded_by_rule[AMORTIZATION_RULE_NAME] = 0
         excluded_by_rule[STRUCTURAL_BOND_RULE_NAME] = 0
+        excluded_by_rule[HASDEFAULT_RULE_NAME] = 0
+        excluded_by_rule[QUALIFIED_ONLY_RULE_NAME] = 0
         restored_after_expiration = 0
         skipped_by_active_exclusion = 0
         skipped_by_active_rule: dict[str, int] = {}
@@ -90,6 +95,25 @@ class BondExclusionFilter:
                     "exclude_until": PERMANENT_EXCLUDE_UNTIL,
                 }
                 excluded_by_rule[STRUCTURAL_BOND_RULE_NAME] += 1
+                continue
+
+            has_default = str(bond.get("HASDEFAULT") or "").strip()
+            if has_default == "1":
+                active_exclusions[secid] = {
+                    "rule": HASDEFAULT_RULE_NAME,
+                    "exclude_until": PERMANENT_EXCLUDE_UNTIL,
+                }
+                excluded_by_rule[HASDEFAULT_RULE_NAME] += 1
+                continue
+
+            is_qualified = str(bond.get("ISQUALIFIEDINVESTORS") or "").strip()
+            if is_qualified == "1":
+                exclude_until = current_day + timedelta(days=self.qualified_investor_days)
+                active_exclusions[secid] = {
+                    "rule": QUALIFIED_ONLY_RULE_NAME,
+                    "exclude_until": exclude_until.isoformat(),
+                }
+                excluded_by_rule[QUALIFIED_ONLY_RULE_NAME] += 1
                 continue
 
             matched = False

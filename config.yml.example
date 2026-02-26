@@ -12,6 +12,7 @@ raw_max_size_mb: 50
 
 exclusions_state_dir: "state"
 exclusion_window_days: 365
+qualified_investor_exclusion_days: 30
 amortization_workers: 8
 dohod_workers: 12
 dohod_request_delay_seconds: 0.03
@@ -24,3 +25,4 @@ cbr_key_rate_timeout_seconds: 10
 
 storage_backend: "sqlite"
 sqlite_db_path: "screener_state.db"
+force_cache_refresh: false

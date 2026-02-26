@@ -168,8 +168,16 @@ class ScreenerStateStore:
     def load_emitents_registry(self) -> dict[str, dict[str, str]]:
         if self.storage_backend == "sqlite":
             with sqlite3.connect(self.db_path) as conn:
-                rows = conn.execute("SELECT emitter_id, full_name, inn FROM emitents_registry").fetchall()
-            return {str(eid): {"full_name": str(name or ""), "inn": str(inn or "")} for eid, name, inn in rows}
+                rows = conn.execute("SELECT emitter_id, full_name, inn, scorerate, datescore FROM emitents_registry").fetchall()
+            result: dict[str, dict[str, str]] = {}
+            for eid, name, inn, scorerate, datescore in rows:
+                payload = {"full_name": str(name or ""), "inn": str(inn or "")}
+                if str(scorerate or "").strip():
+                    payload["scorerate"] = str(scorerate or "")
+                if str(datescore or "").strip():
+                    payload["datescore"] = str(datescore or "")
+                result[str(eid)] = payload
+            return result
 
         payload = self._load_json(self.emitents_registry_path)
         emitents = payload.get("emitents", {}) if isinstance(payload, dict) else {}
@@ -180,10 +188,15 @@ class ScreenerStateStore:
         for emitter_id, details in emitents.items():
             if not isinstance(details, dict):
                 continue
-            normalized[str(emitter_id)] = {
+            payload = {
                 "full_name": str(details.get("full_name") or ""),
                 "inn": str(details.get("inn") or ""),
             }
+            if str(details.get("scorerate") or "").strip():
+                payload["scorerate"] = str(details.get("scorerate") or "")
+            if str(details.get("datescore") or "").strip():
+                payload["datescore"] = str(details.get("datescore") or "")
+            normalized[str(emitter_id)] = payload
         return normalized
 
     def save_emitents_registry(self, emitents: dict[str, dict[str, str]]) -> None:
@@ -191,9 +204,15 @@ class ScreenerStateStore:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM emitents_registry")
                 conn.executemany(
-                    "INSERT INTO emitents_registry(emitter_id, full_name, inn) VALUES (?, ?, ?)",
+                    "INSERT INTO emitents_registry(emitter_id, full_name, inn, scorerate, datescore) VALUES (?, ?, ?, ?, ?)",
                     [
-                        (str(emitter_id), str(details.get("full_name") or ""), str(details.get("inn") or ""))
+                        (
+                            str(emitter_id),
+                            str(details.get("full_name") or ""),
+                            str(details.get("inn") or ""),
+                            str(details.get("scorerate") or ""),
+                            str(details.get("datescore") or ""),
+                        )
                         for emitter_id, details in emitents.items()
                     ],
                 )
@@ -409,7 +428,7 @@ class ScreenerStateStore:
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS emitents_registry(" 
-                "emitter_id TEXT PRIMARY KEY, full_name TEXT NOT NULL, inn TEXT NOT NULL)"
+                "emitter_id TEXT PRIMARY KEY, full_name TEXT NOT NULL, inn TEXT NOT NULL, scorerate TEXT NOT NULL DEFAULT '', datescore TEXT NOT NULL DEFAULT '')"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS secid_to_emitter(" 
@@ -422,6 +441,11 @@ class ScreenerStateStore:
                 "bonds_processed INTEGER NOT NULL, bonds_filtered INTEGER NOT NULL, errors_count INTEGER NOT NULL, "
                 "backend TEXT NOT NULL, notes TEXT NOT NULL)"
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(emitents_registry)").fetchall()}
+            if "scorerate" not in columns:
+                conn.execute("ALTER TABLE emitents_registry ADD COLUMN scorerate TEXT NOT NULL DEFAULT ")
+            if "datescore" not in columns:
+                conn.execute("ALTER TABLE emitents_registry ADD COLUMN datescore TEXT NOT NULL DEFAULT ")
             conn.commit()
 
     def _checkpoint_path(self, name: str) -> Path:
