@@ -515,3 +515,37 @@ def test_load_emitents_manual_overrides_reads_scorerate_and_datescore(tmp_path: 
     overrides = load_emitents_manual_overrides(str(target))
 
     assert overrides == {"111": {"scorerate": "Redlist", "datescore": "2026-02-26"}}
+
+
+def test_load_emitents_manual_overrides_normalizes_emitter_id_float_suffix(tmp_path: Path) -> None:
+    target = tmp_path / "emitents.xlsx"
+    save_emitents_excel(
+        str(target),
+        [
+            {
+                "Полное наименование": "Эмитент",
+                "ИНН": "7701000000",
+                "Scorerate": "Redlist",
+                "DateScore": "",
+                "Тикеры акций": "",
+                "ISIN облигаций": "",
+                "EMITTER_ID": "111",
+                "missing_full_name": "0",
+                "missing_inn": "0",
+                "Флаг качества": "ok",
+            }
+        ],
+    )
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(target)
+    ws = wb["EMITENTS"]
+    ws["G2"] = 111.0
+    wb.save(target)
+    wb.close()
+
+    overrides = load_emitents_manual_overrides(str(target))
+
+    assert "111" in overrides
+    assert "111.0" not in overrides

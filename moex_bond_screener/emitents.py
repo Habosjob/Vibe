@@ -40,7 +40,7 @@ def build_emitents_reference(
     пересчитываются на каждом запуске.
     """
 
-    registry = state_store.load_emitents_registry()
+    registry = _normalize_emitents_registry(state_store.load_emitents_registry())
     registry_before_overrides = {
         emitter_id: {
             "scorerate": str((details or {}).get("scorerate") or "").strip(),
@@ -48,7 +48,10 @@ def build_emitents_reference(
         }
         for emitter_id, details in registry.items()
     }
-    for emitter_id, override in (manual_overrides or {}).items():
+    for raw_emitter_id, override in (manual_overrides or {}).items():
+        emitter_id = _normalize_emitter_id(raw_emitter_id)
+        if not emitter_id:
+            continue
         details = registry.get(emitter_id, {})
         scorerate = str((override or {}).get("scorerate") or "").strip()
         datescore = str((override or {}).get("datescore") or "").strip()
@@ -397,6 +400,23 @@ def build_emitents_reference(
         stage_durations=stage_durations,
         scorerate_by_emitter=scorerate_by_emitter,
     )
+
+
+def _normalize_emitents_registry(emitents: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    normalized: dict[str, dict[str, str]] = {}
+    for raw_emitter_id, details in emitents.items():
+        emitter_id = _normalize_emitter_id(raw_emitter_id)
+        if not emitter_id:
+            continue
+        payload = details if isinstance(details, dict) else {}
+        existing = normalized.get(emitter_id, {})
+        normalized[emitter_id] = {
+            "full_name": str(payload.get("full_name") or existing.get("full_name") or "").strip(),
+            "inn": str(payload.get("inn") or existing.get("inn") or "").strip(),
+            "scorerate": str(payload.get("scorerate") or existing.get("scorerate") or "").strip(),
+            "datescore": str(payload.get("datescore") or existing.get("datescore") or "").strip(),
+        }
+    return normalized
 
 
 @dataclass(slots=True)
