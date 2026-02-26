@@ -766,3 +766,50 @@ def test_enrich_bonds_counts_empty_parsed_payload_as_error() -> None:
     assert errors == 1
     assert enricher.last_stats.parse_empty_payloads == 1
     assert "RealPrice" not in bonds[0]
+
+
+
+def test_enrich_bonds_batches_checkpoint_saves_for_initial_run() -> None:
+    config = AppConfig(retries=1, dohod_checkpoint_save_every=2)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 14.0, "CBR_RATE": 16.0, "Z_CURVE_RUS": 12.0}  # type: ignore[method-assign]
+
+    def fake_fetch(identifier: str):
+        return DohodBondPayload(100.0, "", 0.0, None, "", ""), 0
+
+    enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
+
+    bonds = [
+        {"ISIN": "RU1", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2030-01-01"},
+        {"ISIN": "RU2", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2030-01-01"},
+        {"ISIN": "RU3", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2030-01-01"},
+    ]
+    checkpoints: list[dict[str, object]] = []
+
+    errors = enricher.enrich_bonds(bonds, checkpoint_saver=lambda payload: checkpoints.append(payload))
+
+    assert errors == 0
+    assert len(checkpoints) == 2
+    assert checkpoints[0]["completed"] is False
+    assert checkpoints[-1]["completed"] is True
+
+
+def test_enrich_bonds_saves_final_checkpoint_even_with_large_interval() -> None:
+    config = AppConfig(retries=1, dohod_checkpoint_save_every=50)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 14.0, "CBR_RATE": 16.0, "Z_CURVE_RUS": 12.0}  # type: ignore[method-assign]
+
+    def fake_fetch(identifier: str):
+        assert identifier == "RU1"
+        return DohodBondPayload(100.0, "", 0.0, None, "", ""), 0
+
+    enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
+
+    checkpoints: list[dict[str, object]] = []
+    bonds = [{"ISIN": "RU1", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2030-01-01"}]
+
+    errors = enricher.enrich_bonds(bonds, checkpoint_saver=lambda payload: checkpoints.append(payload))
+
+    assert errors == 0
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["completed"] is True
