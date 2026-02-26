@@ -75,7 +75,8 @@
 - `dohod_request_delay_seconds`: минимальная пауза между HTTP-запросами к ДОХОД.
 - `cbr_key_rate_url`: URL первоисточника ключевой ставки ЦБ (`CBR_RATE`).
 - `cbr_ruonia_url`: URL первоисточника RUONIA на стороне ЦБ.
-- `z_curve_moex_url`: URL первоисточника кривой `Z_CURVE_RUS` на MOEX.
+- `z_curve_cbr_url`: URL первоисточника кривой `Z_CURVE_RUS` на стороне ЦБ (основной источник).
+- `z_curve_moex_url`: резервный URL кривой `Z_CURVE_RUS` на MOEX (используется как fallback).
 - `cbr_key_rate_timeout_seconds`: таймаут запросов к первоисточникам индексов.
 - `COUPONPERCENT` считается только по формуле из ДОХОД (`индекс + spread`). Базовые значения индексов берутся из первоисточников (ЦБ и MOEX), а при их недоступности — из checkpoint предыдущего успешного запуска.
 - При пустом payload ДОХОД (карточка загружена, но поля не извлечены) HTML ответа автоматически сохраняется в `raw/dohod_empty_<ISIN>.html` для диагностики, даже если `raw_dump_enabled=false`.

@@ -572,6 +572,40 @@ def test_fetch_cbr_metric_parses_json_value(monkeypatch) -> None:
     assert value == 15.5
 
 
+def test_fetch_cbr_metric_parses_keyrate_html_table(monkeypatch) -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    html = """
+    <table class="data">
+      <tr><th>Дата</th><th>Ставка</th></tr>
+      <tr><td>26.02.2026</td><td>15,50</td></tr>
+      <tr><td>25.02.2026</td><td>15,25</td></tr>
+    </table>
+    """
+
+    monkeypatch.setattr(enricher.session, "get", lambda *args, **kwargs: _DummyResponse(html))
+
+    value = enricher._fetch_cbr_metric("https://cbr.example/KeyRate", metric_name="CBR_RATE")
+
+    assert value == 15.5
+
+
+def test_fetch_cbr_metric_parses_ruonia_latest_column(monkeypatch) -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    html = """
+    <table class="data without_header">
+      <tr><td>Дата ставки</td><td>20.02.2026</td><td>24.02.2026</td></tr>
+      <tr><td>Ставка RUONIA, % годовых</td><td>15,30</td><td>15,31</td></tr>
+    </table>
+    """
+    monkeypatch.setattr(enricher.session, "get", lambda *args, **kwargs: _DummyResponse(html))
+
+    value = enricher._fetch_cbr_metric("https://cbr.example/ruonia", metric_name="RUONIA")
+
+    assert value == 15.31
+
+
 def test_resolve_index_values_accepts_comma_and_russian_aliases() -> None:
     config = AppConfig(retries=1)
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
@@ -604,6 +638,48 @@ def test_fetch_moex_z_curve_values_builds_tenor_map(monkeypatch) -> None:
     assert values["Z_CURVE_RUS_1Y"] == 13.1
     assert values["Z_CURVE_RUS_7Y"] == 12.4
     assert values["Z_CURVE_RUS"] == 13.1
+
+
+def test_fetch_cbr_z_curve_values_parses_latest_row(monkeypatch) -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    html = """
+    <table class="data spaced">
+      <tr><th rowspan="2">Дата</th><th colspan="12">Срок до погашения, лет</th></tr>
+      <tr><th>0,25</th><th>0,5</th><th>0,75</th><th>1</th><th>2</th><th>3</th><th>5</th><th>7</th><th>10</th><th>15</th><th>20</th><th>30</th></tr>
+      <tr><td>25.02.2026</td><td>13,77</td><td>13,95</td><td>14,08</td><td>14,18</td><td>14,44</td><td>14,62</td><td>14,70</td><td>14,60</td><td>14,34</td><td>13,99</td><td>13,79</td><td>13,62</td></tr>
+    </table>
+    """
+    monkeypatch.setattr(enricher.session, "get", lambda *args, **kwargs: _DummyResponse(html))
+
+    values = enricher._fetch_cbr_z_curve_values()
+
+    assert values["Z_CURVE_RUS_1Y"] == 14.18
+    assert values["Z_CURVE_RUS_7Y"] == 14.6
+    assert values["Z_CURVE_RUS_30Y"] == 13.62
+    assert values["Z_CURVE_RUS"] == 14.18
+
+
+def test_fetch_live_index_values_falls_back_to_moex_zcurve(monkeypatch) -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+
+    def fake_cbr_metric(url: str, metric_name: str):
+        if metric_name == "CBR_RATE":
+            return 15.5
+        if metric_name == "RUONIA":
+            return 15.31
+        return None
+
+    enricher._fetch_cbr_metric = fake_cbr_metric  # type: ignore[method-assign]
+    enricher._fetch_cbr_z_curve_values = lambda: {}  # type: ignore[method-assign]
+    enricher._fetch_moex_z_curve_values = lambda: {"Z_CURVE_RUS": 14.2, "Z_CURVE_RUS_1Y": 14.2}  # type: ignore[method-assign]
+
+    values = enricher._fetch_live_index_values()
+
+    assert values["CBR_RATE"] == 15.5
+    assert values["RUONIA"] == 15.31
+    assert values["Z_CURVE_RUS"] == 14.2
 
 
 def test_enrich_bonds_uses_live_ruonia_base_for_coupon() -> None:

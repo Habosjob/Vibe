@@ -15,8 +15,9 @@ exclusion_window_days: 365
 amortization_workers: 8
 dohod_workers: 12
 dohod_request_delay_seconds: 0.03
-cbr_key_rate_url: "https://www.cbr-xml-daily.ru/key_rate/"
-cbr_ruonia_url: "https://www.cbr.ru/hd_base/ruonia/dynamics/"
+cbr_key_rate_url: "https://www.cbr.ru/hd_base/KeyRate/"
+cbr_ruonia_url: "https://www.cbr.ru/hd_base/ruonia/"
+z_curve_cbr_url: "https://www.cbr.ru/hd_base/zcyc_params/"
 z_curve_moex_url: "https://iss.moex.com/iss/engines/stock/zcyc/securities.json?iss.meta=off"
 cbr_key_rate_timeout_seconds: 10
 

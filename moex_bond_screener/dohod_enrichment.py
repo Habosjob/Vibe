@@ -26,6 +26,7 @@ LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
 CELL_RE = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.IGNORECASE | re.DOTALL)
 NUMBER_RE = r"[+-]?\d+(?:[.,]\d+)?"
+TABLE_RE = re.compile(r"<table[^>]*>(.*?)</table>", re.IGNORECASE | re.DOTALL)
 INDEX_RE = re.compile(
     r"(RUONIA|R[-_\s]?UONIA|CBR_RATE|KEY_RATE|Z[-_\s]?CURVE[-_\s]?RUS|"
     r"КЛЮЧЕВАЯ\s+СТАВКА(?:\s+(?:ЦБ|БАНКА\s+РОССИИ))?|КС\s*ЦБ(?:\s*РФ)?|"
@@ -297,7 +298,9 @@ class DohodEnricher:
         if ruonia is not None:
             index_values["RUONIA"] = ruonia
 
-        z_curve_values = self._fetch_moex_z_curve_values()
+        z_curve_values = self._fetch_cbr_z_curve_values()
+        if not z_curve_values:
+            z_curve_values = self._fetch_moex_z_curve_values()
         index_values.update(z_curve_values)
         return index_values
 
@@ -317,8 +320,11 @@ class DohodEnricher:
         try:
             payload = response.json()
             value = _extract_numeric_value(payload)
-        except ValueError:
+        except (ValueError, AttributeError):
             value = None
+
+        if value is None and metric_name == "RUONIA":
+            value = _extract_cbr_ruonia_value(response.text)
 
         if value is None:
             value = _extract_numeric_value(response.text)
@@ -355,6 +361,29 @@ class DohodEnricher:
 
         result["Z_CURVE_RUS"] = result.get("Z_CURVE_RUS_1Y") or next(iter(result.values()))
         self.logger.info("Z_CURVE_RUS обновлена по MOEX: %s точек", len(curve_points))
+        return result
+
+    def _fetch_cbr_z_curve_values(self) -> dict[str, float]:
+        url = str(getattr(self.config, "z_curve_cbr_url", "") or "").strip()
+        if not url:
+            return {}
+
+        timeout = int(getattr(self.config, "cbr_key_rate_timeout_seconds", 10) or 10)
+        try:
+            response = self.session.get(url, timeout=timeout)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            self.logger.warning("Не удалось получить Z_CURVE_RUS из ЦБ (%s): %s", url, exc)
+            return {}
+
+        curve_points = _extract_cbr_z_curve_points(response.text)
+        if not curve_points:
+            self.logger.warning("ЦБ вернул пустые данные Z_CURVE_RUS (%s)", url)
+            return {}
+
+        result: dict[str, float] = {f"Z_CURVE_RUS_{tenor}Y": value for tenor, value in curve_points.items()}
+        result["Z_CURVE_RUS"] = result.get("Z_CURVE_RUS_1Y") or next(iter(result.values()))
+        self.logger.info("Z_CURVE_RUS обновлена по первоисточнику ЦБ: %s точек", len(curve_points))
         return result
 
     @staticmethod
@@ -718,6 +747,10 @@ def _extract_numeric_value(raw: Any) -> float | None:
     if not text:
         return None
 
+    table_value = _extract_cbr_table_metric(text)
+    if table_value is not None:
+        return table_value
+
     try:
         root = ElementTree.fromstring(text)
     except ElementTree.ParseError:
@@ -738,6 +771,73 @@ def _extract_numeric_value(raw: Any) -> float | None:
         return None
     filtered = [parsed for parsed in (_as_float_or_none(number) for number in numbers) if parsed is not None and 0 < parsed <= 100]
     return filtered[-1] if filtered else None
+
+
+
+
+def _extract_cbr_ruonia_value(html: str) -> float | None:
+    table = _extract_table_by_headers(html, ("Дата ставки", "Ставка RUONIA"))
+    if not table:
+        return None
+
+    for row in table:
+        row_title = (row[0] if row else "").lower().replace("ё", "е")
+        if "ставка ruonia" not in row_title:
+            continue
+        for cell in reversed(row[1:]):
+            value = _as_float_or_none(cell)
+            if value is not None and 0 < value <= 100:
+                return value
+    return None
+
+
+def _extract_cbr_table_metric(html: str) -> float | None:
+    table = _extract_table_by_headers(html, ("Дата", "Ставка"))
+    if not table:
+        return None
+
+    for row in table:
+        if len(row) < 2:
+            continue
+        value = _as_float_or_none(row[1])
+        if value is not None and 0 < value <= 100:
+            return value
+    return None
+
+
+def _extract_cbr_z_curve_points(html: str) -> dict[int, float]:
+    table = _extract_table_by_headers(html, ("Дата", "0,25", "0,5", "0,75", "1"))
+    if not table:
+        return {}
+
+    tenors = [0.25, 0.5, 0.75, 1, 2, 3, 5, 7, 10, 15, 20, 30]
+    latest_row = next((row for row in table if len(row) >= len(tenors) + 1), None)
+    if latest_row is None:
+        return {}
+
+    points: dict[int, float] = {}
+    for idx, tenor in enumerate(tenors, start=1):
+        value = _as_float_or_none(latest_row[idx] if idx < len(latest_row) else None)
+        if tenor < 1 or value is None or value <= 0:
+            continue
+        points[int(round(tenor))] = value
+    return points
+
+
+def _extract_table_by_headers(html: str, required_headers: tuple[str, ...]) -> list[list[str]]:
+    for table_html in TABLE_RE.findall(html):
+        rows = []
+        for row_html in ROW_RE.findall(table_html):
+            cells = [_strip_html(cell) for cell in CELL_RE.findall(row_html)]
+            if cells:
+                rows.append(cells)
+        if not rows:
+            continue
+
+        flat_headers = " ".join(" ".join(row) for row in rows[:3]).lower().replace("ё", "е")
+        if all(header.lower().replace("ё", "е") in flat_headers for header in required_headers):
+            return rows
+    return []
 
 
 def _extract_z_curve_points(payload: dict[str, Any]) -> dict[int, float]:
