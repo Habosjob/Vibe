@@ -91,3 +91,34 @@ def test_enrich_ytm_skips_bond_without_required_data() -> None:
     assert stats.calculated == 0
     assert stats.skipped == 1
     assert "YTM" not in bonds[0]
+
+
+def test_enrich_ytm_removes_zero_realprice_artifact_and_uses_prevwaprice() -> None:
+    bonds = [
+        {
+            "SECID": "BOND6",
+            "RealPrice": 0,
+            "PREVWAPRICE": 95.0,
+            "FACEVALUE": 1000,
+            "ACCRUEDINT": 20,
+            "COUPONPERCENT": 12.0,
+            "MATDATE": "2028-01-01",
+        }
+    ]
+
+    stats = enrich_ytm(bonds, today=date(2026, 1, 1))
+
+    assert stats.calculated == 1
+    assert bonds[0]["YTM"] == 13.7056
+    assert bonds[0].get("RealPrice") in (None, "")
+
+
+def test_enrich_ytm_removes_non_positive_realprice_even_without_ytm_inputs() -> None:
+    bonds = [{"SECID": "BOND7", "RealPrice": "0,00", "MATDATE": "2029-01-01"}]
+
+    stats = enrich_ytm(bonds, today=date(2026, 1, 1))
+
+    assert stats.calculated == 0
+    assert stats.skipped == 1
+    assert "RealPrice" not in bonds[0]
+
