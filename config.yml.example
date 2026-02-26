@@ -26,3 +26,11 @@ cbr_key_rate_timeout_seconds: 10
 storage_backend: "sqlite"
 sqlite_db_path: "screener_state.db"
 force_cache_refresh: false
+
+# Прогнозная YTM для флоатеров
+floater_cb_rate_current_year: 14.0
+floater_cb_rate_next_year: 8.5
+floater_cb_rate_plus_one_year: 8.0
+floater_ruonia_spread_from_cb_rate: -0.5
+floater_z_curve_spread_from_cb_rate: -1.0
+floater_cbr_rate_spread_from_cb_rate: 0.0

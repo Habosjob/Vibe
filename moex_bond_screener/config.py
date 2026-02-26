@@ -39,6 +39,12 @@ class AppConfig:
     storage_backend: str = "sqlite"
     sqlite_db_path: str = "screener_state.db"
     force_cache_refresh: bool = False
+    floater_cb_rate_current_year: float = 14.0
+    floater_cb_rate_next_year: float = 8.5
+    floater_cb_rate_plus_one_year: float = 8.0
+    floater_ruonia_spread_from_cb_rate: float = -0.5
+    floater_z_curve_spread_from_cb_rate: float = -1.0
+    floater_cbr_rate_spread_from_cb_rate: float = 0.0
 
 
 DEFAULT_CONFIG_PATH = Path("config.yml")

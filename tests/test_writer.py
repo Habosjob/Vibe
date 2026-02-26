@@ -398,6 +398,27 @@ def test_save_bonds_excel_marks_approx_coupon_in_yellow(tmp_path: Path) -> None:
     assert sheet.cell(row=3, column=coupon_col).fill.fgColor.rgb == "00FFF59D"
 
 
+def test_save_bonds_excel_marks_forecast_ytm_in_yellow(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [
+        {
+            "SECID": "RU2",
+            "SHORTNAME": "Флоатер",
+            "YTM": 10.1,
+            "_YTM_FORECAST": True,
+        }
+    ]
+
+    save_bonds_file(str(target), bonds)
+
+    workbook = load_workbook(target)
+    sheet = workbook["MOEX_BONDS"]
+    headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
+    ytm_col = headers.index("YTM") + 1
+
+    assert sheet.cell(row=3, column=ytm_col).fill.fgColor.rgb == "00FFF59D"
+
+
 def test_save_bonds_excel_places_ytm_into_coupon_group(tmp_path: Path) -> None:
     target = tmp_path / "output" / "bonds.xlsx"
     bonds = [
