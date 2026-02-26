@@ -297,6 +297,7 @@ def _prepare_export_data(bonds: list[dict[str, Any]]) -> tuple[list[str], list[d
     for bond in bonds:
         row = dict(bond)
         row.setdefault("_COUPONPERCENT_APPROX", False)
+        row.setdefault("_YTM_FORECAST", False)
         if not row.get("CURRENCYID") and row.get("FACEUNIT"):
             row["CURRENCYID"] = row["FACEUNIT"]
         row.pop("FACEUNIT", None)
@@ -380,6 +381,7 @@ def save_bonds_excel(path: str, bonds: list[dict[str, Any]], summary: dict[str, 
 
     _apply_excel_formatting(sheet)
     _highlight_approximate_coupon(sheet, prepared_rows, excel_columns)
+    _highlight_forecast_ytm(sheet, prepared_rows, excel_columns)
     _write_summary_sheet(workbook, prepared_rows, summary)
 
     workbook.save(target)
@@ -514,6 +516,23 @@ def _highlight_approximate_coupon(sheet: Any, prepared_rows: list[dict[str, Any]
         secid = str(sheet.cell(row=row_idx, column=secid_col).value or "")
         if secid in approx_secids:
             sheet.cell(row=row_idx, column=coupon_col).fill = APPROX_FILL
+
+
+def _highlight_forecast_ytm(sheet: Any, prepared_rows: list[dict[str, Any]], excel_columns: list[str]) -> None:
+    try:
+        secid_col = excel_columns.index("SECID") + 1
+        ytm_col = excel_columns.index("YTM") + 1
+    except ValueError:
+        return
+
+    forecast_secids = {str(row.get("SECID") or "") for row in prepared_rows if bool(row.get("_YTM_FORECAST"))}
+    if not forecast_secids:
+        return
+
+    for row_idx in range(3, sheet.max_row + 1):
+        secid = str(sheet.cell(row=row_idx, column=secid_col).value or "")
+        if secid in forecast_secids:
+            sheet.cell(row=row_idx, column=ytm_col).fill = APPROX_FILL
 
 
 def save_bonds_csv(path: str, bonds: list[dict[str, Any]]) -> None:

@@ -13,18 +13,30 @@ class YtmStats:
     skipped: int = 0
 
 
-def enrich_ytm(bonds: list[dict[str, Any]], today: date | None = None) -> YtmStats:
+@dataclass(slots=True)
+class FloaterForecastConfig:
+    cb_rate_current_year: float = 14.0
+    cb_rate_next_year: float = 8.5
+    cb_rate_plus_one_year: float = 8.0
+    ruonia_spread_from_cb_rate: float = -0.5
+    z_curve_spread_from_cb_rate: float = -1.0
+    cbr_rate_spread_from_cb_rate: float = 0.0
+
+
+def enrich_ytm(bonds: list[dict[str, Any]], today: date | None = None, config: Any | None = None) -> YtmStats:
     """Добавляет поле YTM (в процентах годовых) в каждую бумагу, где достаточно данных."""
     stats = YtmStats()
     calc_date = today or date.today()
+    floater_config = _resolve_floater_forecast_config(config)
 
     for bond in bonds:
         _sanitize_realprice_artifact(bond)
-        ytm = _calculate_bond_ytm(bond, calc_date)
+        ytm = _calculate_bond_ytm(bond, calc_date, floater_config)
         if ytm is None:
             stats.skipped += 1
             continue
         bond["YTM"] = ytm
+        bond["_YTM_FORECAST"] = bool(_is_floater_coupon_type(bond))
         stats.calculated += 1
 
     return stats
@@ -39,7 +51,7 @@ def _sanitize_realprice_artifact(bond: dict[str, Any]) -> None:
     if parsed_real_price <= 0:
         bond.pop("RealPrice", None)
 
-def _calculate_bond_ytm(bond: dict[str, Any], today: date) -> float | None:
+def _calculate_bond_ytm(bond: dict[str, Any], today: date, config: FloaterForecastConfig) -> float | None:
     real_price_pct = _resolve_price_for_ytm(bond)
     if real_price_pct is None:
         return None
@@ -67,6 +79,9 @@ def _calculate_bond_ytm(bond: dict[str, Any], today: date) -> float | None:
     coupon_percent = _as_float_or_none(bond.get("COUPONPERCENT"))
     coupon_percent = coupon_percent if coupon_percent is not None else 0.0
 
+    if _is_floater_coupon_type(bond):
+        coupon_percent = _forecast_floater_coupon_percent(bond, today, target_date, config)
+
     if coupon_percent < 1.0:
         ytm = ((face_value / dirty_price) ** (1.0 / years) - 1.0) * 100.0
         return round(ytm, 4)
@@ -77,6 +92,69 @@ def _calculate_bond_ytm(bond: dict[str, Any], today: date) -> float | None:
         / ((face_value + dirty_price) / 2.0)
     ) * 100.0
     return round(approximate_ytm, 4)
+
+
+def _resolve_floater_forecast_config(config: Any | None) -> FloaterForecastConfig:
+    if config is None:
+        return FloaterForecastConfig()
+    defaults = FloaterForecastConfig()
+    return FloaterForecastConfig(
+        cb_rate_current_year=_as_float_or_none(getattr(config, "floater_cb_rate_current_year", defaults.cb_rate_current_year)) or defaults.cb_rate_current_year,
+        cb_rate_next_year=_as_float_or_none(getattr(config, "floater_cb_rate_next_year", defaults.cb_rate_next_year)) or defaults.cb_rate_next_year,
+        cb_rate_plus_one_year=_as_float_or_none(getattr(config, "floater_cb_rate_plus_one_year", defaults.cb_rate_plus_one_year)) or defaults.cb_rate_plus_one_year,
+        ruonia_spread_from_cb_rate=_as_float_or_none(getattr(config, "floater_ruonia_spread_from_cb_rate", defaults.ruonia_spread_from_cb_rate)) or defaults.ruonia_spread_from_cb_rate,
+        z_curve_spread_from_cb_rate=_as_float_or_none(getattr(config, "floater_z_curve_spread_from_cb_rate", defaults.z_curve_spread_from_cb_rate)) or defaults.z_curve_spread_from_cb_rate,
+        cbr_rate_spread_from_cb_rate=_as_float_or_none(getattr(config, "floater_cbr_rate_spread_from_cb_rate", defaults.cbr_rate_spread_from_cb_rate)) or defaults.cbr_rate_spread_from_cb_rate,
+    )
+
+
+def _is_floater_coupon_type(bond: dict[str, Any]) -> bool:
+    coupon_type = str(bond.get("CouponType") or "").strip().lower()
+    return coupon_type in {"флоатер", "float", "floater"}
+
+
+def _forecast_floater_coupon_percent(bond: dict[str, Any], today: date, target_date: date, config: FloaterForecastConfig) -> float:
+    index_name = str(bond.get("_INDEX_NAME") or "").strip().upper()
+    spread = _as_float_or_none(bond.get("_INDEX_SPREAD"))
+    spread = spread if spread is not None else 0.0
+    base_rate = _average_projected_index_rate(today=today, target_date=target_date, index_name=index_name, config=config)
+    return round(base_rate + spread, 4)
+
+
+def _average_projected_index_rate(today: date, target_date: date, index_name: str, config: FloaterForecastConfig) -> float:
+    total_days = (target_date - today).days
+    if total_days <= 0:
+        return config.cb_rate_current_year
+
+    weighted_rate_sum = 0.0
+    segment_start = today
+    while segment_start < target_date:
+        year_end = date(segment_start.year, 12, 31)
+        segment_end = min(target_date, year_end.fromordinal(year_end.toordinal() + 1))
+        segment_days = (segment_end - segment_start).days
+        offset = segment_start.year - today.year
+        cb_rate = _cb_rate_for_year_offset(offset, config)
+        weighted_rate_sum += _projected_index_from_cb_rate(index_name, cb_rate, config) * segment_days
+        segment_start = segment_end
+    return weighted_rate_sum / total_days
+
+
+def _cb_rate_for_year_offset(offset: int, config: FloaterForecastConfig) -> float:
+    if offset <= 0:
+        return config.cb_rate_current_year
+    if offset == 1:
+        return config.cb_rate_next_year
+    return config.cb_rate_plus_one_year
+
+
+def _projected_index_from_cb_rate(index_name: str, cb_rate: float, config: FloaterForecastConfig) -> float:
+    if index_name == "RUONIA":
+        return cb_rate + config.ruonia_spread_from_cb_rate
+    if index_name.startswith("Z_CURVE_RUS"):
+        return cb_rate + config.z_curve_spread_from_cb_rate
+    if index_name in {"CBR_RATE", "KEY_RATE"}:
+        return cb_rate + config.cbr_rate_spread_from_cb_rate
+    return cb_rate
 
 
 def _resolve_target_date_for_ytm(bond: dict[str, Any]) -> date | None:

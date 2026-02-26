@@ -558,6 +558,12 @@ class DohodEnricher:
                 self._log_missing_base_warning(index_name, index_spread, bond)
                 continue
 
+            if index_name:
+                bond["_INDEX_NAME"] = index_name
+                bond["_INDEX_SPREAD"] = round(index_spread, 6)
+                if index_tenor_years:
+                    bond["_INDEX_TENOR_YEARS"] = index_tenor_years
+
             if _should_enrich_coupon(
                 coupon_raw=coupon_raw,
                 index_name=index_name,

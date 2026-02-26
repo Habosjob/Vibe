@@ -122,3 +122,52 @@ def test_enrich_ytm_removes_non_positive_realprice_even_without_ytm_inputs() -> 
     assert stats.skipped == 1
     assert "RealPrice" not in bonds[0]
 
+
+
+def test_enrich_ytm_for_floater_uses_forecast_coupon_and_marks_row() -> None:
+    bonds = [
+        {
+            "SECID": "FLOAT1",
+            "CouponType": "Флоатер",
+            "RealPrice": 98.0,
+            "FACEVALUE": 1000,
+            "ACCRUEDINT": 0,
+            "COUPONPERCENT": 5.0,
+            "_INDEX_NAME": "RUONIA",
+            "_INDEX_SPREAD": 1.2,
+            "MATDATE": "2028-01-01",
+        }
+    ]
+
+    stats = enrich_ytm(bonds, today=date(2026, 1, 1))
+
+    assert stats.calculated == 1
+    assert bonds[0]["YTM"] == 13.0808
+    assert bonds[0]["_YTM_FORECAST"] is True
+
+
+def test_enrich_ytm_for_floater_uses_last_year_cb_rate_for_long_horizon() -> None:
+    class _Cfg:
+        floater_cb_rate_current_year = 14.0
+        floater_cb_rate_next_year = 8.5
+        floater_cb_rate_plus_one_year = 8.0
+        floater_ruonia_spread_from_cb_rate = -0.5
+
+    bonds = [
+        {
+            "SECID": "FLOAT2",
+            "CouponType": "Флоатер",
+            "RealPrice": 100.0,
+            "FACEVALUE": 1000,
+            "ACCRUEDINT": 0,
+            "COUPONPERCENT": 0.0,
+            "_INDEX_NAME": "RUONIA",
+            "_INDEX_SPREAD": 0.5,
+            "MATDATE": "2030-01-01",
+        }
+    ]
+
+    stats = enrich_ytm(bonds, today=date(2026, 1, 1), config=_Cfg())
+
+    assert stats.calculated == 1
+    assert bonds[0]["YTM"] == 9.6239

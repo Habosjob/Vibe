@@ -161,7 +161,7 @@ def main() -> None:
     )
 
     eligible_bonds = post_dohod_exclusion_result.eligible_bonds
-    ytm_stats = enrich_ytm(eligible_bonds)
+    ytm_stats = enrich_ytm(eligible_bonds, config=config)
     attach_data_status(eligible_bonds)
     active_exclusions = dict(exclusion_result.active_exclusions)
     active_exclusions.update(post_amortization_exclusion_result.active_exclusions)
