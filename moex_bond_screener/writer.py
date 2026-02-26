@@ -18,6 +18,7 @@ import yaml
 
 
 DEFAULT_FIELDS = ["SECID", "SHORTNAME", "ISIN", "CURRENCYID", "PREVLEGALCLOSEPRICE", "MATDATE"]
+MANDATORY_EXPORT_FIELDS = ["HASDEFAULT", "RealPrice", "CouponType", "Lesenka"]
 UNWANTED_FIELDS = {
     "BOARDID",
     "LOTSIZE",
@@ -301,12 +302,18 @@ def _prepare_export_data(bonds: list[dict[str, Any]]) -> tuple[list[str], list[d
         prepared_rows.append(row)
 
     fields = [field for field in fields if field != "FACEUNIT" and not str(field).startswith("_")]
+    for mandatory_field in MANDATORY_EXPORT_FIELDS:
+        if mandatory_field not in fields:
+            fields.append(mandatory_field)
     if "CURRENCYID" not in fields and any(row.get("CURRENCYID") for row in prepared_rows):
         fields.append("CURRENCYID")
 
     seen_signatures: dict[tuple[Any, ...], str] = {}
     deduplicated_fields: list[str] = []
     for field in fields:
+        if field in MANDATORY_EXPORT_FIELDS:
+            deduplicated_fields.append(field)
+            continue
         signature = tuple(prepared.get(field, "") for prepared in prepared_rows)
         if signature in seen_signatures and any(value not in ("", None) for value in signature):
             continue

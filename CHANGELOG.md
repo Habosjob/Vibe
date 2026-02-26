@@ -1,6 +1,10 @@
 # CHANGELOG
 
 ## 2026-02-26
+- Возвращены и зафиксированы колонки `HASDEFAULT`, `RealPrice`, `CouponType`, `Lesenka` в основной таблице экспорта (даже при совпадающих/пустых значениях).
+- В `SUMMARY` и run-metrics добавлены счетчики по CorpBonds (`corpbonds_realprice_added`, `corpbonds_coupontype_added`, `corpbonds_lesenka_added`).
+- Исправлен режим `force_cache_refresh`: после очистки чекпоинтов этап амортизации всегда стартует с пустого кэша.
+- Исправлено сохранение `Scorerate=Blacklist` для дефолтных эмитентов даже если они отсутствуют в `eligible_bonds` текущего прогона.
 - Исправлен расчет YTM: теперь срок до погашения берется по `OFFERDATE`, если дата оферты задана, иначе по `MATDATE`.
 - Исправлен выбор цены для YTM: приоритет `PREVWAPRICE`, затем fallback `ASK -> LAST -> BID` (с заполнением `RealPrice`), при отсутствии цены YTM не заполняется.
 - В сортировщик добавлено бессрочное исключение для `BONDTYPE = "Структурная облигация"`.
