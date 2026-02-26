@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+import re
 from typing import Any
 
 
@@ -18,6 +19,9 @@ class FloaterForecastConfig:
     cb_rate_current_year: float = 14.0
     cb_rate_next_year: float = 8.5
     cb_rate_plus_one_year: float = 8.0
+    linker_inflation_current_year: float = 5.0
+    linker_inflation_next_year: float = 4.0
+    linker_inflation_plus_one_year: float = 4.0
     ruonia_spread_from_cb_rate: float = -0.5
     z_curve_spread_from_cb_rate: float = -1.0
     cbr_rate_spread_from_cb_rate: float = 0.0
@@ -36,7 +40,7 @@ def enrich_ytm(bonds: list[dict[str, Any]], today: date | None = None, config: A
             stats.skipped += 1
             continue
         bond["YTM"] = ytm
-        bond["_YTM_FORECAST"] = bool(_is_floater_coupon_type(bond))
+        bond["_YTM_FORECAST"] = bool(_is_floater_coupon_type(bond) or _is_ofz_linker(bond))
         stats.calculated += 1
 
     return stats
@@ -79,17 +83,23 @@ def _calculate_bond_ytm(bond: dict[str, Any], today: date, config: FloaterForeca
     coupon_percent = _as_float_or_none(bond.get("COUPONPERCENT"))
     coupon_percent = coupon_percent if coupon_percent is not None else 0.0
 
+    is_linker = _is_ofz_linker(bond)
     if _is_floater_coupon_type(bond):
         coupon_percent = _forecast_floater_coupon_percent(bond, today, target_date, config)
+    projected_face_value = face_value
+    average_face_value = face_value
+    if is_linker:
+        projected_face_value = _projected_face_value_with_inflation(face_value=face_value, today=today, target_date=target_date, config=config)
+        average_face_value = (face_value + projected_face_value) / 2.0
 
     if coupon_percent < 1.0:
-        ytm = ((face_value / dirty_price) ** (1.0 / years) - 1.0) * 100.0
+        ytm = ((projected_face_value / dirty_price) ** (1.0 / years) - 1.0) * 100.0
         return round(ytm, 4)
 
-    annual_coupon = face_value * coupon_percent / 100.0
+    annual_coupon = average_face_value * coupon_percent / 100.0
     approximate_ytm = (
-        (annual_coupon + (face_value - dirty_price) / years)
-        / ((face_value + dirty_price) / 2.0)
+        (annual_coupon + (projected_face_value - dirty_price) / years)
+        / ((projected_face_value + dirty_price) / 2.0)
     ) * 100.0
     return round(approximate_ytm, 4)
 
@@ -102,6 +112,9 @@ def _resolve_floater_forecast_config(config: Any | None) -> FloaterForecastConfi
         cb_rate_current_year=_as_float_or_none(getattr(config, "floater_cb_rate_current_year", defaults.cb_rate_current_year)) or defaults.cb_rate_current_year,
         cb_rate_next_year=_as_float_or_none(getattr(config, "floater_cb_rate_next_year", defaults.cb_rate_next_year)) or defaults.cb_rate_next_year,
         cb_rate_plus_one_year=_as_float_or_none(getattr(config, "floater_cb_rate_plus_one_year", defaults.cb_rate_plus_one_year)) or defaults.cb_rate_plus_one_year,
+        linker_inflation_current_year=_as_float_or_none(getattr(config, "linker_inflation_current_year", defaults.linker_inflation_current_year)) or defaults.linker_inflation_current_year,
+        linker_inflation_next_year=_as_float_or_none(getattr(config, "linker_inflation_next_year", defaults.linker_inflation_next_year)) or defaults.linker_inflation_next_year,
+        linker_inflation_plus_one_year=_as_float_or_none(getattr(config, "linker_inflation_plus_one_year", defaults.linker_inflation_plus_one_year)) or defaults.linker_inflation_plus_one_year,
         ruonia_spread_from_cb_rate=_as_float_or_none(getattr(config, "floater_ruonia_spread_from_cb_rate", defaults.ruonia_spread_from_cb_rate)) or defaults.ruonia_spread_from_cb_rate,
         z_curve_spread_from_cb_rate=_as_float_or_none(getattr(config, "floater_z_curve_spread_from_cb_rate", defaults.z_curve_spread_from_cb_rate)) or defaults.z_curve_spread_from_cb_rate,
         cbr_rate_spread_from_cb_rate=_as_float_or_none(getattr(config, "floater_cbr_rate_spread_from_cb_rate", defaults.cbr_rate_spread_from_cb_rate)) or defaults.cbr_rate_spread_from_cb_rate,
@@ -111,6 +124,24 @@ def _resolve_floater_forecast_config(config: Any | None) -> FloaterForecastConfi
 def _is_floater_coupon_type(bond: dict[str, Any]) -> bool:
     coupon_type = str(bond.get("CouponType") or "").strip().lower()
     return coupon_type in {"флоатер", "float", "floater"}
+
+
+def _is_ofz_linker(bond: dict[str, Any]) -> bool:
+    ids = [
+        str(bond.get("SECID") or ""),
+        str(bond.get("ISIN") or ""),
+        str(bond.get("REGNUMBER") or ""),
+        str(bond.get("SHORTNAME") or ""),
+        str(bond.get("SECNAME") or ""),
+    ]
+    for raw in ids:
+        if not raw:
+            continue
+        normalized = raw.upper()
+        for linker_code in ("52002", "52003", "52004", "52005"):
+            if re.search(rf"(?:^|\D){linker_code}(?:\D|$)", normalized):
+                return True
+    return False
 
 
 def _forecast_floater_coupon_percent(bond: dict[str, Any], today: date, target_date: date, config: FloaterForecastConfig) -> float:
@@ -145,6 +176,33 @@ def _cb_rate_for_year_offset(offset: int, config: FloaterForecastConfig) -> floa
     if offset == 1:
         return config.cb_rate_next_year
     return config.cb_rate_plus_one_year
+
+
+def _inflation_for_year_offset(offset: int, config: FloaterForecastConfig) -> float:
+    if offset <= 0:
+        return config.linker_inflation_current_year
+    if offset == 1:
+        return config.linker_inflation_next_year
+    return config.linker_inflation_plus_one_year
+
+
+def _projected_face_value_with_inflation(face_value: float, today: date, target_date: date, config: FloaterForecastConfig) -> float:
+    total_days = (target_date - today).days
+    if total_days <= 0:
+        return face_value
+
+    projected_face_value = face_value
+    segment_start = today
+    while segment_start < target_date:
+        year_end = date(segment_start.year, 12, 31)
+        segment_end = min(target_date, year_end.fromordinal(year_end.toordinal() + 1))
+        segment_days = (segment_end - segment_start).days
+        offset = segment_start.year - today.year
+        annual_inflation_rate = _inflation_for_year_offset(offset, config)
+        segment_factor = (1.0 + annual_inflation_rate / 100.0) ** (segment_days / 365.0)
+        projected_face_value *= segment_factor
+        segment_start = segment_end
+    return projected_face_value
 
 
 def _projected_index_from_cb_rate(index_name: str, cb_rate: float, config: FloaterForecastConfig) -> float:

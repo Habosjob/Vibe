@@ -171,3 +171,45 @@ def test_enrich_ytm_for_floater_uses_last_year_cb_rate_for_long_horizon() -> Non
 
     assert stats.calculated == 1
     assert bonds[0]["YTM"] == 9.6239
+
+
+def test_enrich_ytm_for_ofz_linker_uses_inflation_forecast_and_marks_row() -> None:
+    bonds = [
+        {
+            "SECID": "SU52004RMFS8",
+            "RealPrice": 95.0,
+            "FACEVALUE": 1000,
+            "ACCRUEDINT": 10,
+            "COUPONPERCENT": 2.5,
+            "MATDATE": "2029-01-01",
+        }
+    ]
+
+    stats = enrich_ytm(bonds, today=date(2026, 1, 1))
+
+    assert stats.calculated == 1
+    assert bonds[0]["YTM"] == 8.1348
+    assert bonds[0]["_YTM_FORECAST"] is True
+
+
+def test_enrich_ytm_for_ofz_linker_uses_last_inflation_year_for_long_horizon() -> None:
+    class _Cfg:
+        linker_inflation_current_year = 5.0
+        linker_inflation_next_year = 4.0
+        linker_inflation_plus_one_year = 4.0
+
+    bonds = [
+        {
+            "SECID": "SU52003RMFS9",
+            "RealPrice": 100.0,
+            "FACEVALUE": 1000,
+            "ACCRUEDINT": 0,
+            "COUPONPERCENT": 2.5,
+            "MATDATE": "2031-01-01",
+        }
+    ]
+
+    stats = enrich_ytm(bonds, today=date(2026, 1, 1), config=_Cfg())
+
+    assert stats.calculated == 1
+    assert bonds[0]["YTM"] == 6.5989

@@ -31,6 +31,12 @@ force_cache_refresh: false
 floater_cb_rate_current_year: 14.0
 floater_cb_rate_next_year: 8.5
 floater_cb_rate_plus_one_year: 8.0
+
+# Прогнозная инфляция для ОФЗ-ИН (серия 52002/52003/52004/52005)
+linker_inflation_current_year: 5.0
+linker_inflation_next_year: 4.0
+linker_inflation_plus_one_year: 4.0
+
 floater_ruonia_spread_from_cb_rate: -0.5
 floater_z_curve_spread_from_cb_rate: -1.0
 floater_cbr_rate_spread_from_cb_rate: 0.0
