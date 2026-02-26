@@ -11,7 +11,11 @@ from moex_bond_screener.config import load_config
 from moex_bond_screener.data_quality import attach_data_status
 from moex_bond_screener.dohod_enrichment import DohodEnricher
 from moex_bond_screener.emitents import build_emitents_reference
-from moex_bond_screener.exclusion_rules import AMORTIZATION_RULE_NAME, BondExclusionFilter
+from moex_bond_screener.exclusion_rules import (
+    AMORTIZATION_RULE_NAME,
+    STRUCTURAL_BOND_RULE_NAME,
+    BondExclusionFilter,
+)
 from moex_bond_screener.logging_utils import setup_logging
 from moex_bond_screener.moex_client import AMORTIZATION_CHECKPOINT_VERSION, MoexClient
 from moex_bond_screener.progress import PipelineProgress
@@ -195,6 +199,7 @@ def main() -> None:
     print(f"  - OFFERDATE < {config.exclusion_window_days} дней: {excluded_by_rule['offer_lt_1y']}")
     print(f"  - CALLOPTIONDATE < {config.exclusion_window_days} дней: {excluded_by_rule['calloption_lt_1y']}")
     print(f"  - MATDATE < {config.exclusion_window_days} дней: {excluded_by_rule['mat_lt_1y']}")
+    print(f"  - Структурные облигации (BONDTYPE): {excluded_by_rule[STRUCTURAL_BOND_RULE_NAME]}")
     print(
         "  - Amortization_start_date < "
         f"{config.exclusion_window_days} дней (включая начавшуюся): {excluded_by_rule[AMORTIZATION_RULE_NAME]}"
