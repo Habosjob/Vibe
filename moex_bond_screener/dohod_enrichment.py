@@ -104,6 +104,8 @@ class DohodEnricher:
         checkpoint_data: dict[str, Any] | None = None,
         checkpoint_saver: DohodCheckpointSaver | None = None,
         progress_callback: DohodProgressCallback | None = None,
+        monthly_cached_identifiers: set[str] | None = None,
+        monthly_cache_ttl_days: int = 30,
     ) -> int:
         self.last_stats = DohodEnrichmentStats()
         self._corpbonds_secid_by_isin: dict[str, str] = {}
@@ -114,6 +116,8 @@ class DohodEnricher:
         index_values = self._resolve_index_values(checkpoint)
         index_changed = self._has_index_changed(index_values, checkpoint.get("index_values", {}))
         fresh_cache = self._is_checkpoint_fresh(checkpoint)
+        monthly_cached_identifiers = monthly_cached_identifiers or set()
+        checkpoint_updated_at = self._parse_iso_datetime(checkpoint.get("updated_at"))
 
         identifier_to_bonds: dict[str, list[dict[str, Any]]] = {}
         secid_by_identifier: dict[str, str] = {}
@@ -129,9 +133,16 @@ class DohodEnricher:
         self._corpbonds_secid_by_isin = dict(secid_by_identifier)
         pending: list[str] = []
         for identifier in identifier_to_bonds:
-            if fresh_cache and not index_changed and identifier in processed:
+            if identifier in processed:
                 cached_payload = processed.get(identifier)
-                if self._is_cached_payload_usable(cached_payload):
+                cache_allowed = fresh_cache and not index_changed
+                if identifier in monthly_cached_identifiers:
+                    cache_allowed = self._is_cached_payload_fresh(
+                        cached_payload,
+                        ttl_days=monthly_cache_ttl_days,
+                        fallback_dt=checkpoint_updated_at,
+                    )
+                if cache_allowed and self._is_cached_payload_usable(cached_payload):
                     self._apply_cached(identifier_to_bonds[identifier], processed[identifier], index_values)
                     continue
             pending.append(identifier)
@@ -180,6 +191,7 @@ class DohodEnricher:
                         "lesenka": payload.lesenka,
                         "formula_source": payload.formula_source,
                         "offer_source": payload.offer_source,
+                        "fetched_at": datetime.now(timezone.utc).isoformat(),
                     }
                     processed[identifier] = serialized
                     self._apply_cached(identifier_to_bonds[identifier], serialized, index_values)
@@ -515,6 +527,27 @@ class DohodEnricher:
         if isinstance(real_price, (int, float)) and float(real_price) > 0:
             return True
         return bool(index_name or ytm_date or event_name or coupon_type or lesenka)
+
+    @staticmethod
+    def _parse_iso_datetime(raw: Any) -> datetime | None:
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @staticmethod
+    def _is_cached_payload_fresh(payload: Any, ttl_days: int, fallback_dt: datetime | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        fetched_at = DohodEnricher._parse_iso_datetime(payload.get("fetched_at")) or fallback_dt
+        if fetched_at is None:
+            return False
+        return datetime.now(timezone.utc) - fetched_at <= timedelta(days=max(1, ttl_days))
 
     def _apply_cached(self, bonds: list[dict[str, Any]], payload: dict[str, Any], index_values: dict[str, float]) -> None:
         real_price = payload.get("real_price")

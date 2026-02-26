@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from moex_bond_screener.config import AppConfig
 from moex_bond_screener.dohod_enrichment import (
@@ -1029,3 +1029,47 @@ def test_parse_corpbonds_payload_ignores_non_last_price_rows() -> None:
     payload = DohodEnricher.parse_corpbonds_payload(html)
 
     assert payload.real_price is None
+
+
+def test_enrich_bonds_uses_monthly_cache_for_redlist_when_checkpoint_not_fresh() -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0}  # type: ignore[method-assign]
+
+    called = {"count": 0}
+
+    def fail_fetch(_: str):
+        called["count"] += 1
+        return DohodBondPayload(), 1
+
+    enricher._fetch_and_parse = fail_fetch  # type: ignore[method-assign]
+    fetched_at = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    checkpoint = {
+        "version": DOHOD_CHECKPOINT_VERSION,
+        "updated_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        "completed": True,
+        "index_values": {"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0},
+        "bonds": {
+            "RU1": {
+                "real_price": 100.5,
+                "index_name": "",
+                "index_spread": 0.0,
+                "index_tenor_years": None,
+                "event_name": "погашение",
+                "ytm_date": "2030-01-01",
+                "fetched_at": fetched_at,
+            }
+        },
+    }
+    bonds = [{"SECID": "RU1_SEC", "ISIN": "RU1", "COUPONPERCENT": "5.0", "OFFERDATE": "", "MATDATE": "2030-01-01"}]
+
+    errors = enricher.enrich_bonds(
+        bonds,
+        checkpoint_data=checkpoint,
+        monthly_cached_identifiers={"RU1"},
+        monthly_cache_ttl_days=30,
+    )
+
+    assert errors == 0
+    assert called["count"] == 0
+    assert bonds[0]["RealPrice"] == 100.5

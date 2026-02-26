@@ -626,6 +626,17 @@ def save_emitents_excel(path: str, emitents: list[dict[str, str]]) -> None:
     workbook.save(target)
 
 
+def _normalize_emitter_id_for_overrides(raw_value: Any) -> str:
+    value = str(raw_value or "").strip()
+    if not value:
+        return ""
+    if value.endswith(".0"):
+        integer_part = value[:-2]
+        if integer_part.isdigit():
+            return integer_part
+    return value
+
+
 def load_emitents_manual_overrides(path: str) -> dict[str, dict[str, str]]:
     """Читает ручные поля Scorerate/DateScore из существующего EMITENTS-файла."""
     target = Path(path)
@@ -651,7 +662,7 @@ def load_emitents_manual_overrides(path: str) -> dict[str, dict[str, str]]:
 
         overrides: dict[str, dict[str, str]] = {}
         for row in sheet.iter_rows(min_row=2, values_only=True):
-            emitter_id = str(row[emitter_idx] or "").strip()
+            emitter_id = _normalize_emitter_id_for_overrides(row[emitter_idx])
             if not emitter_id:
                 continue
             overrides[emitter_id] = {

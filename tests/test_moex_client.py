@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -487,12 +488,13 @@ def test_enrich_amortization_checkpoint_saves_only_successful_secids(monkeypatch
     assert bonds[0]["Amortization_start_date"] == "2026-01-01"
     assert bonds[1]["Amortization_start_date"] == ""
     assert saved_payloads[-1]["version"] == AMORTIZATION_CHECKPOINT_VERSION
-    assert saved_payloads[-1]["processed"] == {
-        "A": {
-            "amortization_start_date": "2026-01-01",
-            "flags": {"ISQUALIFIEDINVESTORS": "0", "HASTECHNICALDEFAULT": "0", "HASDEFAULT": "0"},
-        }
+    assert saved_payloads[-1]["processed"]["A"]["amortization_start_date"] == "2026-01-01"
+    assert saved_payloads[-1]["processed"]["A"]["flags"] == {
+        "ISQUALIFIEDINVESTORS": "0",
+        "HASTECHNICALDEFAULT": "0",
+        "HASDEFAULT": "0",
     }
+    assert isinstance(saved_payloads[-1]["processed"]["A"].get("fetched_at"), str)
 
 
 def test_enrich_amortization_checkpoint_contains_updated_at(monkeypatch):
@@ -589,3 +591,29 @@ def test_fetch_security_description_sanitizes_date_artifacts(monkeypatch):
     assert payload["MATDATE"] == "2033-10-12"
     assert payload["OFFERDATE"] == "2039-10-24"
     assert payload["ISQUALIFIEDINVESTORS"] == "0"
+
+
+def test_enrich_amortization_redlist_monthly_cache_uses_stale_checkpoint_without_requests(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    def should_not_be_called(*args, **kwargs):
+        raise AssertionError("HTTP запрос не должен выполняться для redlist-кэша в пределах месяца")
+
+    monkeypatch.setattr(client, "_fetch_amortization_snapshot", should_not_be_called)
+    bonds = [{"SECID": "A"}]
+    fetched_at = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+
+    errors = client.enrich_amortization_start_dates(
+        bonds,
+        checkpoint_data={
+            "processed": {"A": {"amortization_start_date": "2025-06-01", "flags": {}, "fetched_at": fetched_at}},
+            "updated_at": fetched_at,
+            "completed": True,
+        },
+        monthly_cached_secids={"A"},
+        monthly_cache_ttl_days=30,
+    )
+
+    assert errors == 0
+    assert bonds[0]["Amortization_start_date"] == "2025-06-01"
