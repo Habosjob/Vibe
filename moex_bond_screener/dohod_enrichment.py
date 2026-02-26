@@ -20,7 +20,7 @@ from .raw_store import RawStore
 
 DohodProgressCallback = Callable[[dict[str, Any]], None]
 DohodCheckpointSaver = Callable[[dict[str, Any]], None]
-DOHOD_CHECKPOINT_VERSION = 2
+DOHOD_CHECKPOINT_VERSION = 3
 
 LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -52,12 +52,15 @@ YTM_NEARBY_RE = re.compile(
 
 @dataclass(slots=True)
 class DohodBondPayload:
-    ask_price: float | None
-    index_name: str
-    index_spread: float
-    index_tenor_years: int | None
-    event_name: str
-    ytm_date: str
+    ask_price: float | None = None
+    index_name: str = ""
+    index_spread: float = 0.0
+    index_tenor_years: int | None = None
+    event_name: str = ""
+    ytm_date: str = ""
+    real_price: float | None = None
+    coupon_type: str = ""
+    lesenka: str = ""
 
 
 @dataclass(slots=True)
@@ -146,7 +149,7 @@ class DohodEnricher:
                     payload, request_errors = future.result()
                 except Exception as exc:  # noqa: BLE001
                     self.logger.exception("Ошибка обработки ДОХОД instrument=%s: %s", identifier, exc)
-                    payload, request_errors = DohodBondPayload(None, "", 0.0, None, "", ""), 1
+                    payload, request_errors = DohodBondPayload(), 1
 
                 if request_errors == 0 and _is_payload_empty(payload):
                     self.last_stats.parse_empty_payloads += 1
@@ -157,11 +160,14 @@ class DohodEnricher:
                 if request_errors == 0:
                     serialized = {
                         "ask_price": payload.ask_price,
+                        "real_price": payload.real_price,
                         "index_name": payload.index_name,
                         "index_spread": payload.index_spread,
                         "index_tenor_years": payload.index_tenor_years,
                         "event_name": payload.event_name,
                         "ytm_date": payload.ytm_date,
+                        "coupon_type": payload.coupon_type,
+                        "lesenka": payload.lesenka,
                     }
                     processed[identifier] = serialized
                     self._apply_cached(identifier_to_bonds[identifier], serialized, index_values)
@@ -212,14 +218,44 @@ class DohodEnricher:
                 payload = self.parse_bond_payload(html)
                 if self.raw_store and _is_payload_empty(payload):
                     self.raw_store.dump_html(f"dohod_empty_{secid}.html", html)
+                corpbonds_payload = self._fetch_and_parse_corpbonds(secid)
+                if corpbonds_payload.real_price is not None:
+                    payload.real_price = corpbonds_payload.real_price
+                if corpbonds_payload.coupon_type:
+                    payload.coupon_type = corpbonds_payload.coupon_type
+                if corpbonds_payload.lesenka:
+                    payload.lesenka = corpbonds_payload.lesenka
+                if corpbonds_payload.index_name:
+                    payload.index_name = corpbonds_payload.index_name
+                    payload.index_spread = corpbonds_payload.index_spread
+                    payload.index_tenor_years = corpbonds_payload.index_tenor_years
+                if corpbonds_payload.ytm_date:
+                    payload.ytm_date = corpbonds_payload.ytm_date
+                    payload.event_name = "оферта"
                 return payload, 0
             except requests.RequestException as error:
                 self.logger.warning("Ошибка запроса ДОХОД instrument=%s попытка=%s: %s", secid, attempt, error)
                 if attempt == self.config.retries:
-                    return DohodBondPayload(None, "", 0.0, None, "", ""), 1
+                    return DohodBondPayload(), 1
                 time.sleep(float(getattr(self.config, "dohod_request_delay_seconds", 0.05)) * attempt)
 
-        return DohodBondPayload(None, "", 0.0, None, "", ""), 1
+        return DohodBondPayload(), 1
+
+    def _fetch_and_parse_corpbonds(self, secid: str) -> DohodBondPayload:
+        try:
+            response = self._get_with_rate_limit(
+                f"https://corpbonds.ru/bond/{secid}",
+                timeout=self.config.timeout_seconds,
+                delay_seconds=float(getattr(self.config, "dohod_request_delay_seconds", 0.05)),
+            )
+            response.raise_for_status()
+            html = response.text
+            if self.raw_store and self.config.raw_dump_enabled:
+                self.raw_store.dump_html(f"corpbonds_{secid}.html", html)
+            return self.parse_corpbonds_payload(html)
+        except requests.RequestException as error:
+            self.logger.warning("Ошибка запроса CorpBonds instrument=%s: %s", secid, error)
+            return DohodBondPayload()
 
     def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None) -> tuple[DohodBondPayload, int]:
         payload, errors = self._fetch_and_parse(primary_identifier)
@@ -273,7 +309,41 @@ class DohodEnricher:
         if not ytm_date:
             ytm_date = _extract_ytm_date_from_html(html)
 
-        return DohodBondPayload(ask_price, index_name, spread, tenor_years, event_name, ytm_date)
+        corpbonds_values = _extract_corpbonds_values(html)
+        real_price = _parse_corpbonds_price(corpbonds_values.get("Цена последняя", "") or corpbonds_values.get("Цена", ""))
+        coupon_type = corpbonds_values.get("Тип купона", "")
+        lesenka = corpbonds_values.get("Купон лесенкой", "")
+        formula_value = corpbonds_values.get("Формула купона", "")
+        if formula_value:
+            formula_index_name, formula_spread = _parse_index_and_spread(formula_value)
+            if formula_index_name:
+                index_name = formula_index_name
+                spread = formula_spread
+                if index_name == "Z_CURVE_RUS":
+                    tenor_years = _parse_tenor_years(formula_value)
+        offer_date_raw = corpbonds_values.get("Дата ближайшей оферты", "")
+        if offer_date_raw and offer_date_raw.strip().lower() not in {"нет", "нет данных", "no", "n/a"}:
+            ytm_date = _to_iso_date(offer_date_raw)
+            event_name = "оферта"
+
+        return DohodBondPayload(ask_price=ask_price, index_name=index_name, index_spread=spread, index_tenor_years=tenor_years, event_name=event_name, ytm_date=ytm_date, real_price=real_price, coupon_type=coupon_type, lesenka=lesenka)
+
+    @staticmethod
+    def parse_corpbonds_payload(html: str) -> DohodBondPayload:
+        values = _extract_corpbonds_values(html)
+        real_price = _parse_corpbonds_price(values.get("Цена последняя", "") or values.get("Цена", ""))
+        coupon_type = values.get("Тип купона", "")
+        lesenka = values.get("Купон лесенкой", "")
+        formula_value = values.get("Формула купона", "")
+        index_name, spread = _parse_index_and_spread(formula_value)
+        tenor_years = _parse_tenor_years(formula_value) if index_name == "Z_CURVE_RUS" else None
+        offer_date_raw = values.get("Дата ближайшей оферты", "")
+        ytm_date = ""
+        event_name = ""
+        if offer_date_raw and offer_date_raw.strip().lower() not in {"нет", "нет данных", "no", "n/a"}:
+            ytm_date = _to_iso_date(offer_date_raw)
+            event_name = "оферта"
+        return DohodBondPayload(index_name=index_name, index_spread=spread, index_tenor_years=tenor_years, event_name=event_name, ytm_date=ytm_date, real_price=real_price, coupon_type=coupon_type, lesenka=lesenka)
 
     def _resolve_index_values(self, checkpoint: dict[str, Any]) -> dict[str, float]:
         live_values = self._fetch_live_index_values()
@@ -420,31 +490,39 @@ class DohodEnricher:
     def _is_cached_payload_usable(payload: Any) -> bool:
         if not isinstance(payload, dict):
             return False
-        ask_price = payload.get("ask_price")
+        real_price = payload.get("real_price")
         index_name = str(payload.get("index_name") or "").strip()
         ytm_date = str(payload.get("ytm_date") or "").strip()
         event_name = str(payload.get("event_name") or "").strip()
-        if isinstance(ask_price, (int, float)) and float(ask_price) > 0:
+        if isinstance(real_price, (int, float)) and float(real_price) > 0:
             return True
         return bool(index_name or ytm_date or event_name)
 
     def _apply_cached(self, bonds: list[dict[str, Any]], payload: dict[str, Any], index_values: dict[str, float]) -> None:
-        ask_price = payload.get("ask_price")
+        real_price = payload.get("real_price")
         index_name = str(payload.get("index_name") or "")
         index_spread = float(payload.get("index_spread") or 0.0)
         index_tenor_years = payload.get("index_tenor_years")
         event_name = str(payload.get("event_name") or "")
         ytm_date = str(payload.get("ytm_date") or "")
+        coupon_type = str(payload.get("coupon_type") or "").strip()
+        lesenka = str(payload.get("lesenka") or "").strip()
 
         for bond in bonds:
-            if isinstance(ask_price, (int, float)) and float(ask_price) > 0:
-                new_real_price = float(ask_price)
+            if isinstance(real_price, (int, float)) and float(real_price) > 0:
+                new_real_price = float(real_price)
                 old_real_price = bond.get("RealPrice")
                 if old_real_price in (None, ""):
                     self.last_stats.realprice_added += 1
                 elif old_real_price != new_real_price:
                     self.last_stats.realprice_updated += 1
                 bond["RealPrice"] = new_real_price
+
+            if coupon_type:
+                bond["CouponType"] = coupon_type
+
+            if lesenka and lesenka.lower() not in {"нет", "нет данных"}:
+                bond["Lesenka"] = lesenka
 
             coupon_raw = str(bond.get("COUPONPERCENT") or "").strip()
             base_rate = float(index_values.get(index_name, 0.0))
@@ -693,6 +771,30 @@ def _normalize_index_name(raw: str) -> str:
     return normalized
 
 
+
+
+def _extract_corpbonds_values(html: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for row_html in ROW_RE.findall(html):
+        cells = CELL_RE.findall(row_html)
+        if len(cells) < 2:
+            continue
+        label = _strip_html(cells[0])
+        value = _strip_html(cells[1])
+        if not label or label in values:
+            continue
+        values[label] = value
+    return values
+
+
+def _parse_corpbonds_price(raw: str) -> float | None:
+    value = str(raw or '').strip().lower()
+    if not value or value in {'нет данных', 'нет', 'n/a', 'na'}:
+        return None
+    parsed = _as_float_or_none(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
 def _extract_index_base_rate_from_html(html: str, index_name: str) -> float | None:
     if not index_name:
         return None
@@ -891,6 +993,8 @@ def _to_iso_date(raw: str) -> str:
     value = raw.strip()
     if not value:
         return ""
+    if value.lower() in {"нет", "нет данных", "n/a", "na"}:
+        return ""
     for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
         try:
             return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
@@ -948,7 +1052,8 @@ def _extract_event_name_from_html(html: str) -> str:
 def _is_payload_empty(payload: DohodBondPayload) -> bool:
     """Совместимость: проверка пустого payload для старого fallback-кода."""
     return (
-        payload.ask_price is None
+        payload.real_price is None
+        and payload.ask_price is None
         and not payload.index_name
         and not payload.event_name
         and not payload.ytm_date

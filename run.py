@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -82,6 +83,8 @@ def main() -> None:
     )
     if fetch_completed:
         state_store.clear_checkpoint("bonds_fetch")
+
+    _sanitize_date_fields(bonds)
 
     progress.start_stage(5, "Применение правил исключения")
     exclusion_filter = BondExclusionFilter(days_threshold=config.exclusion_window_days)
@@ -346,7 +349,7 @@ def _prepare_amortization_checkpoint(checkpoint: dict[str, Any]) -> tuple[dict[s
     if not is_fresh:
         return {}, True, False
 
-    normalized = {str(secid): str(value or "") for secid, value in processed.items() if str(secid).strip()}
+    normalized = {str(secid): value for secid, value in processed.items() if str(secid).strip()}
     cache_stats_raw = checkpoint.get("cache_stats", {})
     cache_stats = {"date": "", "hits": 0, "misses": 0}
     if isinstance(cache_stats_raw, dict):
@@ -362,6 +365,22 @@ def _prepare_amortization_checkpoint(checkpoint: dict[str, Any]) -> tuple[dict[s
         "updated_at": updated_at.isoformat(),
         "completed": bool(checkpoint.get("completed", False)),
     }, False, True
+
+
+def _sanitize_date_fields(bonds: list[dict[str, Any]]) -> None:
+    date_fields = ("MATDATE", "Amortization_start_date", "BUYBACKDATE", "OFFERDATE", "CALLOPTIONDATE", "PUTOPTIONDATE")
+    for bond in bonds:
+        for field in date_fields:
+            raw_value = str(bond.get(field) or "").strip()
+            if not raw_value:
+                continue
+            match = re.search(r"(\d{4}-\d{2}-\d{2})", raw_value)
+            if match:
+                bond[field] = match.group(1)
+                continue
+            if re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", raw_value):
+                day, month, year = raw_value.split(".")
+                bond[field] = f"{year}-{month}-{day}"
 
 
 def _print_fetch_progress(data: dict[str, Any], progress: PipelineProgress) -> None:

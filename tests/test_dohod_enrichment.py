@@ -164,7 +164,7 @@ def test_cached_payload_with_zero_ask_price_is_refetched() -> None:
     def fake_fetch(identifier: str):
         calls["count"] += 1
         assert identifier == "RU1"
-        return DohodBondPayload(101.2, "", 0.0, None, "", ""), 0
+        return DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=101.2), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
@@ -175,7 +175,7 @@ def test_cached_payload_with_zero_ask_price_is_refetched() -> None:
         "index_values": {"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0},
         "bonds": {
             "RU1": {
-                "ask_price": 0.0,
+                "real_price": 0.0,
                 "index_name": "",
                 "index_spread": 0.0,
                 "index_tenor_years": None,
@@ -247,7 +247,7 @@ def test_enrich_bonds_uses_live_base_rate_when_formula_present() -> None:
         "index_values": {"RUONIA": 15.4, "CBR_RATE": 16.0, "Z_CURVE_RUS": 14.0},
         "bonds": {
             "RU_BASE": {
-                "ask_price": 100.0,
+                "real_price": 100.0,
                 "index_name": "RUONIA",
                 "index_spread": 1.25,
                 "index_tenor_years": None,
@@ -315,7 +315,7 @@ def test_enrich_bonds_fills_realprice_coupon_and_offerdate() -> None:
 
     def fake_fetch(identifier: str):
         assert identifier == "RU000A0ZZTL5"
-        return DohodBondPayload(92.99, "Z_CURVE_RUS", 0.7, 7, "право продать (put)", "2027-08-26"), 0
+        return DohodBondPayload(index_name="Z_CURVE_RUS", index_spread=0.7, index_tenor_years=7, event_name="право продать (put)", ytm_date="2027-08-26", real_price=92.99), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
@@ -339,7 +339,7 @@ def test_enrich_bonds_overrides_zero_coupon_and_updates_offer_without_event() ->
 
     def fake_fetch(identifier: str):
         assert identifier == "RU000A0ZZTL5"
-        return DohodBondPayload(101.1, "RUONIA", 0.4, None, "", "2027-08-26"), 0
+        return DohodBondPayload(index_name="RUONIA", index_spread=0.4, index_tenor_years=None, event_name="", ytm_date="2027-08-26", real_price=101.1), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
@@ -373,7 +373,7 @@ def test_enrich_bonds_uses_fresh_checkpoint_without_requests() -> None:
 
     def fail_fetch(_: str):
         called["count"] += 1
-        return DohodBondPayload(None, "", 0.0, None, "", ""), 1
+        return DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=None), 1
 
     enricher._fetch_and_parse = fail_fetch  # type: ignore[method-assign]
 
@@ -384,7 +384,7 @@ def test_enrich_bonds_uses_fresh_checkpoint_without_requests() -> None:
         "index_values": {"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0},
         "bonds": {
             "RU1": {
-                "ask_price": 100.5,
+                "real_price": 100.5,
                 "index_name": "",
                 "index_spread": 0.0,
                 "index_tenor_years": None,
@@ -412,7 +412,7 @@ def test_enrich_bonds_refetches_when_cached_payload_is_empty() -> None:
     def fake_fetch(identifier: str):
         called["count"] += 1
         assert identifier == "RU1"
-        return DohodBondPayload(101.2, "RUONIA", 0.3, None, "", "2028-05-01"), 0
+        return DohodBondPayload(index_name="RUONIA", index_spread=0.3, index_tenor_years=None, event_name="", ytm_date="2028-05-01", real_price=101.2), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
@@ -423,7 +423,7 @@ def test_enrich_bonds_refetches_when_cached_payload_is_empty() -> None:
         "index_values": {"RUONIA": 15.0, "CBR_RATE": 15.0, "Z_CURVE_RUS": 14.0},
         "bonds": {
             "RU1": {
-                "ask_price": None,
+                "real_price": None,
                 "index_name": "",
                 "index_spread": 0.0,
                 "index_tenor_years": None,
@@ -456,7 +456,7 @@ def test_enrich_bonds_recalculates_legacy_spread_only_coupon_from_cache() -> Non
         "index_values": {"RUONIA": 16.0, "CBR_RATE": 15.5, "Z_CURVE_RUS": 14.0},
         "bonds": {
             "RU000A105KW6": {
-                "ask_price": 101.0,
+                "real_price": 101.0,
                 "index_name": "CBR_RATE",
                 "index_spread": 1.5,
                 "index_tenor_years": None,
@@ -493,7 +493,7 @@ def test_enrich_bonds_skips_coupon_enrichment_when_index_base_missing() -> None:
         "index_values": {"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0},
         "bonds": {
             "RU000A105KW6": {
-                "ask_price": 101.0,
+                "real_price": 101.0,
                 "index_name": "CBR_RATE",
                 "index_spread": 1.5,
                 "index_tenor_years": None,
@@ -525,7 +525,7 @@ def test_enrich_bonds_aggregates_repeated_missing_base_warnings(caplog) -> None:
         "index_values": {"RUONIA": 16.0, "CBR_RATE": 0.0, "Z_CURVE_RUS": 14.0},
         "bonds": {
             "RU1": {
-                "ask_price": 101.0,
+                "real_price": 101.0,
                 "index_name": "CBR_RATE",
                 "index_spread": 1.5,
                 "index_tenor_years": None,
@@ -533,7 +533,7 @@ def test_enrich_bonds_aggregates_repeated_missing_base_warnings(caplog) -> None:
                 "ytm_date": "",
             },
             "RU2": {
-                "ask_price": 102.0,
+                "real_price": 102.0,
                 "index_name": "CBR_RATE",
                 "index_spread": 1.5,
                 "index_tenor_years": None,
@@ -567,7 +567,7 @@ def test_enrich_bonds_skips_record_without_isin() -> None:
 
     def fake_fetch(identifier: str):
         called.append(identifier)
-        return DohodBondPayload(101.0, "", 0.0, None, "", ""), 0
+        return DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=101.0), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
@@ -740,7 +740,7 @@ def test_enrich_bonds_uses_live_ruonia_base_for_coupon() -> None:
 
     def fake_fetch(identifier: str):
         assert identifier == "RU1"
-        return DohodBondPayload(100.0, "RUONIA", 0.8, None, "", ""), 0
+        return DohodBondPayload(index_name="RUONIA", index_spread=0.8, index_tenor_years=None, event_name="", ytm_date="", real_price=100.0), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
@@ -753,8 +753,8 @@ def test_enrich_bonds_uses_live_ruonia_base_for_coupon() -> None:
 
 
 def test_is_payload_empty_helper_for_backward_compatibility() -> None:
-    assert _is_payload_empty(DohodBondPayload(None, "", 0.0, None, "", "")) is True
-    assert _is_payload_empty(DohodBondPayload(99.9, "", 0.0, None, "", "")) is False
+    assert _is_payload_empty(DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=None)) is True
+    assert _is_payload_empty(DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=99.9)) is False
 
 
 
@@ -764,14 +764,14 @@ def test_compat_methods_for_mixed_versions_do_not_fail() -> None:
 
     def fake_fetch(identifier: str):
         assert identifier == "RU000A0ZZTL5"
-        return DohodBondPayload(100.0, "", 0.0, None, "", ""), 0
+        return DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=100.0), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
     payload, errors = enricher._fetch_with_fallback("RU000A0ZZTL5", "SU26228RMFS5")
 
     assert errors == 0
-    assert payload.ask_price == 100.0
+    assert payload.real_price == 100.0
     assert enricher._resolve_secondary_identifier({"ISIN": "RU1", "SECID": "SU1"}, "RU1") == ""
 
 
@@ -784,16 +784,16 @@ def test_fetch_with_fallback_uses_secid_when_isin_payload_empty() -> None:
     def fake_fetch(identifier: str):
         calls.append(identifier)
         if identifier == "RU000A0JTYK4":
-            return DohodBondPayload(None, "", 0.0, None, "", ""), 0
+            return DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=None), 0
         assert identifier == "BOND500"
-        return DohodBondPayload(99.8, "", 0.0, None, "", ""), 0
+        return DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=99.8), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
     payload, errors = enricher._fetch_with_fallback("RU000A0JTYK4", "BOND500")
 
     assert errors == 0
-    assert payload.ask_price == 99.8
+    assert payload.real_price == 99.8
     assert calls == ["RU000A0JTYK4", "BOND500"]
 
 
@@ -807,7 +807,7 @@ def test_enrich_bonds_counts_empty_parsed_payload_as_error() -> None:
 
     def fake_fetch(identifier: str):
         assert identifier == "RU000A0ZZTL5"
-        return DohodBondPayload(None, "", 0.0, None, "", ""), 0
+        return DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=None), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
@@ -826,7 +826,7 @@ def test_enrich_bonds_batches_checkpoint_saves_for_initial_run() -> None:
     enricher._fetch_live_index_values = lambda: {"RUONIA": 14.0, "CBR_RATE": 16.0, "Z_CURVE_RUS": 12.0}  # type: ignore[method-assign]
 
     def fake_fetch(identifier: str):
-        return DohodBondPayload(100.0, "", 0.0, None, "", ""), 0
+        return DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=100.0), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
@@ -852,7 +852,7 @@ def test_enrich_bonds_saves_final_checkpoint_even_with_large_interval() -> None:
 
     def fake_fetch(identifier: str):
         assert identifier == "RU1"
-        return DohodBondPayload(100.0, "", 0.0, None, "", ""), 0
+        return DohodBondPayload(index_name="", index_spread=0.0, index_tenor_years=None, event_name="", ytm_date="", real_price=100.0), 0
 
     enricher._fetch_and_parse = fake_fetch  # type: ignore[method-assign]
 
@@ -864,3 +864,40 @@ def test_enrich_bonds_saves_final_checkpoint_even_with_large_interval() -> None:
     assert errors == 0
     assert len(checkpoints) == 1
     assert checkpoints[0]["completed"] is True
+
+def test_parse_corpbonds_payload_extracts_price_coupon_and_offer() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Цена последняя</p></td><td><p class=\"val\">101,25</p></td></tr>
+      <tr><td><p>Тип купона</p></td><td><p class=\"val\">Флоатер</p></td></tr>
+      <tr><td><p>Формула купона</p></td><td><p class=\"val\">RUONIA + 2,10%</p></td></tr>
+      <tr><td><p>Дата ближайшей оферты</p></td><td><p class=\"val\">24.10.2039</p></td></tr>
+      <tr><td><p>Купон лесенкой</p></td><td><p class=\"val\">Да</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.real_price == 101.25
+    assert payload.coupon_type == "Флоатер"
+    assert payload.index_name == "RUONIA"
+    assert payload.index_spread == 2.1
+    assert payload.ytm_date == "2039-10-24"
+    assert payload.lesenka == "Да"
+
+
+def test_enrich_uses_corpbonds_realprice_instead_of_dohod_ask() -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 14.5, "CBR_RATE": 14.0, "Z_CURVE_RUS": 13.0}  # type: ignore[method-assign]
+
+    def fake_fetch(_primary: str, _secondary: str | None):
+        return DohodBondPayload(ask_price=88.0, real_price=99.5), 0
+
+    enricher._fetch_with_fallback = fake_fetch  # type: ignore[method-assign]
+
+    bonds = [{"SECID": "RU1_SEC", "ISIN": "RU1", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2030-01-01"}]
+    errors = enricher.enrich_bonds(bonds)
+
+    assert errors == 0
+    assert bonds[0]["RealPrice"] == 99.5

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 
 from moex_bond_screener.moex_client import AMORTIZATION_CHECKPOINT_VERSION
-from run import _prepare_amortization_checkpoint, _print_emitents_progress
+from run import _prepare_amortization_checkpoint, _print_emitents_progress, _sanitize_date_fields
 
 
 class _DummyProgress:
@@ -31,7 +31,7 @@ def test_prepare_amortization_checkpoint_normalizes_valid_payload() -> None:
     checkpoint, invalidated, is_fresh = _prepare_amortization_checkpoint(
         {
             "version": AMORTIZATION_CHECKPOINT_VERSION,
-            "processed": {"A": "2025-01-01", "": "2024-01-01", "B": None},
+            "processed": {"A": {"amortization_start_date": "2025-01-01", "flags": {}}, "": "2024-01-01", "B": None},
             "updated_at": updated_at,
             "completed": 1,
         }
@@ -41,7 +41,7 @@ def test_prepare_amortization_checkpoint_normalizes_valid_payload() -> None:
     assert is_fresh is True
     assert checkpoint == {
         "version": AMORTIZATION_CHECKPOINT_VERSION,
-        "processed": {"A": "2025-01-01", "B": ""},
+        "processed": {"A": {"amortization_start_date": "2025-01-01", "flags": {}}, "B": None},
         "cache_stats": {"date": "", "hits": 0, "misses": 0},
         "updated_at": updated_at,
         "completed": True,
@@ -130,3 +130,17 @@ def test_print_emitents_progress_reports_market_descriptions() -> None:
 
     assert progress.ticks == ["Запрашиваем description для market SECID без EMITTER_ID"]
     assert progress.fractions == [(15, 120, "обработано market-description карточек")]
+
+
+def test_sanitize_date_fields_removes_json_artifacts() -> None:
+    bonds = [{
+        "MATDATE": "2033-10-12 {'flags': {'ISQUALIFIEDINVESTORS': '0'}}",
+        "Amortization_start_date": "amortization_start_date: 2027-09-27",
+        "OFFERDATE": "24.10.2039",
+    }]
+
+    _sanitize_date_fields(bonds)
+
+    assert bonds[0]["MATDATE"] == "2033-10-12"
+    assert bonds[0]["Amortization_start_date"] == "2027-09-27"
+    assert bonds[0]["OFFERDATE"] == "2039-10-24"
