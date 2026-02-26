@@ -176,3 +176,20 @@ def test_collect_forced_blacklist_emitters_resolves_missing_ids_from_description
 
     assert emitters == {"111", "222"}
     assert secid_map["AAA"] == "111"
+
+
+def test_collect_forced_blacklist_emitters_accepts_numeric_hasdefault_flags() -> None:
+    bonds = [
+        {"SECID": "AAA", "HASDEFAULT": 1.0, "EMITTER_ID": "111.0"},
+        {"SECID": "BBB", "HASDEFAULT": "1.0", "EMITTER_ID": "222"},
+        {"SECID": "CCC", "HASDEFAULT": "да", "EMITTER_ID": "333"},
+        {"SECID": "DDD", "HASDEFAULT": "0", "EMITTER_ID": "444"},
+    ]
+
+    emitters, _ = _collect_forced_blacklist_emitters(
+        bonds=bonds,
+        secid_to_emitter_map={},
+        client=_DummyClient({}),
+    )
+
+    assert emitters == {"111", "222", "333"}

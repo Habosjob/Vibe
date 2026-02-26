@@ -20,7 +20,7 @@ from .raw_store import RawStore
 
 DohodProgressCallback = Callable[[dict[str, Any]], None]
 DohodCheckpointSaver = Callable[[dict[str, Any]], None]
-DOHOD_CHECKPOINT_VERSION = 4
+DOHOD_CHECKPOINT_VERSION = 5
 
 LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -234,8 +234,6 @@ class DohodEnricher:
                 corpbonds_payload = self._fetch_and_parse_corpbonds(secid) if secid else DohodBondPayload()
                 if corpbonds_payload.real_price is not None:
                     payload.real_price = corpbonds_payload.real_price
-                elif payload.real_price is None and payload.ask_price is not None and payload.ask_price > 0:
-                    payload.real_price = payload.ask_price
                 if corpbonds_payload.coupon_type:
                     payload.coupon_type = corpbonds_payload.coupon_type
                 if corpbonds_payload.lesenka:
@@ -328,7 +326,7 @@ class DohodEnricher:
             ytm_date = _extract_ytm_date_from_html(html)
 
         corpbonds_values = _extract_corpbonds_values(html)
-        real_price = _parse_corpbonds_price(corpbonds_values.get("Цена последняя", "") or corpbonds_values.get("Цена", ""))
+        real_price = _parse_corpbonds_price(corpbonds_values.get("Цена последняя", ""))
         coupon_type = corpbonds_values.get("Тип купона", "")
         lesenka = corpbonds_values.get("Купон лесенкой", "")
         formula_value = corpbonds_values.get("Формула купона", "")
@@ -349,7 +347,7 @@ class DohodEnricher:
     @staticmethod
     def parse_corpbonds_payload(html: str) -> DohodBondPayload:
         values = _extract_corpbonds_values(html)
-        real_price = _parse_corpbonds_price(values.get("Цена последняя", "") or values.get("Цена", ""))
+        real_price = _parse_corpbonds_price(values.get("Цена последняя", ""))
         coupon_type = values.get("Тип купона", "")
         lesenka = values.get("Купон лесенкой", "")
         formula_value = values.get("Формула купона", "")
@@ -833,7 +831,7 @@ def _canonicalize_corpbonds_label(raw_label: str) -> str:
 
     if "цена послед" in label:
         return "Цена последняя"
-    if label.startswith("цена"):
+    if label == "цена":
         return "Цена"
     if "тип купона" in label:
         return "Тип купона"

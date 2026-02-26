@@ -916,7 +916,7 @@ def test_parse_corpbonds_payload_extracts_price_coupon_and_offer() -> None:
     assert payload.lesenka == "Да"
 
 
-def test_fetch_and_parse_falls_back_to_dohod_ask_when_corpbonds_price_missing() -> None:
+def test_fetch_and_parse_does_not_fill_realprice_from_dohod_ask_when_corpbonds_price_missing() -> None:
     class _Response:
         def __init__(self, text: str) -> None:
             self.text = text
@@ -934,7 +934,7 @@ def test_fetch_and_parse_falls_back_to_dohod_ask_when_corpbonds_price_missing() 
 
     assert errors == 0
     assert payload.ask_price == 97.4
-    assert payload.real_price == 97.4
+    assert payload.real_price is None
 
 
 def test_enrich_uses_corpbonds_realprice_instead_of_dohod_ask() -> None:
@@ -1016,3 +1016,16 @@ def test_parse_corpbonds_payload_parses_percent_realprice_and_sigma_ks_formula()
     assert payload.index_name == "CBR_RATE"
     assert payload.index_spread == 2.0
     assert payload.ytm_date == "2031-07-15"
+
+
+def test_parse_corpbonds_payload_ignores_non_last_price_rows() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Цена размещения</p></td><td><p class=\"val\">0,21</p></td></tr>
+      <tr><td><p>Цена предыдущего закрытия</p></td><td><p class=\"val\">0,00</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.real_price is None
