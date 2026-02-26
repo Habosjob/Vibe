@@ -25,7 +25,7 @@ from moex_bond_screener.progress import PipelineProgress
 from moex_bond_screener.raw_store import RawStore
 from moex_bond_screener.state_store import ScreenerStateStore
 from moex_bond_screener.writer import save_bonds_file
-from moex_bond_screener.writer import save_emitents_excel
+from moex_bond_screener.writer import load_emitents_manual_overrides, save_emitents_excel
 from moex_bond_screener.ytm import enrich_ytm
 
 
@@ -196,12 +196,14 @@ def main() -> None:
     }
     forced_blacklist_emitters.discard("")
 
+    manual_overrides = load_emitents_manual_overrides(config.emitents_output_file)
     emitents_result = build_emitents_reference(
         eligible_bonds=eligible_bonds,
         client=client,
         state_store=state_store,
         progress_callback=lambda data: _print_emitents_progress(data, progress),
         forced_blacklist_emitters=forced_blacklist_emitters,
+        manual_overrides=manual_overrides,
     )
     save_emitents_excel(config.emitents_output_file, emitents_result.rows)
     stage_durations["emitents_seconds"] = round(time.perf_counter() - stage_started, 2)
@@ -247,6 +249,8 @@ def main() -> None:
         "corpbonds_realprice_added": dohod_stats.corpbonds_realprice_added,
         "corpbonds_coupontype_added": dohod_stats.corpbonds_coupontype_added,
         "corpbonds_lesenka_added": dohod_stats.corpbonds_lesenka_added,
+        "corpbonds_offerdate_added": dohod_stats.corpbonds_offerdate_added,
+        "corpbonds_coupon_formula_applied": dohod_stats.corpbonds_coupon_formula_applied,
         "ytm_calculated": ytm_stats.calculated,
         "ytm_skipped": ytm_stats.skipped,
     }
@@ -287,7 +291,9 @@ def main() -> None:
         "CorpBonds: "
         f"RealPrice +{dohod_stats.corpbonds_realprice_added}, "
         f"CouponType +{dohod_stats.corpbonds_coupontype_added}, "
-        f"Lesenka +{dohod_stats.corpbonds_lesenka_added}"
+        f"Lesenka +{dohod_stats.corpbonds_lesenka_added}, "
+        f"OfferDate +{dohod_stats.corpbonds_offerdate_added}, "
+        f"CouponFormula->COUPONPERCENT +{dohod_stats.corpbonds_coupon_formula_applied}"
     )
     print(
         "Инкрементальные изменения: "
@@ -335,6 +341,8 @@ def main() -> None:
                 "corpbonds_realprice_added": dohod_stats.corpbonds_realprice_added,
                 "corpbonds_coupontype_added": dohod_stats.corpbonds_coupontype_added,
                 "corpbonds_lesenka_added": dohod_stats.corpbonds_lesenka_added,
+                "corpbonds_offerdate_added": dohod_stats.corpbonds_offerdate_added,
+                "corpbonds_coupon_formula_applied": dohod_stats.corpbonds_coupon_formula_applied,
                 "stage_durations": stage_durations,
             },
         }
