@@ -7,6 +7,8 @@ from moex_bond_screener.exclusion_rules import (
     STRUCTURAL_BOND_RULE_NAME,
     BondExclusionFilter,
     PERMANENT_EXCLUDE_UNTIL,
+    HASDEFAULT_RULE_NAME,
+    QUALIFIED_ONLY_RULE_NAME,
 )
 
 
@@ -127,3 +129,27 @@ def test_exclusion_filter_excludes_structural_bonds_permanently() -> None:
         "exclude_until": PERMANENT_EXCLUDE_UNTIL,
     }
     assert result.excluded_by_rule[STRUCTURAL_BOND_RULE_NAME] == 1
+
+
+def test_exclusion_filter_excludes_hasdefault_permanently() -> None:
+    bonds = [{"SECID": "D1", "HASDEFAULT": "1"}, {"SECID": "D2", "HASDEFAULT": "0"}]
+    result = BondExclusionFilter(days_threshold=365).apply(bonds=bonds, previous_exclusions={}, today=date(2026, 1, 1))
+
+    assert [bond["SECID"] for bond in result.eligible_bonds] == ["D2"]
+    assert result.active_exclusions["D1"]["rule"] == HASDEFAULT_RULE_NAME
+    assert result.active_exclusions["D1"]["exclude_until"] == PERMANENT_EXCLUDE_UNTIL
+    assert result.excluded_by_rule[HASDEFAULT_RULE_NAME] == 1
+
+
+def test_exclusion_filter_excludes_qualified_investors_temporarily() -> None:
+    bonds = [{"SECID": "Q1", "ISQUALIFIEDINVESTORS": "1"}]
+    result = BondExclusionFilter(days_threshold=365, qualified_investor_days=31).apply(
+        bonds=bonds,
+        previous_exclusions={},
+        today=date(2026, 1, 1),
+    )
+
+    assert result.eligible_bonds == []
+    assert result.active_exclusions["Q1"]["rule"] == QUALIFIED_ONLY_RULE_NAME
+    assert result.active_exclusions["Q1"]["exclude_until"] == "2026-02-01"
+    assert result.excluded_by_rule[QUALIFIED_ONLY_RULE_NAME] == 1

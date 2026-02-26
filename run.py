@@ -14,6 +14,8 @@ from moex_bond_screener.dohod_enrichment import DohodEnricher
 from moex_bond_screener.emitents import build_emitents_reference
 from moex_bond_screener.exclusion_rules import (
     AMORTIZATION_RULE_NAME,
+    HASDEFAULT_RULE_NAME,
+    QUALIFIED_ONLY_RULE_NAME,
     STRUCTURAL_BOND_RULE_NAME,
     BondExclusionFilter,
 )
@@ -32,15 +34,21 @@ def main() -> None:
     started_dt = datetime.now(timezone.utc)
     logger = setup_logging()
     progress = PipelineProgress(total_stages=11)
+    stage_started = time.perf_counter()
+    stage_durations: dict[str, float] = {}
 
     progress.start_stage(1, "Загрузка конфигурации")
     config = load_config()
 
+    stage_durations["config_load_seconds"] = round(time.perf_counter() - stage_started, 2)
     progress.start_stage(2, "Подготовка raw-хранилища")
+    stage_started = time.perf_counter()
     raw_store = RawStore("raw")
     raw_store.cleanup(config.raw_ttl_hours, config.raw_max_size_mb)
 
+    stage_durations["raw_cleanup_seconds"] = round(time.perf_counter() - stage_started, 2)
     progress.start_stage(3, "Загрузка состояния сортировщика и чекпоинтов")
+    stage_started = time.perf_counter()
     state_store = ScreenerStateStore(
         config.exclusions_state_dir,
         storage_backend=config.storage_backend,
@@ -57,7 +65,18 @@ def main() -> None:
 
     rebuild_lock_path = Path(config.exclusions_state_dir) / "checkpoints" / "amortization_rebuild.lock"
 
+    if config.force_cache_refresh:
+        progress.tick("Принудительное обновление кэша: удаляем чекпоинты и market cache")
+        for checkpoint_name in ("bonds_fetch", "amortization", "dohod_enrichment", "market_cache_bonds", "market_cache_shares"):
+            state_store.clear_checkpoint(checkpoint_name)
+        previous_exclusions = {}
+        bonds_checkpoint = {}
+        raw_amortization_checkpoint = {}
+
+
+    stage_durations["state_load_seconds"] = round(time.perf_counter() - stage_started, 2)
     progress.start_stage(4, "Загрузка облигаций с MOEX")
+    stage_started = time.perf_counter()
     client = MoexClient(config=config, logger=logger, raw_store=raw_store)
 
     if rebuild_lock_path.exists():
@@ -86,11 +105,15 @@ def main() -> None:
 
     _sanitize_date_fields(bonds)
 
+    stage_durations["fetch_bonds_seconds"] = round(time.perf_counter() - stage_started, 2)
     progress.start_stage(5, "Применение правил исключения")
-    exclusion_filter = BondExclusionFilter(days_threshold=config.exclusion_window_days)
+    stage_started = time.perf_counter()
+    exclusion_filter = BondExclusionFilter(days_threshold=config.exclusion_window_days, qualified_investor_days=config.qualified_investor_exclusion_days)
     exclusion_result = exclusion_filter.apply(bonds=bonds, previous_exclusions=previous_exclusions)
 
+    stage_durations["first_filter_seconds"] = round(time.perf_counter() - stage_started, 2)
     progress.start_stage(6, "Обогащение датой начала амортизации")
+    stage_started = time.perf_counter()
     if amortization_checkpoint_invalidated:
         progress.tick("Найден устаревший кэш амортизации — старые данные сброшены, пересчитываем этап")
     elif amortization_cache_fresh:
@@ -113,7 +136,9 @@ def main() -> None:
         previous_exclusions={},
     )
 
+    stage_durations["amortization_seconds"] = round(time.perf_counter() - stage_started, 2)
     progress.start_stage(7, "Обогащение данных через ДОХОД")
+    stage_started = time.perf_counter()
     dohod_client = DohodEnricher(config=config, logger=logger, raw_store=raw_store)
     dohod_checkpoint = state_store.load_checkpoint("dohod_enrichment")
     dohod_errors = dohod_client.enrich_bonds(
@@ -124,7 +149,9 @@ def main() -> None:
     )
     dohod_stats = dohod_client.last_stats
 
+    stage_durations["dohod_seconds"] = round(time.perf_counter() - stage_started, 2)
     progress.start_stage(8, "Повторная фильтрация после обогащения")
+    stage_started = time.perf_counter()
     post_dohod_exclusion_result = exclusion_filter.apply(
         bonds=post_amortization_exclusion_result.eligible_bonds,
         previous_exclusions={},
@@ -147,21 +174,45 @@ def main() -> None:
         + post_dohod_exclusion_result.skipped_by_active_exclusion
     )
 
+    stage_durations["second_filter_and_scoring_seconds"] = round(time.perf_counter() - stage_started, 2)
     progress.start_stage(9, "Сохранение инкрементального состояния")
+    stage_started = time.perf_counter()
     state_store.save_exclusions(active_exclusions)
     state_store.update_exclusions_history(active_exclusions)
     incremental_stats = state_store.update_eligible_bonds(eligible_bonds)
 
+    stage_durations["incremental_state_seconds"] = round(time.perf_counter() - stage_started, 2)
     progress.start_stage(10, "Сохранение итогового файла")
 
     progress.start_stage(11, "Формирование справочника эмитентов")
+    stage_started = time.perf_counter()
+    forced_blacklist_emitters = {
+        str(bond.get("EMITTER_ID") or bond.get("ISSUER_ID") or "").strip()
+        for bond in bonds
+        if str(bond.get("HASDEFAULT") or "").strip() == "1"
+    }
+    forced_blacklist_emitters.discard("")
+
     emitents_result = build_emitents_reference(
         eligible_bonds=eligible_bonds,
         client=client,
         state_store=state_store,
         progress_callback=lambda data: _print_emitents_progress(data, progress),
+        forced_blacklist_emitters=forced_blacklist_emitters,
     )
     save_emitents_excel(config.emitents_output_file, emitents_result.rows)
+    stage_durations["emitents_seconds"] = round(time.perf_counter() - stage_started, 2)
+
+    scorerate_emoji = {"Greenlist": "🟢", "Yellowlist": "🟡", "Redlist": "🔴"}
+    annotated_bonds: list[dict[str, Any]] = []
+    for bond in eligible_bonds:
+        emitter_id = str(bond.get("EMITTER_ID") or bond.get("ISSUER_ID") or "").strip()
+        scorerate = emitents_result.scorerate_by_emitter.get(emitter_id, "")
+        if scorerate == "Blacklist":
+            continue
+        bond["ScoreColor"] = scorerate_emoji.get(scorerate, "")
+        annotated_bonds.append(bond)
+    eligible_bonds = annotated_bonds
 
     elapsed = time.time() - started
     summary = {
@@ -176,6 +227,8 @@ def main() -> None:
         "excluded_calloption_lt_1y": excluded_by_rule["calloption_lt_1y"],
         "excluded_mat_lt_1y": excluded_by_rule["mat_lt_1y"],
         "excluded_amortization_started_or_lt_1y_permanent": excluded_by_rule[AMORTIZATION_RULE_NAME],
+        "excluded_hasdefault_permanent": excluded_by_rule[HASDEFAULT_RULE_NAME],
+        "excluded_qualified_investors_temp": excluded_by_rule[QUALIFIED_ONLY_RULE_NAME],
         "amortization_cache_hits": int(amortization_checkpoint_latest.get("cache_stats", {}).get("hits", 0)),
         "amortization_cache_misses": int(amortization_checkpoint_latest.get("cache_stats", {}).get("misses", 0)),
         "dohod_realprice_added": dohod_stats.realprice_added,
@@ -191,6 +244,7 @@ def main() -> None:
         "ytm_skipped": ytm_stats.skipped,
     }
     summary.update(emitents_result.stage_durations)
+    summary.update(stage_durations)
     save_bonds_file(config.output_file, eligible_bonds, summary=summary)
     filtered_total = len(bonds) - len(eligible_bonds)
 
@@ -203,6 +257,8 @@ def main() -> None:
     print(f"  - CALLOPTIONDATE < {config.exclusion_window_days} дней: {excluded_by_rule['calloption_lt_1y']}")
     print(f"  - MATDATE < {config.exclusion_window_days} дней: {excluded_by_rule['mat_lt_1y']}")
     print(f"  - Структурные облигации (BONDTYPE): {excluded_by_rule[STRUCTURAL_BOND_RULE_NAME]}")
+    print(f"  - HASDEFAULT=1 (пожизненно): {excluded_by_rule[HASDEFAULT_RULE_NAME]}")
+    print(f"  - ISQUALIFIEDINVESTORS=1 (на {config.qualified_investor_exclusion_days} дней): {excluded_by_rule[QUALIFIED_ONLY_RULE_NAME]}")
     print(
         "  - Amortization_start_date < "
         f"{config.exclusion_window_days} дней (включая начавшуюся): {excluded_by_rule[AMORTIZATION_RULE_NAME]}"
@@ -220,6 +276,12 @@ def main() -> None:
     )
     print(f"YTM: рассчитано {ytm_stats.calculated}, пропущено {ytm_stats.skipped}")
     print(f"ДОХОД: пустых payload после парсинга: {dohod_stats.parse_empty_payloads}")
+    print(
+        "CorpBonds: "
+        f"RealPrice +{dohod_stats.corpbonds_realprice_added}, "
+        f"CouponType +{dohod_stats.corpbonds_coupontype_added}, "
+        f"Lesenka +{dohod_stats.corpbonds_lesenka_added}"
+    )
     print(
         "Инкрементальные изменения: "
         f"+{incremental_stats.inserted} / ~{incremental_stats.updated} / = {incremental_stats.unchanged} / -{incremental_stats.removed}"
@@ -263,6 +325,10 @@ def main() -> None:
                 "dohod_parse_empty_payloads": dohod_stats.parse_empty_payloads,
                 "ytm_calculated": ytm_stats.calculated,
                 "ytm_skipped": ytm_stats.skipped,
+                "corpbonds_realprice_added": dohod_stats.corpbonds_realprice_added,
+                "corpbonds_coupontype_added": dohod_stats.corpbonds_coupontype_added,
+                "corpbonds_lesenka_added": dohod_stats.corpbonds_lesenka_added,
+                "stage_durations": stage_durations,
             },
         }
     )

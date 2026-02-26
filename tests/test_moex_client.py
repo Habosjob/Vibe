@@ -500,6 +500,7 @@ def test_enrich_amortization_checkpoint_contains_updated_at(monkeypatch):
     client = MoexClient(config=config, logger=logging.getLogger("test"))
 
     monkeypatch.setattr(client, "_fetch_amortization_start_date", lambda secid, matdate="": ("", 0))
+    monkeypatch.setattr(client, "_fetch_security_risk_flags", lambda secid: ({"ISQUALIFIEDINVESTORS": "0", "HASTECHNICALDEFAULT": "0", "HASDEFAULT": "0"}, 0))
 
     saved_payloads: list[dict] = []
     bonds = [{"SECID": "A"}]

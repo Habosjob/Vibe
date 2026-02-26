@@ -13,6 +13,7 @@ import re
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 import yaml
 
 
@@ -50,7 +51,7 @@ DEFAULT_FORCED_GROUPS = {
     "CURRENCYID": "Купоны и номинал",
     "YTM": "Купоны и номинал",
 }
-DEFAULT_PRIORITY_FIELDS = ["SHORTNAME", "ISIN", "DATA_STATUS", "MATDATE", "AMORTIZATION_START_DATE", "SECID"]
+DEFAULT_PRIORITY_FIELDS = ["SCORECOLOR", "SHORTNAME", "ISIN", "DATA_STATUS", "MATDATE", "AMORTIZATION_START_DATE", "SECID"]
 DEFAULT_COLLAPSED_GROUPS = {"Прочее", "Даты", "Торги и доходность"}
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
@@ -120,7 +121,7 @@ def _group_name(field: str) -> str:
         forced = forced_groups[upper]
         if forced in group_order:
             return forced
-    if upper in {"SHORTNAME", "ISIN", "FACEUNIT", "BONDNAME", "EMITTER"}:
+    if upper in {"SCORECOLOR", "SHORTNAME", "ISIN", "FACEUNIT", "BONDNAME", "EMITTER"}:
         return "Служебная информация"
     if any(token in upper for token in ["PRICE", "YIELD", "WAPRICE", "DURATION", "SPREAD"]):
         return "Торги и доходность"
@@ -553,8 +554,11 @@ def save_emitents_excel(path: str, emitents: list[dict[str, str]]) -> None:
     fields = [
         "Полное наименование",
         "ИНН",
+        "Scorerate",
+        "DateScore",
         "Тикеры акций",
         "ISIN облигаций",
+        "EMITTER_ID",
         "missing_full_name",
         "missing_inn",
         "Флаг качества",
@@ -567,6 +571,20 @@ def save_emitents_excel(path: str, emitents: list[dict[str, str]]) -> None:
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    scorerate_col = fields.index("Scorerate") + 1
+    scorerate_letter = get_column_letter(scorerate_col)
+    if sheet.max_row >= 2:
+        validation = DataValidation(
+            type="list",
+            formula1="\"Blacklist,Redlist,Yellowlist,Greenlist\"",
+            allow_blank=True,
+            showErrorMessage=True,
+            errorTitle="Некорректный Scorerate",
+            error="Допустимые значения: Blacklist, Redlist, Yellowlist, Greenlist",
+        )
+        validation.add(f"{scorerate_letter}2:{scorerate_letter}{sheet.max_row}")
+        sheet.add_data_validation(validation)
 
     for col_idx in range(1, len(fields) + 1):
         column_letter = get_column_letter(col_idx)

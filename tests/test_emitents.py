@@ -323,8 +323,11 @@ def test_build_emitents_reference_keeps_old_emitters_when_no_new_bonds(monkeypat
         {
             "Полное наименование": "Старый Эмитент",
             "ИНН": "7701000000",
+            "Scorerate": "",
+            "DateScore": "",
             "Тикеры акций": "",
             "ISIN облигаций": "",
+            "EMITTER_ID": "111",
             "missing_full_name": "0",
             "missing_inn": "0",
             "Флаг качества": "ok",
@@ -451,3 +454,24 @@ def test_build_emitents_reference_skips_bonds_market_when_emitters_known(monkeyp
     assert result.errors == 0
     assert market_calls == ["bonds", "shares"]
     assert result.rows[0]["ISIN облигаций"] == "RU000B"
+
+def test_build_emitents_reference_marks_forced_blacklist(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    store.save_emitents_registry({"111": {"full_name": "Эмитент", "inn": "7701000000", "scorerate": "", "datescore": ""}})
+    monkeypatch.setattr(client, "fetch_security_description", lambda secid: ({}, 0))
+    monkeypatch.setattr(client, "fetch_emitter_details", lambda emitter_id: ({}, 1))
+    monkeypatch.setattr(client, "fetch_market_securities", lambda market: ([], 0))
+
+    result = build_emitents_reference(
+        eligible_bonds=[{"SECID": "B1", "EMITTER_ID": "111"}],
+        client=client,
+        state_store=store,
+        forced_blacklist_emitters={"111"},
+    )
+
+    assert result.scorerate_by_emitter["111"] == "Blacklist"
+    assert result.rows[0]["Scorerate"] == "Blacklist"
+    assert result.rows[0]["DateScore"]

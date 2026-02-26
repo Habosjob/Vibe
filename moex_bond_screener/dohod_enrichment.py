@@ -76,6 +76,9 @@ class DohodEnrichmentStats:
     offer_added: int = 0
     offer_updated: int = 0
     parse_empty_payloads: int = 0
+    corpbonds_realprice_added: int = 0
+    corpbonds_coupontype_added: int = 0
+    corpbonds_lesenka_added: int = 0
 
 
 class DohodEnricher:
@@ -89,6 +92,7 @@ class DohodEnricher:
         self._thread_local = threading.local()
         self._missing_base_warning_counts: dict[tuple[str, float], int] = {}
         self.last_stats = DohodEnrichmentStats()
+        self._corpbonds_secid_by_isin: dict[str, str] = {}
 
     def enrich_bonds(
         self,
@@ -98,6 +102,7 @@ class DohodEnricher:
         progress_callback: DohodProgressCallback | None = None,
     ) -> int:
         self.last_stats = DohodEnrichmentStats()
+        self._corpbonds_secid_by_isin: dict[str, str] = {}
         self._missing_base_warning_counts = {}
         checkpoint = self._normalize_checkpoint(checkpoint_data or {})
         previous_payload = checkpoint.get("bonds", {})
@@ -107,16 +112,17 @@ class DohodEnricher:
         fresh_cache = self._is_checkpoint_fresh(checkpoint)
 
         identifier_to_bonds: dict[str, list[dict[str, Any]]] = {}
-        secondary_identifiers: dict[str, str] = {}
+        secid_by_identifier: dict[str, str] = {}
         for bond in bonds:
             primary_identifier = self._resolve_bond_identifier(bond)
             if not primary_identifier:
                 continue
-            secondary_identifier = self._resolve_secondary_identifier(bond, primary_identifier)
-            if secondary_identifier:
-                secondary_identifiers.setdefault(primary_identifier, secondary_identifier)
+            secid = self._resolve_corpbonds_secid(bond)
+            if secid:
+                secid_by_identifier.setdefault(primary_identifier, secid)
             identifier_to_bonds.setdefault(primary_identifier, []).append(bond)
 
+        self._corpbonds_secid_by_isin = dict(secid_by_identifier)
         pending: list[str] = []
         for identifier in identifier_to_bonds:
             if fresh_cache and not index_changed and identifier in processed:
@@ -140,7 +146,7 @@ class DohodEnricher:
         workers = max(1, int(getattr(self.config, "dohod_workers", 8)))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(self._fetch_with_fallback, identifier, secondary_identifiers.get(identifier)): identifier
+                executor.submit(self._fetch_with_fallback, identifier, None): identifier
                 for identifier in pending
             }
             for future in as_completed(futures):
@@ -203,22 +209,23 @@ class DohodEnricher:
 
         return errors
 
-    def _fetch_and_parse(self, secid: str) -> tuple[DohodBondPayload, int]:
+    def _fetch_and_parse(self, isin: str) -> tuple[DohodBondPayload, int]:
         for attempt in range(1, self.config.retries + 1):
             try:
                 response = self._get_with_rate_limit(
-                    f"https://analytics.dohod.ru/bond/{secid}",
+                    f"https://analytics.dohod.ru/bond/{isin}",
                     timeout=self.config.timeout_seconds,
                     delay_seconds=float(getattr(self.config, "dohod_request_delay_seconds", 0.05)),
                 )
                 response.raise_for_status()
                 html = response.text
                 if self.raw_store and self.config.raw_dump_enabled:
-                    self.raw_store.dump_html(f"dohod_{secid}.html", html)
+                    self.raw_store.dump_html(f"dohod_{isin}.html", html)
                 payload = self.parse_bond_payload(html)
                 if self.raw_store and _is_payload_empty(payload):
-                    self.raw_store.dump_html(f"dohod_empty_{secid}.html", html)
-                corpbonds_payload = self._fetch_and_parse_corpbonds(secid)
+                    self.raw_store.dump_html(f"dohod_empty_{isin}.html", html)
+                secid = self._corpbonds_secid_by_isin.get(isin, "")
+                corpbonds_payload = self._fetch_and_parse_corpbonds(secid) if secid else DohodBondPayload()
                 if corpbonds_payload.real_price is not None:
                     payload.real_price = corpbonds_payload.real_price
                 if corpbonds_payload.coupon_type:
@@ -234,7 +241,7 @@ class DohodEnricher:
                     payload.event_name = "оферта"
                 return payload, 0
             except requests.RequestException as error:
-                self.logger.warning("Ошибка запроса ДОХОД instrument=%s попытка=%s: %s", secid, attempt, error)
+                self.logger.warning("Ошибка запроса ДОХОД instrument=%s попытка=%s: %s", isin, attempt, error)
                 if attempt == self.config.retries:
                     return DohodBondPayload(), 1
                 time.sleep(float(getattr(self.config, "dohod_request_delay_seconds", 0.05)) * attempt)
@@ -257,27 +264,28 @@ class DohodEnricher:
             self.logger.warning("Ошибка запроса CorpBonds instrument=%s: %s", secid, error)
             return DohodBondPayload()
 
-    def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None) -> tuple[DohodBondPayload, int]:
+
+    def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None = None) -> tuple[DohodBondPayload, int]:
         payload, errors = self._fetch_and_parse(primary_identifier)
         if secondary_identifier and (errors > 0 or _is_payload_empty(payload)):
             fallback_payload, fallback_errors = self._fetch_and_parse(secondary_identifier)
             if fallback_errors == 0 and not _is_payload_empty(fallback_payload):
-                self.logger.info(
-                    "ДОХОД: использован fallback identifier %s -> %s",
-                    primary_identifier,
-                    secondary_identifier,
-                )
                 return fallback_payload, 0
             errors += fallback_errors
         return payload, errors
 
     @staticmethod
     def _resolve_bond_identifier(bond: dict[str, Any]) -> str:
+        """Сервис ДОХОД принимает только ISIN."""
         return str(bond.get("ISIN") or "").strip()
 
     @staticmethod
+    def _resolve_corpbonds_secid(bond: dict[str, Any]) -> str:
+        """CorpBonds принимает только SECID."""
+        return str(bond.get("SECID") or "").strip()
+
+    @staticmethod
     def _resolve_secondary_identifier(bond: dict[str, Any], primary_identifier: str) -> str:
-        """Сервис ДОХОД работает только с ISIN: fallback по другим идентификаторам отключен."""
         _ = bond
         _ = primary_identifier
         return ""
@@ -514,14 +522,19 @@ class DohodEnricher:
                 old_real_price = bond.get("RealPrice")
                 if old_real_price in (None, ""):
                     self.last_stats.realprice_added += 1
+                    self.last_stats.corpbonds_realprice_added += 1
                 elif old_real_price != new_real_price:
                     self.last_stats.realprice_updated += 1
                 bond["RealPrice"] = new_real_price
 
             if coupon_type:
+                if not str(bond.get("CouponType") or "").strip():
+                    self.last_stats.corpbonds_coupontype_added += 1
                 bond["CouponType"] = coupon_type
 
             if lesenka and lesenka.lower() not in {"нет", "нет данных"}:
+                if not str(bond.get("Lesenka") or "").strip():
+                    self.last_stats.corpbonds_lesenka_added += 1
                 bond["Lesenka"] = lesenka
 
             coupon_raw = str(bond.get("COUPONPERCENT") or "").strip()
