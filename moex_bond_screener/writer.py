@@ -614,28 +614,31 @@ def load_emitents_manual_overrides(path: str) -> dict[str, dict[str, str]]:
         return {}
 
     workbook = load_workbook(target, read_only=True, data_only=True)
-    if "EMITENTS" not in workbook.sheetnames:
-        return {}
+    try:
+        if "EMITENTS" not in workbook.sheetnames:
+            return {}
 
-    sheet = workbook["EMITENTS"]
-    header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
-    if not header_row:
-        return {}
+        sheet = workbook["EMITENTS"]
+        header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not header_row:
+            return {}
 
-    indexes = {str(name or "").strip(): idx for idx, name in enumerate(header_row)}
-    emitter_idx = indexes.get("EMITTER_ID")
-    scorerate_idx = indexes.get("Scorerate")
-    datescore_idx = indexes.get("DateScore")
-    if emitter_idx is None or scorerate_idx is None:
-        return {}
+        indexes = {str(name or "").strip(): idx for idx, name in enumerate(header_row)}
+        emitter_idx = indexes.get("EMITTER_ID")
+        scorerate_idx = indexes.get("Scorerate")
+        datescore_idx = indexes.get("DateScore")
+        if emitter_idx is None or scorerate_idx is None:
+            return {}
 
-    overrides: dict[str, dict[str, str]] = {}
-    for row in sheet.iter_rows(min_row=2, values_only=True):
-        emitter_id = str(row[emitter_idx] or "").strip()
-        if not emitter_id:
-            continue
-        overrides[emitter_id] = {
-            "scorerate": str(row[scorerate_idx] or "").strip(),
-            "datescore": str(row[datescore_idx] or "").strip() if datescore_idx is not None else "",
-        }
-    return overrides
+        overrides: dict[str, dict[str, str]] = {}
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            emitter_id = str(row[emitter_idx] or "").strip()
+            if not emitter_id:
+                continue
+            overrides[emitter_id] = {
+                "scorerate": str(row[scorerate_idx] or "").strip(),
+                "datescore": str(row[datescore_idx] or "").strip() if datescore_idx is not None else "",
+            }
+        return overrides
+    finally:
+        workbook.close()

@@ -189,12 +189,13 @@ def main() -> None:
 
     progress.start_stage(11, "Формирование справочника эмитентов")
     stage_started = time.perf_counter()
-    forced_blacklist_emitters = {
-        str(bond.get("EMITTER_ID") or bond.get("ISSUER_ID") or "").strip()
-        for bond in bonds
-        if str(bond.get("HASDEFAULT") or "").strip() == "1"
-    }
-    forced_blacklist_emitters.discard("")
+    secid_to_emitter_map = state_store.load_secid_to_emitter_map()
+    forced_blacklist_emitters, secid_to_emitter_map = _collect_forced_blacklist_emitters(
+        bonds=bonds,
+        secid_to_emitter_map=secid_to_emitter_map,
+        client=client,
+    )
+    state_store.save_secid_to_emitter_map(secid_to_emitter_map)
 
     manual_overrides = load_emitents_manual_overrides(config.emitents_output_file)
     emitents_result = build_emitents_reference(
@@ -209,9 +210,16 @@ def main() -> None:
     stage_durations["emitents_seconds"] = round(time.perf_counter() - stage_started, 2)
 
     scorerate_emoji = {"Greenlist": "🟢", "Yellowlist": "🟡", "Redlist": "🔴"}
+    secid_to_emitter_latest = state_store.load_secid_to_emitter_map()
     annotated_bonds: list[dict[str, Any]] = []
     for bond in eligible_bonds:
-        emitter_id = str(bond.get("EMITTER_ID") or bond.get("ISSUER_ID") or "").strip()
+        secid = str(bond.get("SECID") or "").strip()
+        emitter_id = _normalize_emitter_id(
+            bond.get("EMITTER_ID")
+            or bond.get("ISSUER_ID")
+            or secid_to_emitter_latest.get(secid, "")
+            or ""
+        )
         scorerate = emitents_result.scorerate_by_emitter.get(emitter_id, "")
         if scorerate == "Blacklist":
             continue
@@ -347,6 +355,57 @@ def main() -> None:
             },
         }
     )
+
+
+
+
+def _collect_forced_blacklist_emitters(
+    bonds: list[dict[str, Any]],
+    secid_to_emitter_map: dict[str, str],
+    client: MoexClient,
+) -> tuple[set[str], dict[str, str]]:
+    forced_blacklist_emitters: set[str] = set()
+    updated_map = dict(secid_to_emitter_map)
+    unresolved_hasdefault_secids: set[str] = set()
+
+    for bond in bonds:
+        if str(bond.get("HASDEFAULT") or "").strip() != "1":
+            continue
+
+        secid = str(bond.get("SECID") or "").strip()
+        emitter_id = _normalize_emitter_id(
+            bond.get("EMITTER_ID")
+            or bond.get("ISSUER_ID")
+            or updated_map.get(secid, "")
+            or ""
+        )
+        if emitter_id:
+            forced_blacklist_emitters.add(emitter_id)
+            continue
+
+        if secid:
+            unresolved_hasdefault_secids.add(secid)
+
+    for secid in sorted(unresolved_hasdefault_secids):
+        details, _errors = client.fetch_security_description(secid)
+        emitter_id = _normalize_emitter_id(details.get("EMITTER_ID") or details.get("ISSUER_ID") or "")
+        if not emitter_id:
+            continue
+        forced_blacklist_emitters.add(emitter_id)
+        updated_map[secid] = emitter_id
+
+    return forced_blacklist_emitters, updated_map
+
+
+def _normalize_emitter_id(raw_value: Any) -> str:
+    value = str(raw_value or "").strip()
+    if not value:
+        return ""
+    if value.endswith(".0"):
+        integer_part = value[:-2]
+        if integer_part.isdigit():
+            return integer_part
+    return value
 
 
 def _run_amortization_rebuild_mode(

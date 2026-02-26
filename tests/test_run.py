@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 
 from moex_bond_screener.moex_client import AMORTIZATION_CHECKPOINT_VERSION
-from run import _prepare_amortization_checkpoint, _print_emitents_progress, _sanitize_date_fields
+from run import _collect_forced_blacklist_emitters, _normalize_emitter_id, _prepare_amortization_checkpoint, _print_emitents_progress, _sanitize_date_fields
 
 
 class _DummyProgress:
@@ -144,3 +144,35 @@ def test_sanitize_date_fields_removes_json_artifacts() -> None:
     assert bonds[0]["MATDATE"] == "2033-10-12"
     assert bonds[0]["Amortization_start_date"] == "2027-09-27"
     assert bonds[0]["OFFERDATE"] == "2039-10-24"
+
+
+def test_normalize_emitter_id_handles_excel_float_suffix() -> None:
+    assert _normalize_emitter_id("123.0") == "123"
+    assert _normalize_emitter_id("123") == "123"
+    assert _normalize_emitter_id("") == ""
+
+
+class _DummyClient:
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self.mapping = mapping
+
+    def fetch_security_description(self, secid: str):
+        emitter_id = self.mapping.get(secid, "")
+        return ({"EMITTER_ID": emitter_id}, 0)
+
+
+def test_collect_forced_blacklist_emitters_resolves_missing_ids_from_description() -> None:
+    bonds = [
+        {"SECID": "AAA", "HASDEFAULT": "1"},
+        {"SECID": "BBB", "HASDEFAULT": "1", "EMITTER_ID": "222.0"},
+        {"SECID": "CCC", "HASDEFAULT": "0", "EMITTER_ID": "333"},
+    ]
+
+    emitters, secid_map = _collect_forced_blacklist_emitters(
+        bonds=bonds,
+        secid_to_emitter_map={"AAA": ""},
+        client=_DummyClient({"AAA": "111"}),
+    )
+
+    assert emitters == {"111", "222"}
+    assert secid_map["AAA"] == "111"

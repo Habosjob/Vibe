@@ -984,3 +984,35 @@ def test_enrich_bonds_counts_corpbonds_offerdate_and_formula_stats() -> None:
     assert bonds[0]["OFFERDATE"] == "2030-01-01"
     assert enricher.last_stats.corpbonds_coupon_formula_applied == 1
     assert enricher.last_stats.corpbonds_offerdate_added == 1
+
+def test_is_payload_empty_returns_false_when_only_corpbonds_fields_present() -> None:
+    payload = DohodBondPayload(coupon_type="Фикс", lesenka="Нет")
+    assert _is_payload_empty(payload) is False
+
+
+def test_cached_payload_usable_when_only_corpbonds_fields_present() -> None:
+    payload = {
+        "real_price": None,
+        "index_name": "",
+        "ytm_date": "",
+        "event_name": "",
+        "coupon_type": "Фикс",
+        "lesenka": "Нет",
+    }
+    assert DohodEnricher._is_cached_payload_usable(payload) is True
+
+def test_parse_corpbonds_payload_parses_percent_realprice_and_sigma_ks_formula() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Цена последняя</p></td><td><p class=\"val\">100,39 %</p></td></tr>
+      <tr><td><p>Формула купона</p></td><td><p class=\"val\">∑КС + 2%</p></td></tr>
+      <tr><td><p>Ближайшая дата</p></td><td><p class=\"val\">15.07.2031</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.real_price == 100.39
+    assert payload.index_name == "CBR_RATE"
+    assert payload.index_spread == 2.0
+    assert payload.ytm_date == "2031-07-15"
