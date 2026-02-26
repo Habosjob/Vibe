@@ -1,6 +1,7 @@
 # CHANGELOG
 
 ## 2026-02-26
+- Доработано заполнение `DateScore` в `emitents`: если у эмитента уже есть непустой `Scorerate`, но дата исторически пустая, теперь проставляется текущая дата (backfill) при следующем формировании справочника.
 - Исправлена логика `DateScore` в `emitents`: дата теперь автоматически проставляется при любом новом значении `Scorerate`, включая ручные правки в `emitents.xlsx` при пустом `DateScore`.
 - В `scripts/run_emitents.py` добавлен перенос дефолтников из `exclusions_history` (`hasdefault_permanent`) в `forced_blacklist_emitters`, чтобы Blacklist попадал в `emitents.xlsx` и при отдельном запуске скрипта.
 - Перенос forced-blacklist в `run.py` усилен данными `exclusions_history`: теперь учитываются не только текущие `bonds` с `HASDEFAULT=1`, но и исторически исключённые дефолтные бумаги.

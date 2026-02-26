@@ -357,6 +357,9 @@ def build_emitents_reference(
         datescore = str(details.get("datescore") or "").strip()
         if scorerate != previous_score:
             datescore = today
+        elif scorerate and not datescore:
+            # Фиксируем дату, если оценка уже есть, но исторически поле DateScore осталось пустым.
+            datescore = today
 
         registry[emitter_id] = {
             "full_name": full_name,
