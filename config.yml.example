@@ -15,6 +15,7 @@ exclusion_window_days: 365
 amortization_workers: 8
 dohod_workers: 12
 dohod_request_delay_seconds: 0.03
+dohod_checkpoint_save_every: 25
 cbr_key_rate_url: "https://www.cbr.ru/hd_base/KeyRate/"
 cbr_ruonia_url: "https://www.cbr.ru/hd_base/ruonia/"
 z_curve_cbr_url: "https://www.cbr.ru/hd_base/zcyc_params/"

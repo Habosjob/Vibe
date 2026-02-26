@@ -129,6 +129,8 @@ class DohodEnricher:
 
         errors = 0
         processed_count = len(identifier_to_bonds) - len(pending)
+        checkpoint_save_every = max(1, int(getattr(self.config, "dohod_checkpoint_save_every", 25) or 25))
+        last_checkpoint_saved_count = processed_count
         if progress_callback:
             progress_callback({"processed": processed_count, "total": len(identifier_to_bonds), "message": "Кэш ДОХОД применен"})
 
@@ -165,7 +167,8 @@ class DohodEnricher:
                     self._apply_cached(identifier_to_bonds[identifier], serialized, index_values)
 
                 processed_count += 1
-                if checkpoint_saver:
+                should_save_checkpoint = (processed_count - last_checkpoint_saved_count) >= checkpoint_save_every
+                if checkpoint_saver and should_save_checkpoint:
                     checkpoint_saver(
                         {
                             "version": DOHOD_CHECKPOINT_VERSION,
@@ -175,6 +178,7 @@ class DohodEnricher:
                             "bonds": processed,
                         }
                     )
+                    last_checkpoint_saved_count = processed_count
                 if progress_callback:
                     progress_callback({"processed": processed_count, "total": len(identifier_to_bonds)})
 
