@@ -377,3 +377,26 @@ def test_save_bonds_excel_marks_approx_coupon_in_yellow(tmp_path: Path) -> None:
     coupon_col = headers.index("COUPONPERCENT") + 1
 
     assert sheet.cell(row=3, column=coupon_col).fill.fgColor.rgb == "00FFF59D"
+
+
+def test_save_bonds_excel_places_ytm_into_coupon_group(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [
+        {
+            "SECID": "SU26218RMFS6",
+            "SHORTNAME": "ОФЗ 26218",
+            "ISIN": "RU000A0JVW48",
+            "YTM": 11.25,
+            "MATDATE": "2029-05-16",
+        }
+    ]
+
+    save_bonds_file(str(target), bonds)
+
+    workbook = load_workbook(target)
+    sheet = workbook["MOEX_BONDS"]
+    headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
+    ytm_col = headers.index("YTM") + 1
+
+    separator_col = max(idx for idx, header in enumerate(headers, start=1) if idx < ytm_col and header in ("", None))
+    assert sheet.cell(row=1, column=separator_col).value == "Купоны и номинал"

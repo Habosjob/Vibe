@@ -48,6 +48,7 @@ DEFAULT_GROUP_ORDER = [
 DEFAULT_FORCED_GROUPS = {
     "AMORTIZATION_START_DATE": "Даты",
     "CURRENCYID": "Купоны и номинал",
+    "YTM": "Купоны и номинал",
 }
 DEFAULT_PRIORITY_FIELDS = ["SHORTNAME", "ISIN", "DATA_STATUS", "MATDATE", "AMORTIZATION_START_DATE", "SECID"]
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")

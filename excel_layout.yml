@@ -8,6 +8,7 @@ group_order:
 forced_groups:
   AMORTIZATION_START_DATE: Даты
   CURRENCYID: Купоны и номинал
+  YTM: Купоны и номинал
   DATA_STATUS: Служебная информация
   DATA_STATUS_REASON: Служебная информация
 

@@ -19,6 +19,7 @@ from moex_bond_screener.raw_store import RawStore
 from moex_bond_screener.state_store import ScreenerStateStore
 from moex_bond_screener.writer import save_bonds_file
 from moex_bond_screener.writer import save_emitents_excel
+from moex_bond_screener.ytm import enrich_ytm
 
 
 def main() -> None:
@@ -123,6 +124,7 @@ def main() -> None:
     )
 
     eligible_bonds = post_dohod_exclusion_result.eligible_bonds
+    ytm_stats = enrich_ytm(eligible_bonds)
     attach_data_status(eligible_bonds)
     active_exclusions = dict(exclusion_result.active_exclusions)
     active_exclusions.update(post_amortization_exclusion_result.active_exclusions)
@@ -178,6 +180,8 @@ def main() -> None:
         "dohod_cache_hits": dohod_stats.cache_hits,
         "dohod_requested": dohod_stats.requested,
         "dohod_parse_empty_payloads": dohod_stats.parse_empty_payloads,
+        "ytm_calculated": ytm_stats.calculated,
+        "ytm_skipped": ytm_stats.skipped,
     }
     summary.update(emitents_result.stage_durations)
     save_bonds_file(config.output_file, eligible_bonds, summary=summary)
@@ -206,6 +210,7 @@ def main() -> None:
         f"COUPONPERCENT +{dohod_stats.coupon_added}/~{dohod_stats.coupon_updated}, "
         f"OFFERDATE +{dohod_stats.offer_added}/~{dohod_stats.offer_updated}"
     )
+    print(f"YTM: рассчитано {ytm_stats.calculated}, пропущено {ytm_stats.skipped}")
     print(f"ДОХОД: пустых payload после парсинга: {dohod_stats.parse_empty_payloads}")
     print(
         "Инкрементальные изменения: "
@@ -248,6 +253,8 @@ def main() -> None:
                 "dohod_cache_hits": dohod_stats.cache_hits,
                 "dohod_requested": dohod_stats.requested,
                 "dohod_parse_empty_payloads": dohod_stats.parse_empty_payloads,
+                "ytm_calculated": ytm_stats.calculated,
+                "ytm_skipped": ytm_stats.skipped,
             },
         }
     )
