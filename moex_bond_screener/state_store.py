@@ -443,9 +443,9 @@ class ScreenerStateStore:
             )
             columns = {row[1] for row in conn.execute("PRAGMA table_info(emitents_registry)").fetchall()}
             if "scorerate" not in columns:
-                conn.execute("ALTER TABLE emitents_registry ADD COLUMN scorerate TEXT NOT NULL DEFAULT ")
+                conn.execute("ALTER TABLE emitents_registry ADD COLUMN scorerate TEXT NOT NULL DEFAULT ''")
             if "datescore" not in columns:
-                conn.execute("ALTER TABLE emitents_registry ADD COLUMN datescore TEXT NOT NULL DEFAULT ")
+                conn.execute("ALTER TABLE emitents_registry ADD COLUMN datescore TEXT NOT NULL DEFAULT ''")
             conn.commit()
 
     def _checkpoint_path(self, name: str) -> Path:
