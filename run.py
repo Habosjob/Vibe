@@ -213,6 +213,7 @@ def main() -> None:
         scorerate = emitents_result.scorerate_by_emitter.get(emitter_id, "")
         if scorerate == "Blacklist":
             continue
+        bond["Scorerate"] = scorerate
         bond["ScoreColor"] = scorerate_emoji.get(scorerate, "")
         annotated_bonds.append(bond)
     eligible_bonds = annotated_bonds

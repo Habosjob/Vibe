@@ -228,6 +228,8 @@ class DohodEnricher:
                 corpbonds_payload = self._fetch_and_parse_corpbonds(secid) if secid else DohodBondPayload()
                 if corpbonds_payload.real_price is not None:
                     payload.real_price = corpbonds_payload.real_price
+                elif payload.real_price is None and payload.ask_price is not None and payload.ask_price > 0:
+                    payload.real_price = payload.ask_price
                 if corpbonds_payload.coupon_type:
                     payload.coupon_type = corpbonds_payload.coupon_type
                 if corpbonds_payload.lesenka:
@@ -792,12 +794,32 @@ def _extract_corpbonds_values(html: str) -> dict[str, str]:
         cells = CELL_RE.findall(row_html)
         if len(cells) < 2:
             continue
-        label = _strip_html(cells[0])
+        label = _canonicalize_corpbonds_label(_strip_html(cells[0]))
         value = _strip_html(cells[1])
         if not label or label in values:
             continue
         values[label] = value
     return values
+
+
+def _canonicalize_corpbonds_label(raw_label: str) -> str:
+    label = _normalize_label(raw_label)
+    if not label:
+        return ""
+
+    if "цена послед" in label:
+        return "Цена последняя"
+    if label.startswith("цена"):
+        return "Цена"
+    if "тип купона" in label:
+        return "Тип купона"
+    if "купон лесенкой" in label:
+        return "Купон лесенкой"
+    if "формула купона" in label:
+        return "Формула купона"
+    if "дата ближайшей оферты" in label:
+        return "Дата ближайшей оферты"
+    return raw_label.strip()
 
 
 def _parse_corpbonds_price(raw: str) -> float | None:
