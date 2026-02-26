@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from moex_bond_screener.state_store import ScreenerStateStore
 
@@ -141,3 +142,24 @@ def test_state_store_load_runs_returns_notes_json(tmp_path) -> None:
     rows = store.load_runs(limit=1)
     assert len(rows) == 1
     assert rows[0]["notes"] == {"mode": "full"}
+
+
+def test_state_store_sqlite_migration_adds_scoring_columns(tmp_path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    db_path = state_dir / "screener_state.db"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE emitents_registry("
+            "emitter_id TEXT PRIMARY KEY, full_name TEXT NOT NULL, inn TEXT NOT NULL)"
+        )
+        conn.commit()
+
+    store = ScreenerStateStore(str(state_dir), storage_backend="sqlite")
+    store.save_emitents_registry({"10": {"full_name": "Эмитент", "inn": "7701234567", "scorerate": "Greenlist"}})
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(emitents_registry)").fetchall()}
+
+    assert {"scorerate", "datescore"}.issubset(columns)

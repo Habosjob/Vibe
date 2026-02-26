@@ -26,6 +26,7 @@ class AppConfig:
     raw_max_size_mb: int = 50
     exclusions_state_dir: str = "state"
     exclusion_window_days: int = 365
+    qualified_investor_exclusion_days: int = 30
     amortization_workers: int = 8
     dohod_workers: int = 12
     dohod_request_delay_seconds: float = 0.03
@@ -37,6 +38,7 @@ class AppConfig:
     z_curve_moex_url: str = "https://iss.moex.com/iss/engines/stock/zcyc/securities.json?iss.meta=off"
     storage_backend: str = "sqlite"
     sqlite_db_path: str = "screener_state.db"
+    force_cache_refresh: bool = False
 
 
 DEFAULT_CONFIG_PATH = Path("config.yml")
