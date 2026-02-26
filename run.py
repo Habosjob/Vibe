@@ -209,7 +209,6 @@ def main() -> None:
     save_emitents_excel(config.emitents_output_file, emitents_result.rows)
     stage_durations["emitents_seconds"] = round(time.perf_counter() - stage_started, 2)
 
-    scorerate_emoji = {"Greenlist": "🟢", "Yellowlist": "🟡", "Redlist": "🔴"}
     secid_to_emitter_latest = state_store.load_secid_to_emitter_map()
     annotated_bonds: list[dict[str, Any]] = []
     for bond in eligible_bonds:
@@ -224,7 +223,6 @@ def main() -> None:
         if scorerate == "Blacklist":
             continue
         bond["Scorerate"] = scorerate
-        bond["ScoreColor"] = scorerate_emoji.get(scorerate, "")
         annotated_bonds.append(bond)
     eligible_bonds = annotated_bonds
 
@@ -369,7 +367,7 @@ def _collect_forced_blacklist_emitters(
     unresolved_hasdefault_secids: set[str] = set()
 
     for bond in bonds:
-        if str(bond.get("HASDEFAULT") or "").strip() != "1":
+        if not _is_enabled_flag(bond.get("HASDEFAULT")):
             continue
 
         secid = str(bond.get("SECID") or "").strip()
@@ -406,6 +404,18 @@ def _normalize_emitter_id(raw_value: Any) -> str:
         if integer_part.isdigit():
             return integer_part
     return value
+
+
+def _is_enabled_flag(raw_value: Any) -> bool:
+    if isinstance(raw_value, bool):
+        return raw_value
+    text = str(raw_value or "").strip().lower()
+    if text in {"1", "1.0", "true", "yes", "y", "да"}:
+        return True
+    try:
+        return float(text.replace(",", ".")) == 1.0
+    except ValueError:
+        return False
 
 
 def _run_amortization_rebuild_mode(

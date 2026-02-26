@@ -53,7 +53,7 @@ DEFAULT_FORCED_GROUPS = {
     "CURRENCYID": "Купоны и номинал",
     "YTM": "Купоны и номинал",
 }
-DEFAULT_PRIORITY_FIELDS = ["SCORECOLOR", "SHORTNAME", "ISIN", "DATA_STATUS", "MATDATE", "AMORTIZATION_START_DATE", "SECID"]
+DEFAULT_PRIORITY_FIELDS = ["SCORERATE", "SHORTNAME", "ISIN", "DATA_STATUS", "MATDATE", "AMORTIZATION_START_DATE", "SECID"]
 DEFAULT_COLLAPSED_GROUPS = {"Прочее", "Даты", "Торги и доходность"}
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
@@ -123,7 +123,7 @@ def _group_name(field: str) -> str:
         forced = forced_groups[upper]
         if forced in group_order:
             return forced
-    if upper in {"SCORECOLOR", "SHORTNAME", "ISIN", "FACEUNIT", "BONDNAME", "EMITTER"}:
+    if upper in {"SCORERATE", "SCORECOLOR", "SHORTNAME", "ISIN", "FACEUNIT", "BONDNAME", "EMITTER"}:
         return "Служебная информация"
     if any(token in upper for token in ["PRICE", "YIELD", "WAPRICE", "DURATION", "SPREAD"]):
         return "Торги и доходность"
