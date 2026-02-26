@@ -401,6 +401,7 @@ def test_enrich_amortization_continues_on_worker_exception(monkeypatch):
         return "2026-01-01", 0
 
     monkeypatch.setattr(client, "_fetch_amortization_start_date", fake_fetch)
+    monkeypatch.setattr(client, "_fetch_security_risk_flags", lambda secid: ({"ISQUALIFIEDINVESTORS": "0", "HASTECHNICALDEFAULT": "0", "HASDEFAULT": "0"}, 0))
 
     bonds = [{"SECID": "A"}, {"SECID": "B"}]
     errors = client.enrich_amortization_start_dates(bonds)
@@ -473,6 +474,7 @@ def test_enrich_amortization_checkpoint_saves_only_successful_secids(monkeypatch
         return "2026-01-01", 0
 
     monkeypatch.setattr(client, "_fetch_amortization_start_date", fake_fetch)
+    monkeypatch.setattr(client, "_fetch_security_risk_flags", lambda secid: ({"ISQUALIFIEDINVESTORS": "0", "HASTECHNICALDEFAULT": "0", "HASDEFAULT": "0"}, 0))
 
     saved_payloads: list[dict] = []
     bonds = [{"SECID": "A"}, {"SECID": "B"}]
@@ -488,7 +490,7 @@ def test_enrich_amortization_checkpoint_saves_only_successful_secids(monkeypatch
     assert saved_payloads[-1]["processed"] == {
         "A": {
             "amortization_start_date": "2026-01-01",
-            "flags": {"ISQUALIFIEDINVESTORS": "", "HASTECHNICALDEFAULT": "", "HASDEFAULT": ""},
+            "flags": {"ISQUALIFIEDINVESTORS": "0", "HASTECHNICALDEFAULT": "0", "HASDEFAULT": "0"},
         }
     }
 
@@ -557,3 +559,32 @@ def test_fetch_market_securities_stops_when_pagination_repeats_data(monkeypatch)
     assert calls["count"] == 2
     assert len(rows) == 2
     assert [row["SECID"] for row in rows] == ["A", "B"]
+
+def test_fetch_security_description_sanitizes_date_artifacts(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    def fake_get(url, params, timeout):
+        assert url.endswith('/A.json')
+        return DummyResponse(
+            {
+                "description": {
+                    "columns": ["name", "value"],
+                    "data": [
+                        ["MATDATE", "2033-10-12 {'flags': {'HASDEFAULT': '0'}}"],
+                        ["OFFERDATE", "24.10.2039"],
+                        ["ISQUALIFIEDINVESTORS", "0"],
+                    ],
+                }
+            }
+        )
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+    monkeypatch.setattr(client, "_get_thread_session", lambda: client.session)
+
+    payload, errors = client.fetch_security_description("A")
+
+    assert errors == 0
+    assert payload["MATDATE"] == "2033-10-12"
+    assert payload["OFFERDATE"] == "2039-10-24"
+    assert payload["ISQUALIFIEDINVESTORS"] == "0"

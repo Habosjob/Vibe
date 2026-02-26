@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,7 +18,7 @@ from .raw_store import RawStore
 ProgressCallback = Callable[[dict[str, Any]], None]
 CheckpointSaver = Callable[[dict[str, Any]], None]
 
-AMORTIZATION_CHECKPOINT_VERSION = 5
+AMORTIZATION_CHECKPOINT_VERSION = 6
 AMORTIZATION_FLAG_FIELDS = ("ISQUALIFIEDINVESTORS", "HASTECHNICALDEFAULT", "HASDEFAULT")
 
 
@@ -288,11 +289,11 @@ class MoexClient:
     def _normalize_amortization_checkpoint_entry(value: Any) -> dict[str, Any]:
         if isinstance(value, dict):
             flags = MoexClient._normalize_flag_values(value.get("flags", {}))
-            amortization = str(value.get("amortization_start_date") or value.get("date") or "")
+            amortization = _sanitize_iso_date_like(str(value.get("amortization_start_date") or value.get("date") or ""))
             return {"amortization_start_date": amortization, "flags": flags}
 
         # Обратная совместимость со старым форматом чекпоинта: только строка даты.
-        return {"amortization_start_date": str(value or ""), "flags": {field: "" for field in AMORTIZATION_FLAG_FIELDS}}
+        return {"amortization_start_date": _sanitize_iso_date_like(str(value or "")), "flags": {field: "" for field in AMORTIZATION_FLAG_FIELDS}}
 
     @staticmethod
     def _normalize_flag_values(flags: Any) -> dict[str, str]:
@@ -382,7 +383,7 @@ class MoexClient:
                     key = str(raw_name).strip().upper()
                     if not key:
                         continue
-                    parsed[key] = "" if raw_value is None else str(raw_value).strip()
+                    parsed[key] = "" if raw_value is None else _sanitize_moex_description_value(key, str(raw_value).strip())
 
                 if self.raw_store and self.config.raw_dump_enabled:
                     self.raw_store.dump_json(f"security_description_{secid}.json", response.text)
@@ -646,3 +647,24 @@ class MoexClient:
             thread_session = requests.Session()
             self._thread_local.session = thread_session
         return thread_session
+
+
+def _sanitize_iso_date_like(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    iso_match = re.search(r"(\d{4}-\d{2}-\d{2})", text)
+    if iso_match:
+        return iso_match.group(1)
+    ru_match = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", text)
+    if ru_match:
+        day, month, year = ru_match.groups()
+        return f"{year}-{month}-{day}"
+    return ""
+
+
+def _sanitize_moex_description_value(key: str, value: str) -> str:
+    upper_key = key.upper()
+    if upper_key in {"MATDATE", "BUYBACKDATE", "OFFERDATE", "CALLOPTIONDATE", "PUTOPTIONDATE"}:
+        return _sanitize_iso_date_like(value)
+    return value

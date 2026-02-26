@@ -11,6 +11,8 @@ forced_groups:
   YTM: Купоны и номинал
   DATA_STATUS: Прочее
   DATA_STATUS_REASON: Прочее
+  LESENKA: Купоны и номинал
+  COUPONTYPE: Купоны и номинал
 
 priority_fields:
   - SHORTNAME
