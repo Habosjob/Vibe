@@ -556,3 +556,25 @@ def test_build_emitents_reference_backfills_datescore_for_existing_nonempty_scor
 
     assert result.rows[0]["Scorerate"] == "Redlist"
     assert result.rows[0]["DateScore"]
+
+
+def test_build_emitents_reference_resets_expired_redlist(monkeypatch, tmp_path):
+    config = AppConfig(retries=1, page_size=50, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+    store = ScreenerStateStore(str(tmp_path / "state"))
+
+    store.save_emitents_registry(
+        {"111": {"full_name": "Эмитент", "inn": "7701000000", "scorerate": "Redlist", "datescore": "2026-01-01"}}
+    )
+    monkeypatch.setattr(client, "fetch_security_description", lambda secid: ({}, 0))
+    monkeypatch.setattr(client, "fetch_emitter_details", lambda emitter_id: ({}, 1))
+    monkeypatch.setattr(client, "fetch_market_securities", lambda market: ([], 0))
+
+    result = build_emitents_reference(
+        eligible_bonds=[{"SECID": "B1", "EMITTER_ID": "111"}],
+        client=client,
+        state_store=store,
+    )
+
+    assert result.rows[0]["Scorerate"] == ""
+    assert result.rows[0]["DateScore"] == ""

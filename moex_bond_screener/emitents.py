@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from time import perf_counter
 from typing import Any, Callable
 
@@ -14,6 +14,7 @@ from .state_store import ScreenerStateStore
 
 
 SCORE_VALUES = {"", "Blacklist", "Redlist", "Yellowlist", "Greenlist"}
+REDLIST_RETENTION_DAYS = 30
 
 @dataclass(slots=True)
 class EmitentsBuildResult:
@@ -336,7 +337,8 @@ def build_emitents_reference(
 
     rows: list[dict[str, str]] = []
     scorerate_by_emitter: dict[str, str] = {}
-    today = datetime.now().date().isoformat()
+    today_date = datetime.now().date()
+    today = today_date.isoformat()
     forced_blacklist_emitters = forced_blacklist_emitters or set()
     discovered_emitters.update(forced_blacklist_emitters)
 
@@ -351,12 +353,16 @@ def build_emitents_reference(
         scorerate = str(details.get("scorerate") or "").strip()
         if scorerate not in SCORE_VALUES:
             scorerate = ""
+        redlist_expired = scorerate == "Redlist" and _is_redlist_expired(datescore=str(details.get("datescore") or ""), today=today_date)
+        if redlist_expired:
+            scorerate = ""
+            details["datescore"] = ""
         if emitter_id in forced_blacklist_emitters:
             scorerate = "Blacklist"
 
         datescore = str(details.get("datescore") or "").strip()
         if scorerate != previous_score:
-            datescore = today
+            datescore = "" if redlist_expired else today
         elif scorerate and not datescore:
             # Фиксируем дату, если оценка уже есть, но исторически поле DateScore осталось пустым.
             datescore = today
@@ -467,6 +473,16 @@ def _needs_emitter_details(cached: dict[str, Any] | None) -> bool:
     if not cached:
         return True
     return not str(cached.get("full_name") or "").strip() or not str(cached.get("inn") or "").strip()
+
+
+def _is_redlist_expired(datescore: str, today: date) -> bool:
+    if not datescore:
+        return False
+    try:
+        scored_at = datetime.fromisoformat(datescore).date()
+    except ValueError:
+        return False
+    return scored_at <= today - timedelta(days=REDLIST_RETENTION_DAYS)
 
 
 def _resolve_market_emitter_ids(
