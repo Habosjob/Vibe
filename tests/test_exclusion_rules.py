@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import date
 
-from moex_bond_screener.exclusion_rules import AMORTIZATION_RULE_NAME, BondExclusionFilter, PERMANENT_EXCLUDE_UNTIL
+from moex_bond_screener.exclusion_rules import (
+    AMORTIZATION_RULE_NAME,
+    STRUCTURAL_BOND_RULE_NAME,
+    BondExclusionFilter,
+    PERMANENT_EXCLUDE_UNTIL,
+)
 
 
 def test_exclusion_filter_applies_rules_in_priority_order() -> None:
@@ -102,3 +107,23 @@ def test_exclusion_filter_keeps_permanent_exclusion_on_rerun() -> None:
     assert result.skipped_by_active_exclusion == 1
     assert result.skipped_by_active_rule[AMORTIZATION_RULE_NAME] == 1
     assert result.active_exclusions["A"]["exclude_until"] == PERMANENT_EXCLUDE_UNTIL
+
+
+def test_exclusion_filter_excludes_structural_bonds_permanently() -> None:
+    bonds = [
+        {"SECID": "A", "BONDTYPE": "Структурная облигация", "MATDATE": "2030-01-01"},
+        {"SECID": "B", "BONDTYPE": "Корпоративная облигация", "MATDATE": "2030-01-01"},
+    ]
+
+    result = BondExclusionFilter(days_threshold=365).apply(
+        bonds=bonds,
+        previous_exclusions={},
+        today=date(2026, 1, 1),
+    )
+
+    assert [bond["SECID"] for bond in result.eligible_bonds] == ["B"]
+    assert result.active_exclusions["A"] == {
+        "rule": STRUCTURAL_BOND_RULE_NAME,
+        "exclude_until": PERMANENT_EXCLUDE_UNTIL,
+    }
+    assert result.excluded_by_rule[STRUCTURAL_BOND_RULE_NAME] == 1

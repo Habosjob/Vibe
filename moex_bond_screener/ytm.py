@@ -30,8 +30,8 @@ def enrich_ytm(bonds: list[dict[str, Any]], today: date | None = None) -> YtmSta
 
 
 def _calculate_bond_ytm(bond: dict[str, Any], today: date) -> float | None:
-    real_price_pct = _as_float_or_none(bond.get("RealPrice"))
-    if real_price_pct is None or real_price_pct <= 0:
+    real_price_pct = _resolve_price_for_ytm(bond)
+    if real_price_pct is None:
         return None
 
     face_value = _as_float_or_none(bond.get("FACEVALUE"))
@@ -42,11 +42,11 @@ def _calculate_bond_ytm(bond: dict[str, Any], today: date) -> float | None:
     if accruedint is None:
         accruedint = 0.0
 
-    matdate = _parse_iso_date(str(bond.get("MATDATE") or "").strip())
-    if matdate is None or matdate <= today:
+    target_date = _resolve_target_date_for_ytm(bond)
+    if target_date is None or target_date <= today:
         return None
 
-    years = (matdate - today).days / 365.0
+    years = (target_date - today).days / 365.0
     if years <= 0:
         return None
 
@@ -67,6 +67,30 @@ def _calculate_bond_ytm(bond: dict[str, Any], today: date) -> float | None:
         / ((face_value + dirty_price) / 2.0)
     ) * 100.0
     return round(approximate_ytm, 4)
+
+
+def _resolve_target_date_for_ytm(bond: dict[str, Any]) -> date | None:
+    offer_date = _parse_iso_date(str(bond.get("OFFERDATE") or "").strip())
+    if offer_date is not None:
+        return offer_date
+    return _parse_iso_date(str(bond.get("MATDATE") or "").strip())
+
+
+def _resolve_price_for_ytm(bond: dict[str, Any]) -> float | None:
+    prevwaprice = _as_float_or_none(bond.get("PREVWAPRICE"))
+    if prevwaprice is not None and prevwaprice > 0:
+        return prevwaprice
+
+    for field_name in ("ASK", "LAST", "BID"):
+        value = _as_float_or_none(bond.get(field_name))
+        if value is not None and value > 0:
+            bond["RealPrice"] = value
+            return value
+
+    real_price = _as_float_or_none(bond.get("RealPrice"))
+    if real_price is not None and real_price > 0:
+        return real_price
+    return None
 
 
 def _parse_iso_date(raw: str) -> date | None:

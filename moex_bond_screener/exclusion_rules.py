@@ -14,6 +14,8 @@ DATE_RULES: list[tuple[str, str]] = [
 ]
 PERMANENT_EXCLUDE_UNTIL = "permanent"
 AMORTIZATION_RULE_NAME = "amortization_started_or_lt_1y_permanent"
+STRUCTURAL_BOND_RULE_NAME = "structural_bond_permanent"
+STRUCTURAL_BOND_TYPE = "Структурная облигация"
 
 
 @dataclass(slots=True)
@@ -43,6 +45,7 @@ class BondExclusionFilter:
         active_exclusions: dict[str, dict[str, str]] = {}
         excluded_by_rule = {rule_name: 0 for _, rule_name in DATE_RULES}
         excluded_by_rule[AMORTIZATION_RULE_NAME] = 0
+        excluded_by_rule[STRUCTURAL_BOND_RULE_NAME] = 0
         restored_after_expiration = 0
         skipped_by_active_exclusion = 0
         skipped_by_active_rule: dict[str, int] = {}
@@ -79,6 +82,15 @@ class BondExclusionFilter:
 
             if prev_exclusion:
                 restored_after_expiration += 1
+
+            bond_type = str(bond.get("BONDTYPE") or "").strip()
+            if bond_type == STRUCTURAL_BOND_TYPE:
+                active_exclusions[secid] = {
+                    "rule": STRUCTURAL_BOND_RULE_NAME,
+                    "exclude_until": PERMANENT_EXCLUDE_UNTIL,
+                }
+                excluded_by_rule[STRUCTURAL_BOND_RULE_NAME] += 1
+                continue
 
             matched = False
             for field_name, rule_name in DATE_RULES:
