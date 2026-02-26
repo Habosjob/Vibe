@@ -952,3 +952,67 @@ def test_enrich_uses_corpbonds_realprice_instead_of_dohod_ask() -> None:
 
     assert errors == 0
     assert bonds[0]["RealPrice"] == 99.5
+
+def test_parse_corpbonds_payload_handles_offerdate_alias_label() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Дата оферты</p></td><td><p class=\"val\">15.07.2031</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.ytm_date == "2031-07-15"
+    assert payload.offer_source == "corpbonds"
+
+
+def test_enrich_bonds_counts_corpbonds_offerdate_and_formula_stats() -> None:
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._fetch_live_index_values = lambda: {"RUONIA": 14.5, "CBR_RATE": 14.0, "Z_CURVE_RUS": 13.0}  # type: ignore[method-assign]
+
+    def fake_fetch(_primary: str, _secondary: str | None):
+        return DohodBondPayload(index_name="RUONIA", index_spread=1.1, ytm_date="2030-01-01", event_name="оферта", formula_source="corpbonds", offer_source="corpbonds"), 0
+
+    enricher._fetch_with_fallback = fake_fetch  # type: ignore[method-assign]
+
+    bonds = [{"SECID": "RU1_SEC", "ISIN": "RU1", "COUPONPERCENT": "", "OFFERDATE": "", "MATDATE": "2035-01-01"}]
+    errors = enricher.enrich_bonds(bonds)
+
+    assert errors == 0
+    assert bonds[0]["COUPONPERCENT"] == 15.6
+    assert bonds[0]["OFFERDATE"] == "2030-01-01"
+    assert enricher.last_stats.corpbonds_coupon_formula_applied == 1
+    assert enricher.last_stats.corpbonds_offerdate_added == 1
+
+def test_is_payload_empty_returns_false_when_only_corpbonds_fields_present() -> None:
+    payload = DohodBondPayload(coupon_type="Фикс", lesenka="Нет")
+    assert _is_payload_empty(payload) is False
+
+
+def test_cached_payload_usable_when_only_corpbonds_fields_present() -> None:
+    payload = {
+        "real_price": None,
+        "index_name": "",
+        "ytm_date": "",
+        "event_name": "",
+        "coupon_type": "Фикс",
+        "lesenka": "Нет",
+    }
+    assert DohodEnricher._is_cached_payload_usable(payload) is True
+
+def test_parse_corpbonds_payload_parses_percent_realprice_and_sigma_ks_formula() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Цена последняя</p></td><td><p class=\"val\">100,39 %</p></td></tr>
+      <tr><td><p>Формула купона</p></td><td><p class=\"val\">∑КС + 2%</p></td></tr>
+      <tr><td><p>Ближайшая дата</p></td><td><p class=\"val\">15.07.2031</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.real_price == 100.39
+    assert payload.index_name == "CBR_RATE"
+    assert payload.index_spread == 2.0
+    assert payload.ytm_date == "2031-07-15"

@@ -14,7 +14,7 @@ from moex_bond_screener.logging_utils import setup_logging
 from moex_bond_screener.moex_client import MoexClient
 from moex_bond_screener.raw_store import RawStore
 from moex_bond_screener.state_store import ScreenerStateStore
-from moex_bond_screener.writer import save_emitents_excel
+from moex_bond_screener.writer import load_emitents_manual_overrides, save_emitents_excel
 
 
 def main() -> None:
@@ -33,7 +33,13 @@ def main() -> None:
         print("Нет данных в хранилище eligible_bonds. Сначала запустите run.py")
         return
 
-    result = build_emitents_reference(eligible_bonds=eligible_bonds, client=client, state_store=state_store)
+    manual_overrides = load_emitents_manual_overrides(config.emitents_output_file)
+    result = build_emitents_reference(
+        eligible_bonds=eligible_bonds,
+        client=client,
+        state_store=state_store,
+        manual_overrides=manual_overrides,
+    )
     save_emitents_excel(config.emitents_output_file, result.rows)
 
     print("Готово: сформирован справочник эмитентов")
