@@ -76,9 +76,10 @@ def test_prepare_amortization_checkpoint_invalidates_stale_cache() -> None:
         }
     )
 
-    assert invalidated is True
+    assert invalidated is False
     assert is_fresh is False
-    assert checkpoint == {}
+    assert checkpoint["version"] == AMORTIZATION_CHECKPOINT_VERSION
+    assert checkpoint["processed"] == {"A": "2025-01-01"}
 
 
 def test_print_emitents_progress_reports_sample_descriptions() -> None:

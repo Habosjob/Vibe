@@ -78,6 +78,9 @@ def main() -> None:
 
 
     stage_durations["state_load_seconds"] = round(time.perf_counter() - stage_started, 2)
+    secid_to_emitter_map = state_store.load_secid_to_emitter_map()
+    emitents_registry = state_store.load_emitents_registry()
+
     progress.start_stage(4, "Загрузка облигаций с MOEX")
     stage_started = time.perf_counter()
     client = MoexClient(config=config, logger=logger, raw_store=raw_store)
@@ -126,11 +129,21 @@ def main() -> None:
     elif amortization_checkpoint:
         progress.tick("Кэш амортизации старше 24 часов — обновляем данные")
 
+    redlist_secids, redlist_isins = _collect_redlist_monthly_cache_targets(
+        bonds=exclusion_result.eligible_bonds,
+        secid_to_emitter_map=secid_to_emitter_map,
+        emitents_registry=emitents_registry,
+    )
+    if redlist_secids:
+        progress.tick(f"Redlist-кэш амортизации: {len(redlist_secids)} SECID обслуживаем с TTL 30 дней")
+
     amortization_errors = client.enrich_amortization_start_dates(
         exclusion_result.eligible_bonds,
         checkpoint_data=amortization_checkpoint,
         checkpoint_saver=lambda payload: state_store.save_checkpoint("amortization", payload),
         progress_callback=lambda data: _print_amortization_progress(data, progress),
+        monthly_cached_secids=redlist_secids,
+        monthly_cache_ttl_days=30,
     )
     amortization_checkpoint_latest = state_store.load_checkpoint("amortization")
 
@@ -144,11 +157,15 @@ def main() -> None:
     stage_started = time.perf_counter()
     dohod_client = DohodEnricher(config=config, logger=logger, raw_store=raw_store)
     dohod_checkpoint = state_store.load_checkpoint("dohod_enrichment")
+    if redlist_isins:
+        progress.tick(f"Redlist-кэш ДОХОД: {len(redlist_isins)} ISIN обслуживаем с TTL 30 дней")
     dohod_errors = dohod_client.enrich_bonds(
         post_amortization_exclusion_result.eligible_bonds,
         checkpoint_data=dohod_checkpoint,
         checkpoint_saver=lambda payload: state_store.save_checkpoint("dohod_enrichment", payload),
         progress_callback=lambda data: _print_dohod_progress(data, progress),
+        monthly_cached_identifiers=redlist_isins,
+        monthly_cache_ttl_days=30,
     )
     dohod_stats = dohod_client.last_stats
 
@@ -511,7 +528,14 @@ def _prepare_amortization_checkpoint(checkpoint: dict[str, Any]) -> tuple[dict[s
 
     is_fresh = datetime.now(timezone.utc) - updated_at <= timedelta(hours=24)
     if not is_fresh:
-        return {}, True, False
+        normalized = {str(secid): value for secid, value in processed.items() if str(secid).strip()}
+        return {
+            "version": AMORTIZATION_CHECKPOINT_VERSION,
+            "processed": normalized,
+            "cache_stats": {"date": "", "hits": 0, "misses": 0},
+            "updated_at": updated_at.isoformat(),
+            "completed": bool(checkpoint.get("completed", False)),
+        }, False, False
 
     normalized = {str(secid): value for secid, value in processed.items() if str(secid).strip()}
     cache_stats_raw = checkpoint.get("cache_stats", {})
@@ -529,6 +553,39 @@ def _prepare_amortization_checkpoint(checkpoint: dict[str, Any]) -> tuple[dict[s
         "updated_at": updated_at.isoformat(),
         "completed": bool(checkpoint.get("completed", False)),
     }, False, True
+
+
+def _collect_redlist_monthly_cache_targets(
+    bonds: list[dict[str, Any]],
+    secid_to_emitter_map: dict[str, str],
+    emitents_registry: dict[str, dict[str, str]],
+) -> tuple[set[str], set[str]]:
+    redlist_emitters = {
+        str(emitter_id)
+        for emitter_id, details in emitents_registry.items()
+        if str((details or {}).get("scorerate") or "").strip() == "Redlist"
+    }
+    redlist_secids: set[str] = set()
+    redlist_isins: set[str] = set()
+
+    for bond in bonds:
+        secid = str(bond.get("SECID") or "").strip()
+        isin = str(bond.get("ISIN") or "").strip()
+        emitter_id = _normalize_emitter_id(
+            bond.get("EMITTER_ID")
+            or bond.get("ISSUER_ID")
+            or secid_to_emitter_map.get(secid, "")
+            or ""
+        )
+        if emitter_id not in redlist_emitters:
+            continue
+        if secid:
+            redlist_secids.add(secid)
+        if isin:
+            redlist_isins.add(isin)
+
+    return redlist_secids, redlist_isins
+
 
 
 def _sanitize_date_fields(bonds: list[dict[str, Any]]) -> None:

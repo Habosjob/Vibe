@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import requests
@@ -134,6 +134,8 @@ class MoexClient:
         checkpoint_data: dict[str, Any] | None = None,
         checkpoint_saver: CheckpointSaver | None = None,
         progress_callback: ProgressCallback | None = None,
+        monthly_cached_secids: set[str] | None = None,
+        monthly_cache_ttl_days: int = 30,
     ) -> int:
         """Обогащает список бумаг полем Amortization_start_date.
 
@@ -143,6 +145,7 @@ class MoexClient:
 
         errors = 0
         processed: dict[str, Any] = dict(checkpoint_data.get("processed", {})) if checkpoint_data else {}
+        checkpoint_updated_at = self._parse_iso_datetime(checkpoint_data.get("updated_at") if checkpoint_data else None)
         cache_stats_raw = checkpoint_data.get("cache_stats", {}) if checkpoint_data else {}
         today_key = datetime.now(timezone.utc).date().isoformat()
         if isinstance(cache_stats_raw, dict) and str(cache_stats_raw.get("date") or "") == today_key:
@@ -162,6 +165,7 @@ class MoexClient:
 
         progress_processed = 0
         pending: list[tuple[str, str]] = []
+        monthly_cached_secids = monthly_cached_secids or set()
 
         for secid, indices in secid_to_indices.items():
             sample_bond = bonds[indices[0]]
@@ -171,6 +175,13 @@ class MoexClient:
 
             if secid in processed:
                 normalized = self._normalize_amortization_checkpoint_entry(processed.get(secid))
+                if secid in monthly_cached_secids and not self._is_checkpoint_entry_fresh(
+                    normalized,
+                    ttl_days=monthly_cache_ttl_days,
+                    fallback_dt=checkpoint_updated_at,
+                ):
+                    pending.append((secid, matdate))
+                    continue
                 date_value = normalized.get("amortization_start_date", "")
                 flags = self._normalize_flag_values(normalized.get("flags", {}))
                 for idx in indices:
@@ -222,6 +233,7 @@ class MoexClient:
                     flags = self._normalize_flag_values(snapshot.get("flags", {}))
 
                     if request_errors == 0:
+                        snapshot["fetched_at"] = datetime.now(timezone.utc).isoformat()
                         processed[secid] = snapshot
                     for idx in secid_to_indices.get(secid, []):
                         bonds[idx]["Amortization_start_date"] = date_value
@@ -290,10 +302,37 @@ class MoexClient:
         if isinstance(value, dict):
             flags = MoexClient._normalize_flag_values(value.get("flags", {}))
             amortization = _sanitize_iso_date_like(str(value.get("amortization_start_date") or value.get("date") or ""))
-            return {"amortization_start_date": amortization, "flags": flags}
+            return {
+                "amortization_start_date": amortization,
+                "flags": flags,
+                "fetched_at": str(value.get("fetched_at") or "").strip(),
+            }
 
         # Обратная совместимость со старым форматом чекпоинта: только строка даты.
-        return {"amortization_start_date": _sanitize_iso_date_like(str(value or "")), "flags": {field: "" for field in AMORTIZATION_FLAG_FIELDS}}
+        return {
+            "amortization_start_date": _sanitize_iso_date_like(str(value or "")),
+            "flags": {field: "" for field in AMORTIZATION_FLAG_FIELDS},
+            "fetched_at": "",
+        }
+
+    @staticmethod
+    def _parse_iso_datetime(raw: Any) -> datetime | None:
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @staticmethod
+    def _is_checkpoint_entry_fresh(entry: dict[str, Any], ttl_days: int, fallback_dt: datetime | None) -> bool:
+        fetched_at = MoexClient._parse_iso_datetime(entry.get("fetched_at")) or fallback_dt
+        if fetched_at is None:
+            return False
+        return datetime.now(timezone.utc) - fetched_at <= timedelta(days=max(1, ttl_days))
 
     @staticmethod
     def _normalize_flag_values(flags: Any) -> dict[str, str]:
