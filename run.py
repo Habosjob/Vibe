@@ -192,6 +192,7 @@ def main() -> None:
     secid_to_emitter_map = state_store.load_secid_to_emitter_map()
     forced_blacklist_emitters, secid_to_emitter_map = _collect_forced_blacklist_emitters(
         bonds=bonds,
+        exclusions_history=state_store.load_exclusions_history(),
         secid_to_emitter_map=secid_to_emitter_map,
         client=client,
     )
@@ -359,6 +360,7 @@ def main() -> None:
 
 def _collect_forced_blacklist_emitters(
     bonds: list[dict[str, Any]],
+    exclusions_history: dict[str, dict[str, str]],
     secid_to_emitter_map: dict[str, str],
     client: MoexClient,
 ) -> tuple[set[str], dict[str, str]]:
@@ -383,6 +385,18 @@ def _collect_forced_blacklist_emitters(
 
         if secid:
             unresolved_hasdefault_secids.add(secid)
+
+    for secid, details in exclusions_history.items():
+        if str((details or {}).get("last_rule") or "").strip() != HASDEFAULT_RULE_NAME:
+            continue
+        safe_secid = str(secid or "").strip()
+        if not safe_secid:
+            continue
+        emitter_id = _normalize_emitter_id(updated_map.get(safe_secid, "") or "")
+        if emitter_id:
+            forced_blacklist_emitters.add(emitter_id)
+            continue
+        unresolved_hasdefault_secids.add(safe_secid)
 
     for secid in sorted(unresolved_hasdefault_secids):
         details, _errors = client.fetch_security_description(secid)
