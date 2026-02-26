@@ -170,6 +170,7 @@ def test_collect_forced_blacklist_emitters_resolves_missing_ids_from_description
 
     emitters, secid_map = _collect_forced_blacklist_emitters(
         bonds=bonds,
+        exclusions_history={},
         secid_to_emitter_map={"AAA": ""},
         client=_DummyClient({"AAA": "111"}),
     )
@@ -188,8 +189,21 @@ def test_collect_forced_blacklist_emitters_accepts_numeric_hasdefault_flags() ->
 
     emitters, _ = _collect_forced_blacklist_emitters(
         bonds=bonds,
+        exclusions_history={},
         secid_to_emitter_map={},
         client=_DummyClient({}),
     )
 
     assert emitters == {"111", "222", "333"}
+
+
+def test_collect_forced_blacklist_emitters_includes_hasdefault_from_history() -> None:
+    emitters, secid_map = _collect_forced_blacklist_emitters(
+        bonds=[],
+        exclusions_history={"AAA": {"last_rule": "hasdefault_permanent"}},
+        secid_to_emitter_map={"AAA": "777.0"},
+        client=_DummyClient({}),
+    )
+
+    assert emitters == {"777"}
+    assert secid_map["AAA"] == "777.0"

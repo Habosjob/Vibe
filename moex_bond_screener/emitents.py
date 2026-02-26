@@ -41,6 +41,13 @@ def build_emitents_reference(
     """
 
     registry = state_store.load_emitents_registry()
+    registry_before_overrides = {
+        emitter_id: {
+            "scorerate": str((details or {}).get("scorerate") or "").strip(),
+            "datescore": str((details or {}).get("datescore") or "").strip(),
+        }
+        for emitter_id, details in registry.items()
+    }
     for emitter_id, override in (manual_overrides or {}).items():
         details = registry.get(emitter_id, {})
         scorerate = str((override or {}).get("scorerate") or "").strip()
@@ -337,11 +344,13 @@ def build_emitents_reference(
         details = registry.get(emitter_id, {})
         full_name = str(details.get("full_name") or "").strip()
         inn = str(details.get("inn") or "").strip()
-        previous_score = str(details.get("scorerate") or "").strip()
+        previous_score = str(registry_before_overrides.get(emitter_id, {}).get("scorerate") or "").strip()
         if previous_score not in SCORE_VALUES:
             previous_score = ""
 
-        scorerate = previous_score
+        scorerate = str(details.get("scorerate") or "").strip()
+        if scorerate not in SCORE_VALUES:
+            scorerate = ""
         if emitter_id in forced_blacklist_emitters:
             scorerate = "Blacklist"
 
