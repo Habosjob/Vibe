@@ -19,6 +19,7 @@ def enrich_ytm(bonds: list[dict[str, Any]], today: date | None = None) -> YtmSta
     calc_date = today or date.today()
 
     for bond in bonds:
+        _sanitize_realprice_artifact(bond)
         ytm = _calculate_bond_ytm(bond, calc_date)
         if ytm is None:
             stats.skipped += 1
@@ -28,6 +29,15 @@ def enrich_ytm(bonds: list[dict[str, Any]], today: date | None = None) -> YtmSta
 
     return stats
 
+
+
+
+def _sanitize_realprice_artifact(bond: dict[str, Any]) -> None:
+    parsed_real_price = _as_float_or_none(bond.get("RealPrice"))
+    if parsed_real_price is None:
+        return
+    if parsed_real_price <= 0:
+        bond.pop("RealPrice", None)
 
 def _calculate_bond_ytm(bond: dict[str, Any], today: date) -> float | None:
     real_price_pct = _resolve_price_for_ytm(bond)

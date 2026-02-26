@@ -9,8 +9,8 @@ forced_groups:
   AMORTIZATION_START_DATE: Даты
   CURRENCYID: Купоны и номинал
   YTM: Купоны и номинал
-  DATA_STATUS: Служебная информация
-  DATA_STATUS_REASON: Служебная информация
+  DATA_STATUS: Прочее
+  DATA_STATUS_REASON: Прочее
 
 priority_fields:
   - SHORTNAME
