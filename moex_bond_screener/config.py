@@ -42,6 +42,9 @@ class AppConfig:
     floater_cb_rate_current_year: float = 14.0
     floater_cb_rate_next_year: float = 8.5
     floater_cb_rate_plus_one_year: float = 8.0
+    linker_inflation_current_year: float = 5.0
+    linker_inflation_next_year: float = 4.0
+    linker_inflation_plus_one_year: float = 4.0
     floater_ruonia_spread_from_cb_rate: float = -0.5
     floater_z_curve_spread_from_cb_rate: float = -1.0
     floater_cbr_rate_spread_from_cb_rate: float = 0.0
