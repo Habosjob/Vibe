@@ -163,6 +163,19 @@ def test_save_bonds_excel_keeps_separator_columns_and_group_outline(tmp_path: Pa
     assert data_columns_outline
     assert headers[first_separator] == "SHORTNAME"
 
+    collapsed_groups = {"Торги и доходность", "Даты", "Прочее"}
+    current_group = ""
+    for idx, header in enumerate(headers, start=1):
+        if header in ("", None):
+            current_group = str(first_row[idx - 1] or "")
+            continue
+        letter = sheet.cell(row=2, column=idx).column_letter
+        hidden = bool(sheet.column_dimensions[letter].hidden)
+        if current_group in collapsed_groups:
+            assert hidden is True
+        else:
+            assert hidden is False
+
     separator_letter = sheet.cell(row=2, column=first_separator).column_letter
     separator_fill_row_2 = sheet.cell(row=2, column=first_separator).fill.fgColor.rgb
     separator_fill_last_row = sheet.cell(row=sheet.max_row, column=first_separator).fill.fgColor.rgb
@@ -400,3 +413,29 @@ def test_save_bonds_excel_places_ytm_into_coupon_group(tmp_path: Path) -> None:
 
     separator_col = max(idx for idx, header in enumerate(headers, start=1) if idx < ytm_col and header in ("", None))
     assert sheet.cell(row=1, column=separator_col).value == "Купоны и номинал"
+
+
+def test_save_bonds_excel_places_data_status_in_misc_group(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [{"SHORTNAME": "ОФЗ", "ISIN": "RU1", "DATA_STATUS": "ok", "DATA_STATUS_REASON": ""}]
+
+    save_bonds_file(str(target), bonds)
+
+    workbook = load_workbook(target)
+    sheet = workbook["MOEX_BONDS"]
+    headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
+
+    status_col = headers.index("DATA_STATUS") + 1
+    reason_col = headers.index("DATA_STATUS_REASON") + 1
+
+    def _group_for_column(col: int) -> str:
+        cursor = col
+        while cursor > 0:
+            value = sheet.cell(row=1, column=cursor).value
+            if value:
+                return str(value)
+            cursor -= 1
+        return ""
+
+    assert _group_for_column(status_col) == "Прочее"
+    assert _group_for_column(reason_col) == "Прочее"

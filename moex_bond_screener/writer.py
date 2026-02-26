@@ -51,6 +51,7 @@ DEFAULT_FORCED_GROUPS = {
     "YTM": "Купоны и номинал",
 }
 DEFAULT_PRIORITY_FIELDS = ["SHORTNAME", "ISIN", "DATA_STATUS", "MATDATE", "AMORTIZATION_START_DATE", "SECID"]
+DEFAULT_COLLAPSED_GROUPS = {"Прочее", "Даты", "Торги и доходность"}
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 GROUP_FONT = Font(color="000000", bold=True)
@@ -470,7 +471,7 @@ def _write_grouped_headers(sheet: Any, fields: list[str]) -> list[str]:
                 for col in range(group_start, group_end + 1):
                     letter = get_column_letter(col)
                     sheet.column_dimensions[letter].outlineLevel = 1
-                    sheet.column_dimensions[letter].hidden = False
+                    sheet.column_dimensions[letter].hidden = current_group in DEFAULT_COLLAPSED_GROUPS
             current_group = group_name
             group_start = index + 1
             group_end = index
@@ -482,7 +483,7 @@ def _write_grouped_headers(sheet: Any, fields: list[str]) -> list[str]:
         for col in range(group_start, group_end + 1):
             letter = get_column_letter(col)
             sheet.column_dimensions[letter].outlineLevel = 1
-            sheet.column_dimensions[letter].hidden = False
+            sheet.column_dimensions[letter].hidden = current_group in DEFAULT_COLLAPSED_GROUPS
 
     sheet.sheet_properties.outlinePr.summaryRight = True
     return [field for _, field in columns]
