@@ -424,7 +424,7 @@ class DohodEnricher:
         index_name = str(payload.get("index_name") or "").strip()
         ytm_date = str(payload.get("ytm_date") or "").strip()
         event_name = str(payload.get("event_name") or "").strip()
-        if isinstance(ask_price, (int, float)):
+        if isinstance(ask_price, (int, float)) and float(ask_price) > 0:
             return True
         return bool(index_name or ytm_date or event_name)
 
@@ -437,7 +437,7 @@ class DohodEnricher:
         ytm_date = str(payload.get("ytm_date") or "")
 
         for bond in bonds:
-            if isinstance(ask_price, (int, float)):
+            if isinstance(ask_price, (int, float)) and float(ask_price) > 0:
                 new_real_price = float(ask_price)
                 old_real_price = bond.get("RealPrice")
                 if old_real_price in (None, ""):
@@ -660,7 +660,8 @@ def _parse_ask_price(raw: str) -> float | None:
     # обычно формат last/bid/ask (берем ask), но на некоторых карточках доступно только одно-два числа
     candidate = parts[2] if len(parts) >= 3 else parts[-1]
     try:
-        return float(candidate.replace(",", "."))
+        parsed = float(candidate.replace(",", "."))
+        return parsed if parsed > 0 else None
     except ValueError:
         return None
 
@@ -902,7 +903,8 @@ def _parse_ask_price_from_html(html: str) -> float | None:
     script_match = SCRIPT_ASK_RE.search(html)
     if script_match:
         try:
-            return float(script_match.group(1).replace(",", "."))
+            parsed = float(script_match.group(1).replace(",", "."))
+            return parsed if parsed > 0 else None
         except ValueError:
             pass
 
@@ -911,7 +913,8 @@ def _parse_ask_price_from_html(html: str) -> float | None:
     if not ask_match:
         return None
     try:
-        return float(ask_match.group(1).replace(",", "."))
+        parsed = float(ask_match.group(1).replace(",", "."))
+        return parsed if parsed > 0 else None
     except ValueError:
         return None
 

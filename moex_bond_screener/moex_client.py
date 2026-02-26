@@ -17,7 +17,8 @@ from .raw_store import RawStore
 ProgressCallback = Callable[[dict[str, Any]], None]
 CheckpointSaver = Callable[[dict[str, Any]], None]
 
-AMORTIZATION_CHECKPOINT_VERSION = 4
+AMORTIZATION_CHECKPOINT_VERSION = 5
+AMORTIZATION_FLAG_FIELDS = ("ISQUALIFIEDINVESTORS", "HASTECHNICALDEFAULT", "HASDEFAULT")
 
 
 class MoexClient:
@@ -140,7 +141,7 @@ class MoexClient:
         """
 
         errors = 0
-        processed: dict[str, str] = dict(checkpoint_data.get("processed", {})) if checkpoint_data else {}
+        processed: dict[str, Any] = dict(checkpoint_data.get("processed", {})) if checkpoint_data else {}
         cache_stats_raw = checkpoint_data.get("cache_stats", {}) if checkpoint_data else {}
         today_key = datetime.now(timezone.utc).date().isoformat()
         if isinstance(cache_stats_raw, dict) and str(cache_stats_raw.get("date") or "") == today_key:
@@ -168,9 +169,13 @@ class MoexClient:
                 continue
 
             if secid in processed:
-                value = str(processed.get(secid) or "")
+                normalized = self._normalize_amortization_checkpoint_entry(processed.get(secid))
+                date_value = normalized.get("amortization_start_date", "")
+                flags = self._normalize_flag_values(normalized.get("flags", {}))
                 for idx in indices:
-                    bonds[idx]["Amortization_start_date"] = value
+                    bonds[idx]["Amortization_start_date"] = date_value
+                    for field in AMORTIZATION_FLAG_FIELDS:
+                        bonds[idx][field] = flags.get(field, "")
                 cache_hits += 1
                 progress_processed += len(indices)
                 if progress_callback:
@@ -191,29 +196,36 @@ class MoexClient:
             secid = str(bond.get("SECID") or "").strip()
             if not secid:
                 bond["Amortization_start_date"] = ""
+                for field in AMORTIZATION_FLAG_FIELDS:
+                    bond[field] = ""
                 progress_processed += 1
 
         workers = max(1, self.config.amortization_workers)
         if pending:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
-                    executor.submit(self._fetch_amortization_start_date, secid, matdate): secid
+                    executor.submit(self._fetch_amortization_snapshot, secid, matdate): secid
                     for secid, matdate in pending
                 }
                 for future in as_completed(futures):
                     secid = futures[future]
                     cache_misses += 1
                     try:
-                        date_value, request_errors = future.result()
+                        snapshot, request_errors = future.result()
                     except Exception as error:  # noqa: BLE001
                         self.logger.exception("Необработанная ошибка в задаче амортизации secid=%s: %s", secid, error)
-                        date_value, request_errors = "", 1
+                        snapshot, request_errors = self._build_amortization_snapshot("", {}), 1
 
                     errors += request_errors
+                    date_value = snapshot.get("amortization_start_date", "")
+                    flags = self._normalize_flag_values(snapshot.get("flags", {}))
+
                     if request_errors == 0:
-                        processed[secid] = date_value
+                        processed[secid] = snapshot
                     for idx in secid_to_indices.get(secid, []):
                         bonds[idx]["Amortization_start_date"] = date_value
+                        for field in AMORTIZATION_FLAG_FIELDS:
+                            bonds[idx][field] = flags.get(field, "")
                     progress_processed += len(secid_to_indices.get(secid, []))
 
                     if checkpoint_saver:
@@ -258,6 +270,45 @@ class MoexClient:
             )
 
         return errors
+
+    def _fetch_amortization_snapshot(self, secid: str, matdate: str = "") -> tuple[dict[str, Any], int]:
+        amortization_start, amortization_errors = self._fetch_amortization_start_date(secid, matdate)
+        flags, flags_errors = self._fetch_security_risk_flags(secid)
+        snapshot = self._build_amortization_snapshot(amortization_start, flags)
+        return snapshot, amortization_errors + flags_errors
+
+    @staticmethod
+    def _build_amortization_snapshot(amortization_start: str, flags: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "amortization_start_date": str(amortization_start or ""),
+            "flags": MoexClient._normalize_flag_values(flags),
+        }
+
+    @staticmethod
+    def _normalize_amortization_checkpoint_entry(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            flags = MoexClient._normalize_flag_values(value.get("flags", {}))
+            amortization = str(value.get("amortization_start_date") or value.get("date") or "")
+            return {"amortization_start_date": amortization, "flags": flags}
+
+        # Обратная совместимость со старым форматом чекпоинта: только строка даты.
+        return {"amortization_start_date": str(value or ""), "flags": {field: "" for field in AMORTIZATION_FLAG_FIELDS}}
+
+    @staticmethod
+    def _normalize_flag_values(flags: Any) -> dict[str, str]:
+        payload = flags if isinstance(flags, dict) else {}
+        normalized: dict[str, str] = {}
+        for field in AMORTIZATION_FLAG_FIELDS:
+            raw_value = payload.get(field)
+            normalized[field] = "" if raw_value is None else str(raw_value).strip()
+        return normalized
+
+    def _fetch_security_risk_flags(self, secid: str) -> tuple[dict[str, str], int]:
+        description, errors = self.fetch_security_description(secid)
+        if errors:
+            return {field: "" for field in AMORTIZATION_FLAG_FIELDS}, errors
+
+        return ({field: str(description.get(field, "") or "").strip() for field in AMORTIZATION_FLAG_FIELDS}, 0)
 
     def _fetch_page(self, start: int) -> tuple[list[dict[str, Any]], int, bool]:
         params = {

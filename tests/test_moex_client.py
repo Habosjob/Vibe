@@ -181,9 +181,18 @@ def test_enrich_amortization_start_dates_sets_empty_if_no_data(monkeypatch):
     client = MoexClient(config=config, logger=logging.getLogger("test"))
 
     def fake_get(url, params, timeout):
-        assert "bondization.json" in url
-        assert params["iss.only"] == "amortizations"
-        return DummyResponse({"amortizations": {"columns": ["amortdate"], "data": []}})
+        if "bondization.json" in url:
+            assert params["iss.only"] == "amortizations"
+            return DummyResponse({"amortizations": {"columns": ["amortdate"], "data": []}})
+        assert url.endswith("/SU26218RMFS6.json")
+        return DummyResponse(
+            {
+                "description": {
+                    "columns": ["name", "value"],
+                    "data": [["ISQUALIFIEDINVESTORS", "0"], ["HASTECHNICALDEFAULT", "0"], ["HASDEFAULT", "0"]],
+                }
+            }
+        )
 
     monkeypatch.setattr(client.session, "get", fake_get)
     monkeypatch.setattr(client, "_get_thread_session", lambda: client.session)
@@ -200,12 +209,21 @@ def test_enrich_amortization_start_dates_fills_earliest_date(monkeypatch):
     client = MoexClient(config=config, logger=logging.getLogger("test"))
 
     def fake_get(url, params, timeout):
-        assert url.endswith("/A/bondization.json")
+        if url.endswith("/A/bondization.json"):
+            return DummyResponse(
+                {
+                    "amortizations": {
+                        "columns": ["amortdate", "valueprc"],
+                        "data": [["2027-12-01", 10], ["2025-06-01", 5]],
+                    }
+                }
+            )
+        assert url.endswith("/A.json")
         return DummyResponse(
             {
-                "amortizations": {
-                    "columns": ["amortdate", "valueprc"],
-                    "data": [["2027-12-01", 10], ["2025-06-01", 5]],
+                "description": {
+                    "columns": ["name", "value"],
+                    "data": [["ISQUALIFIEDINVESTORS", "0"], ["HASTECHNICALDEFAULT", "0"], ["HASDEFAULT", "0"]],
                 }
             }
         )
@@ -272,12 +290,56 @@ def test_enrich_amortization_start_dates_deduplicates_secid_requests(monkeypatch
     errors = client.enrich_amortization_start_dates(bonds)
 
     assert errors == 0
-    assert calls["count"] == 1
+    assert calls["count"] == 2
     assert bonds[0]["Amortization_start_date"] == "2027-12-01"
     assert bonds[1]["Amortization_start_date"] == "2027-12-01"
 
 
 
+
+
+
+def test_enrich_amortization_start_dates_fills_moex_risk_flags(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0, amortization_request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    monkeypatch.setattr(client, "_fetch_amortization_start_date", lambda secid, matdate="": ("2025-06-01", 0))
+    monkeypatch.setattr(
+        client,
+        "fetch_security_description",
+        lambda secid: ({"ISQUALIFIEDINVESTORS": "1", "HASTECHNICALDEFAULT": "0", "HASDEFAULT": "0"}, 0),
+    )
+
+    bonds = [{"SECID": "A", "MATDATE": "2030-01-01"}]
+    errors = client.enrich_amortization_start_dates(bonds)
+
+    assert errors == 0
+    assert bonds[0]["Amortization_start_date"] == "2025-06-01"
+    assert bonds[0]["ISQUALIFIEDINVESTORS"] == "1"
+    assert bonds[0]["HASTECHNICALDEFAULT"] == "0"
+    assert bonds[0]["HASDEFAULT"] == "0"
+
+
+def test_enrich_amortization_reads_legacy_checkpoint_with_string_value(monkeypatch):
+    config = AppConfig(retries=1, request_delay_seconds=0)
+    client = MoexClient(config=config, logger=logging.getLogger("test"))
+
+    def should_not_fetch(*args, **kwargs):
+        raise AssertionError("HTTP запрос не должен выполняться для cache hit")
+
+    monkeypatch.setattr(client.session, "get", should_not_fetch)
+    bonds = [{"SECID": "A"}]
+
+    errors = client.enrich_amortization_start_dates(
+        bonds,
+        checkpoint_data={"processed": {"A": "2025-06-01"}, "completed": False},
+    )
+
+    assert errors == 0
+    assert bonds[0]["Amortization_start_date"] == "2025-06-01"
+    assert bonds[0]["ISQUALIFIEDINVESTORS"] == ""
+    assert bonds[0]["HASTECHNICALDEFAULT"] == ""
+    assert bonds[0]["HASDEFAULT"] == ""
 
 def test_extract_earliest_amortization_date_single_partial_valueprc_is_amortization():
     payload = {
@@ -423,7 +485,12 @@ def test_enrich_amortization_checkpoint_saves_only_successful_secids(monkeypatch
     assert bonds[0]["Amortization_start_date"] == "2026-01-01"
     assert bonds[1]["Amortization_start_date"] == ""
     assert saved_payloads[-1]["version"] == AMORTIZATION_CHECKPOINT_VERSION
-    assert saved_payloads[-1]["processed"] == {"A": "2026-01-01"}
+    assert saved_payloads[-1]["processed"] == {
+        "A": {
+            "amortization_start_date": "2026-01-01",
+            "flags": {"ISQUALIFIEDINVESTORS": "", "HASTECHNICALDEFAULT": "", "HASDEFAULT": ""},
+        }
+    }
 
 
 def test_enrich_amortization_checkpoint_contains_updated_at(monkeypatch):
