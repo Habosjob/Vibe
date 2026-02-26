@@ -865,6 +865,36 @@ def test_enrich_bonds_saves_final_checkpoint_even_with_large_interval() -> None:
     assert len(checkpoints) == 1
     assert checkpoints[0]["completed"] is True
 
+
+
+def test_parse_corpbonds_payload_handles_tooltip_labels() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Тип купона <span class="tooltip">?</span><span class="tooltip-content">Подсказка</span></p></td><td><p class="val">Фикс</p></td></tr>
+      <tr><td><p>Купон лесенкой <span class="tooltip">?</span><span class="tooltip-content">Подсказка</span></p></td><td><p class="val">Нет</p></td></tr>
+      <tr><td><p>Дата ближайшей оферты <span class="tooltip">?</span><span class="tooltip-content">Подсказка</span></p></td><td><p class="val">Нет</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.coupon_type == "Фикс"
+    assert payload.lesenka == "Нет"
+
+def test_parse_corpbonds_payload_handles_tooltip_labels_for_price_and_offerdate() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Цена последняя <span class="tooltip">?</span><span class="tooltip-content">Подсказка</span></p></td><td><p class="val">102,75</p></td></tr>
+      <tr><td><p>Дата ближайшей оферты <span class="tooltip">?</span><span class="tooltip-content">Подсказка</span></p></td><td><p class="val">24.10.2039</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.real_price == 102.75
+    assert payload.ytm_date == "2039-10-24"
+
+
 def test_parse_corpbonds_payload_extracts_price_coupon_and_offer() -> None:
     html = """
     <table><tbody>
@@ -884,6 +914,27 @@ def test_parse_corpbonds_payload_extracts_price_coupon_and_offer() -> None:
     assert payload.index_spread == 2.1
     assert payload.ytm_date == "2039-10-24"
     assert payload.lesenka == "Да"
+
+
+def test_fetch_and_parse_falls_back_to_dohod_ask_when_corpbonds_price_missing() -> None:
+    class _Response:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def raise_for_status(self) -> None:
+            return None
+
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._corpbonds_secid_by_isin = {"RU1": "RU1_SEC"}
+    enricher._get_with_rate_limit = lambda *_args, **_kwargs: _Response('<script>{"ask":"97.4"}</script>')  # type: ignore[method-assign]
+    enricher._fetch_and_parse_corpbonds = lambda _secid: DohodBondPayload(real_price=None)  # type: ignore[method-assign]
+
+    payload, errors = enricher._fetch_and_parse("RU1")
+
+    assert errors == 0
+    assert payload.ask_price == 97.4
+    assert payload.real_price == 97.4
 
 
 def test_enrich_uses_corpbonds_realprice_instead_of_dohod_ask() -> None:

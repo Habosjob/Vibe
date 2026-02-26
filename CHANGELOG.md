@@ -1,6 +1,16 @@
 # CHANGELOG
 
 ## 2026-02-26
+- Доработан парсер CorpBonds: tooltip-лейблы теперь корректно распознаются не только для `CouponType/Lesenka`, но и для `RealPrice` (`Цена последняя`) и `OfferDate` (`Дата ближайшей оферты`).
+- Добавлен fallback для `RealPrice`: если CorpBonds не отдает цену, используется `ask_price` из карточки ДОХОД (приоритет CorpBonds сохранен).
+- Добавлены pytest-тесты на tooltip-разбор `RealPrice/OfferDate` и fallback `RealPrice` через ДОХОД.
+
+## 2026-02-26
+- Исправлен парсинг подписей CorpBonds с tooltip-текстом: `CouponType` и `Lesenka` снова корректно заполняются при текущей верстке карточки.
+- В основной выгрузке восстановлено заполнение поля `Scorerate` для не-blacklist эмитентов (раньше выставлялся только `ScoreColor`).
+- Добавлены pytest-тесты на разбор CorpBonds-лейблов с tooltip.
+
+## 2026-02-26
 - Возвращены и зафиксированы колонки `HASDEFAULT`, `RealPrice`, `CouponType`, `Lesenka` в основной таблице экспорта (даже при совпадающих/пустых значениях).
 - В `SUMMARY` и run-metrics добавлены счетчики по CorpBonds (`corpbonds_realprice_added`, `corpbonds_coupontype_added`, `corpbonds_lesenka_added`).
 - Исправлен режим `force_cache_refresh`: после очистки чекпоинтов этап амортизации всегда стартует с пустого кэша.
