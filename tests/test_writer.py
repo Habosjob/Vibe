@@ -445,3 +445,27 @@ def test_save_bonds_excel_places_data_status_in_misc_group(tmp_path: Path) -> No
 
     assert _group_for_column(status_col) == "Прочее"
     assert _group_for_column(reason_col) == "Прочее"
+
+def test_save_bonds_excel_keeps_mandatory_corpbonds_and_default_columns(tmp_path: Path) -> None:
+    target = tmp_path / "output" / "bonds.xlsx"
+    bonds = [
+        {
+            "SECID": "B1",
+            "SHORTNAME": "Bond 1",
+            "ISIN": "RU000A",
+            "ISQUALIFIEDINVESTORS": "0",
+            "HASTECHNICALDEFAULT": "0",
+            "HASDEFAULT": "0",
+        }
+    ]
+
+    save_bonds_file(str(target), bonds)
+
+    workbook = load_workbook(target)
+    sheet = workbook["MOEX_BONDS"]
+    headers = [sheet.cell(row=2, column=idx).value for idx in range(1, sheet.max_column + 1)]
+
+    assert "HASDEFAULT" in headers
+    assert "RealPrice" in headers
+    assert "CouponType" in headers
+    assert "Lesenka" in headers

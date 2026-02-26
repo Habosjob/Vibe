@@ -72,6 +72,9 @@ def main() -> None:
         previous_exclusions = {}
         bonds_checkpoint = {}
         raw_amortization_checkpoint = {}
+        amortization_checkpoint = {}
+        amortization_checkpoint_invalidated = False
+        amortization_cache_fresh = False
 
 
     stage_durations["state_load_seconds"] = round(time.perf_counter() - stage_started, 2)
@@ -240,6 +243,9 @@ def main() -> None:
         "dohod_cache_hits": dohod_stats.cache_hits,
         "dohod_requested": dohod_stats.requested,
         "dohod_parse_empty_payloads": dohod_stats.parse_empty_payloads,
+        "corpbonds_realprice_added": dohod_stats.corpbonds_realprice_added,
+        "corpbonds_coupontype_added": dohod_stats.corpbonds_coupontype_added,
+        "corpbonds_lesenka_added": dohod_stats.corpbonds_lesenka_added,
         "ytm_calculated": ytm_stats.calculated,
         "ytm_skipped": ytm_stats.skipped,
     }

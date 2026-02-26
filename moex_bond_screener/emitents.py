@@ -318,6 +318,7 @@ def build_emitents_reference(
     scorerate_by_emitter: dict[str, str] = {}
     today = datetime.now().date().isoformat()
     forced_blacklist_emitters = forced_blacklist_emitters or set()
+    discovered_emitters.update(forced_blacklist_emitters)
 
     for emitter_id in sorted(discovered_emitters):
         details = registry.get(emitter_id, {})
