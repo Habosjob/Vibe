@@ -65,6 +65,7 @@ python3 main.py --config config/moex_bonds.yaml
 Все настройки вынесены в `config/moex_bonds.yaml`.
 
 ### Управление колонками в итоговом Excel
+- `Python_Sorter.py` использует те же настройки `output.date_formats`, что и `Moex_Bonds.py`, чтобы стабильно конвертировать `*DATE` колонки перед сохранением Excel.
 - В `output.drop_columns` добавлены `COUPONDATE` и `ISSUEDATE`.
 - `OFFERDATE` и `MATDATE` удалены из списка `output.drop_columns`, поэтому снова остаются в итоговом Excel.
 
@@ -119,6 +120,7 @@ sorter:
 2. Проверьте параметры срока (`permanent`, `exclude_until`, `ttl_days`).
 3. Проверьте `enabled`.
 4. Откройте `logs/Python_Sorter.log`:
+   - ошибки вызова конвертации типов (например несовместимая сигнатура) теперь исключены, т.к. Sorter передает `date_formats`;
    - сколько записей загружено из `DropedBonds`;
    - сколько истекших исключений очищено;
    - сколько бумаг исключено как «ранее отброшенные»;

@@ -88,6 +88,7 @@ class SorterConfig:
     width_sample_rows: int
     heatmap_columns: list[str]
     text_columns: list[str]
+    date_formats: list[str]
     skip_rebuild_if_unchanged: bool
 
 
@@ -169,6 +170,14 @@ def load_config(path: Path) -> SorterConfig:
         width_sample_rows=int(_deep_get(loaded, "performance", "width_sample_rows", default=350)),
         heatmap_columns=list(_deep_get(loaded, "output", "heatmap_columns", default=["YIELD", "EFFECTIVEYIELD", "COUPON"])),
         text_columns=list(_deep_get(loaded, "output", "text_columns", default=["INN"])),
+        date_formats=list(
+            _deep_get(
+                loaded,
+                "output",
+                "date_formats",
+                default=["%d.%m.%Y", "%Y-%m-%d", "%d.%m.%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"],
+            )
+        ),
         skip_rebuild_if_unchanged=bool(
             _deep_get(loaded, "sorter", "performance", "skip_rebuild_if_unchanged", default=True)
         ),
@@ -328,7 +337,7 @@ def save_outputs(
     config.dropped_path.parent.mkdir(parents=True, exist_ok=True)
 
     progress.pulse("Подготовка типов данных для сохранения форматирования")
-    prepared_kept = auto_convert_types(kept_df, logger, config.text_columns)
+    prepared_kept = auto_convert_types(kept_df, logger, config.text_columns, config.date_formats)
 
     progress.pulse("Сохранение Moex_Bonds.xlsx с форматированием")
     save_to_excel(

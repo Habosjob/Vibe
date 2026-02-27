@@ -55,6 +55,9 @@ output:
   heatmap_columns: ["YIELD", "EFFECTIVEYIELD", "COUPON", "SPREAD"]
   # Колонки, которые принудительно остаются текстом
   text_columns: ["INN"]
+  # Форматы дат для MATDATE/OFFERDATE и других *DATE полей.
+  # Применяются по порядку, затем идёт fallback с dayfirst=True.
+  date_formats: ["%d.%m.%Y", "%Y-%m-%d", "%d.%m.%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"]
   # Колонки, которые переносятся в конец таблицы
   move_to_end_columns: ["WAPRICE"]
 

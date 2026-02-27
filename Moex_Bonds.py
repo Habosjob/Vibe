@@ -94,6 +94,7 @@ class AppConfig:
     drop_columns: list[str]
     text_columns: list[str]
     move_to_end_columns: list[str]
+    date_formats: list[str]
 
 
 class ConsoleProgress:
@@ -173,6 +174,14 @@ def load_config(path: Path) -> AppConfig:
         drop_columns=list(_deep_get(loaded, "output", "drop_columns", default=DEFAULT_DROP_COLUMNS)),
         text_columns=list(_deep_get(loaded, "output", "text_columns", default=["INN"])),
         move_to_end_columns=list(_deep_get(loaded, "output", "move_to_end_columns", default=["WAPRICE"])),
+        date_formats=list(
+            _deep_get(
+                loaded,
+                "output",
+                "date_formats",
+                default=["%d.%m.%Y", "%Y-%m-%d", "%d.%m.%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"],
+            )
+        ),
     )
 
 
@@ -264,7 +273,30 @@ def download_rates(config: AppConfig, logger: logging.Logger) -> DownloadResult:
     return DownloadResult(frame=df, source_hash=source_hash, from_cache=use_cache)
 
 
-def auto_convert_types(df: pd.DataFrame, logger: logging.Logger, text_columns: list[str]) -> pd.DataFrame:
+def _parse_date_series(series: pd.Series, formats: list[str]) -> pd.Series:
+    parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    cleaned = series.astype("string").str.strip()
+    pending = cleaned.notna() & cleaned.ne("")
+
+    for fmt in formats:
+        if not pending.any():
+            break
+        candidate = pd.to_datetime(cleaned[pending], format=fmt, errors="coerce")
+        success = candidate.notna()
+        if success.any():
+            parsed.loc[candidate.index[success]] = candidate.loc[success]
+            pending.loc[candidate.index[success]] = False
+
+    if pending.any():
+        fallback = pd.to_datetime(cleaned[pending], errors="coerce", dayfirst=True)
+        success = fallback.notna()
+        if success.any():
+            parsed.loc[fallback.index[success]] = fallback.loc[success]
+
+    return parsed
+
+
+def auto_convert_types(df: pd.DataFrame, logger: logging.Logger, text_columns: list[str], date_formats: list[str]) -> pd.DataFrame:
     converted = df.copy()
     date_keys = ("DATE", "MATDATE", "ISSUEDATE", "OFFERDATE")
     force_text = {name.upper() for name in text_columns}
@@ -278,7 +310,11 @@ def auto_convert_types(df: pd.DataFrame, logger: logging.Logger, text_columns: l
             continue
 
         if any(key in upper for key in date_keys):
-            converted[col] = pd.to_datetime(series, format="%d.%m.%Y", errors="coerce")
+            parsed_dates = _parse_date_series(series, date_formats)
+            converted[col] = parsed_dates
+            non_empty = series.astype("string").str.strip().replace("", pd.NA).notna().sum()
+            parsed_ok = parsed_dates.notna().sum()
+            logger.info("Колонка %s: распознано дат %s из %s", col, parsed_ok, non_empty)
             continue
 
         if series.dtype != "object":
@@ -474,7 +510,7 @@ def main() -> int:
         raw_df = move_columns_to_end(raw_df, config.move_to_end_columns, logger)
 
         progress.update(3, "Определение форматов данных")
-        final_df = auto_convert_types(raw_df, logger, config.text_columns)
+        final_df = auto_convert_types(raw_df, logger, config.text_columns, config.date_formats)
 
         progress.update(4, "Экспорт в Excel (xlsxwriter)")
         save_to_excel(
