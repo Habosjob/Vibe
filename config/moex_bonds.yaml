@@ -50,6 +50,7 @@ output:
     - "NAME"
     - "OFFERDATE"
     - "YIELDATWAP"
+    - "MATDATE"
   # Цветовая шкала применяется только к точным именам колонок (без масок)
   heatmap_columns: ["YIELD", "EFFECTIVEYIELD", "COUPON", "SPREAD"]
   # Колонки, которые принудительно остаются текстом
@@ -76,12 +77,23 @@ sorter:
     dropped_encoding: "utf-8-sig"
   logging:
     path: "logs/Python_Sorter.log"
+  cache:
+    state_path: "logs/cache/sorter_state.json"
+  performance:
+    skip_rebuild_if_unchanged: true
   filters:
     - name: "exclude_structured_bonds"
       enabled: true
       column: "BOND_TYPE"
       equals: "Структурная облигация"
       reason: "BOND_TYPE = Структурная облигация"
+      permanent: true
+    - name: "exclude_qualified_only"
+      enabled: true
+      column: "IS_QUALIFIED_INVESTORS"
+      equals: "1"
+      reason: "IS_QUALIFIED_INVESTORS = 1"
+      ttl_days: 30
 
 cache:
   csv_path: "logs/cache/moex_rates.csv"
