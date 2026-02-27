@@ -923,6 +923,21 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags_from_dl_and_mixed_lett
     assert payload.subordinated == "нет"
 
 
+
+
+def test_parse_corpbonds_payload_extracts_bond_type_flags_from_yes_no_compound_value() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Вечные</p></td><td><p class="val">Да/Нет</p></td></tr>
+      <tr><td><p>Субординированные</p></td><td><p class="val">Нет / Да</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.perpetual == "да"
+    assert payload.subordinated == "нет"
+
 def test_parse_corpbonds_payload_extracts_price_coupon_and_offer() -> None:
     html = """
     <table><tbody>

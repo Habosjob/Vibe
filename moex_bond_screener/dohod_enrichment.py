@@ -1269,9 +1269,28 @@ def _normalize_yes_no(raw: str) -> str:
     value = _normalize_label(str(raw or ""))
     if not value:
         return ""
-    if value in {"да", "yes", "y", "true", "1"}:
+
+    yes_tokens = ("да", "yes", "y", "true", "1", "+")
+    no_tokens = ("нет", "no", "n", "false", "0", "-")
+
+    if value in yes_tokens:
         return "да"
-    if value in {"нет", "no", "n", "false", "0"}:
+    if value in no_tokens:
+        return "нет"
+
+    # Нестандартная верстка может возвращать варианты вроде "Да/Нет" или "Да Нет".
+    # Выбираем первый явно встреченный токен.
+    compact = re.sub(r"[^\wа-я]+", " ", value, flags=re.IGNORECASE)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    if not compact:
+        return ""
+
+    yes_pos = min((compact.find(token) for token in yes_tokens if token and token in compact), default=-1)
+    no_pos = min((compact.find(token) for token in no_tokens if token and token in compact), default=-1)
+
+    if yes_pos >= 0 and (no_pos < 0 or yes_pos < no_pos):
+        return "да"
+    if no_pos >= 0 and (yes_pos < 0 or no_pos < yes_pos):
         return "нет"
     return ""
 
