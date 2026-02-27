@@ -895,6 +895,49 @@ def test_parse_corpbonds_payload_handles_tooltip_labels_for_price_and_offerdate(
     assert payload.ytm_date == "2039-10-24"
 
 
+def test_parse_corpbonds_payload_extracts_bond_type_flags() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Вечные</p></td><td><p class="val">Да</p></td></tr>
+      <tr><td><p>Субординированные</p></td><td><p class="val">Нет</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.perpetual == "да"
+    assert payload.subordinated == "нет"
+
+
+def test_parse_corpbonds_payload_extracts_bond_type_flags_from_dl_and_mixed_letters() -> None:
+    html = """
+    <dl>
+      <dt>Вечные</dt><dd>Да</dd>
+      <dt>Cубординированные</dt><dd>Нет</dd>
+    </dl>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.perpetual == "да"
+    assert payload.subordinated == "нет"
+
+
+
+
+def test_parse_corpbonds_payload_extracts_bond_type_flags_from_yes_no_compound_value() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Вечные</p></td><td><p class="val">Да/Нет</p></td></tr>
+      <tr><td><p>Субординированные</p></td><td><p class="val">Нет / Да</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.perpetual == "да"
+    assert payload.subordinated == "нет"
+
 def test_parse_corpbonds_payload_extracts_price_coupon_and_offer() -> None:
     html = """
     <table><tbody>
@@ -998,6 +1041,20 @@ def test_cached_payload_usable_when_only_corpbonds_fields_present() -> None:
         "event_name": "",
         "coupon_type": "Фикс",
         "lesenka": "Нет",
+    }
+    assert DohodEnricher._is_cached_payload_usable(payload) is True
+
+
+def test_cached_payload_usable_when_only_bond_type_flags_present() -> None:
+    payload = {
+        "real_price": None,
+        "index_name": "",
+        "ytm_date": "",
+        "event_name": "",
+        "coupon_type": "",
+        "lesenka": "",
+        "perpetual": "да",
+        "subordinated": "нет",
     }
     assert DohodEnricher._is_cached_payload_usable(payload) is True
 
