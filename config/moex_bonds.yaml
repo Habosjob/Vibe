@@ -72,6 +72,8 @@ pipeline:
 
 dohod:
   enabled: true
+  # false: ошибка DOHOD_Bonds не роняет весь main.py
+  required_for_pipeline: false
   source:
     url: "https://www.dohod.ru/analytic/bonds"
     download_button_text: "СКАЧАТЬ EXCEL"

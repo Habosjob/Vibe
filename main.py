@@ -75,15 +75,26 @@ def resolve_pipeline_log(config_path: Path) -> Path:
     return Path(str(path))
 
 
-def run_step(label: str, command: list[str], logger: logging.Logger) -> None:
+
+def resolve_dohod_required(config_path: Path) -> bool:
+    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, dict):
+        return False
+    return bool(loaded.get("dohod", {}).get("required_for_pipeline", False))
+
+def run_step(label: str, command: list[str], logger: logging.Logger, *, allow_failure: bool = False) -> bool:
     logger.info("Запуск шага '%s': %s", label, " ".join(command))
     started = time.perf_counter()
     result = subprocess.run(command, check=False)
     elapsed = time.perf_counter() - started
     if result.returncode != 0:
         logger.error("Шаг '%s' завершился с кодом %s за %.2f сек", label, result.returncode, elapsed)
+        if allow_failure:
+            logger.warning("Шаг '%s' помечен как необязательный, пайплайн продолжается", label)
+            return False
         raise RuntimeError(f"Шаг '{label}' завершился с кодом {result.returncode}")
     logger.info("Шаг '%s' выполнен успешно за %.2f сек", label, elapsed)
+    return True
 
 
 def main() -> int:
@@ -106,12 +117,25 @@ def main() -> int:
         run_step("Python_Sorter", [sys.executable, "Python_Sorter.py", "--config", str(config_path)], logger)
 
         progress.update(3, "Шаг 3/3: запуск DOHOD_Bonds.py")
-        run_step("DOHOD_Bonds", [sys.executable, "DOHOD_Bonds.py", "--config", str(config_path)], logger)
+        dohod_required = resolve_dohod_required(config_path)
+        dohod_ok = run_step(
+            "DOHOD_Bonds",
+            [sys.executable, "DOHOD_Bonds.py", "--config", str(config_path)],
+            logger,
+            allow_failure=not dohod_required,
+        )
 
         elapsed = time.perf_counter() - run_started
-        progress.update(4, f"Пайплайн завершен за {elapsed:0.1f}с")
-        logger.info("Полный пайплайн завершен успешно за %.2f сек", elapsed)
-        print(f"{Ansi.GREEN}Пайплайн завершен. Лог: {resolve_pipeline_log(config_path)}{Ansi.RESET}")
+        if dohod_ok:
+            progress.update(4, f"Пайплайн завершен за {elapsed:0.1f}с")
+            logger.info("Полный пайплайн завершен успешно за %.2f сек", elapsed)
+        else:
+            progress.update(4, f"Пайплайн завершен с предупреждением за {elapsed:0.1f}с")
+            logger.warning("Пайплайн завершен с предупреждением: DOHOD_Bonds не выполнен")
+        if dohod_ok:
+            print(f"{Ansi.GREEN}Пайплайн завершен. Лог: {resolve_pipeline_log(config_path)}{Ansi.RESET}")
+        else:
+            print(f"{Ansi.CYAN}Пайплайн завершен с предупреждением (DOHOD_Bonds). Лог: {resolve_pipeline_log(config_path)}{Ansi.RESET}")
         return 0
     except Exception as exc:  # noqa: BLE001
         logger.exception("Ошибка пайплайна: %s", exc)

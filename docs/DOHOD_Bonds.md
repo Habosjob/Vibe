@@ -13,6 +13,7 @@
 6. Пишет перезаписываемый лог в `logs/DOHOD_Bonds.log`.
 7. Показывает интерактивный прогресс-бар и спиннер в консоли.
 8. При ошибке скрипт завершает процесс с кодом `1` без выброса `SystemExit`-traceback в консоль.
+9. Если файл `Dohod_Bonds.xlsx` уже скачан сегодня, шаг завершается успешно без запуска Playwright.
 
 ---
 
@@ -38,6 +39,7 @@ dohod:
 
 ### Что можно настраивать
 - `dohod.enabled` — включение/выключение шага.
+- `dohod.required_for_pipeline` — если `true`, ошибка шага роняет `main.py`; если `false`, пайплайн завершается с предупреждением.
 - `dohod.source.url` — URL страницы.
 - `dohod.source.download_button_text` — текст кнопки загрузки.
 - `dohod.output.excel_path` — путь итогового файла.
@@ -65,4 +67,12 @@ dohod:
 ## Запуск
 ```bash
 python3 DOHOD_Bonds.py --config config/moex_bonds.yaml
+```
+
+
+## Зависимости
+Рекомендуется устанавливать из `requirements.txt`:
+```bash
+pip install -r requirements.txt
+python -m playwright install chromium
 ```

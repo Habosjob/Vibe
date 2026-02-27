@@ -1,0 +1,6 @@
+pandas
+requests
+XlsxWriter
+PyYAML
+playwright
+openpyxl

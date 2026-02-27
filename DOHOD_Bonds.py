@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -66,6 +66,7 @@ class ConsoleProgress:
 @dataclass
 class DohodConfig:
     enabled: bool
+    required_for_pipeline: bool
     page_url: str
     download_button_text: str
     output_excel_path: Path
@@ -106,6 +107,7 @@ def load_config(path: Path) -> DohodConfig:
 
     return DohodConfig(
         enabled=bool(_deep_get(loaded, "dohod", "enabled", default=True)),
+        required_for_pipeline=bool(_deep_get(loaded, "dohod", "required_for_pipeline", default=False)),
         page_url=str(_deep_get(loaded, "dohod", "source", "url", default="https://www.dohod.ru/analytic/bonds")),
         download_button_text=str(_deep_get(loaded, "dohod", "source", "download_button_text", default="СКАЧАТЬ EXCEL")),
         output_excel_path=output_path,
@@ -165,6 +167,12 @@ def _wait_for_button(page: Any, label: str, timeout_sec: int, progress: ConsoleP
 
 
 def download_bonds_excel(config: DohodConfig, logger: logging.Logger, progress: ConsoleProgress) -> str:
+    progress.update(1, "Проверка локального файла Dohod_Bonds.xlsx")
+    if _already_downloaded_today(config.output_excel_path):
+        logger.info("Файл уже скачан сегодня, пропускаю: %s", config.output_excel_path)
+        progress.update(5, "Файл уже актуален на сегодня, повторное скачивание не требуется")
+        return "skipped"
+
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -172,12 +180,6 @@ def download_bonds_excel(config: DohodConfig, logger: logging.Logger, progress: 
         raise RuntimeError(
             "Не установлен Playwright. Установите зависимости: pip install playwright && playwright install chromium"
         ) from exc
-
-    progress.update(1, "Проверка локального файла Dohod_Bonds.xlsx")
-    if _already_downloaded_today(config.output_excel_path):
-        logger.info("Файл уже скачан сегодня, пропускаю: %s", config.output_excel_path)
-        progress.update(5, "Файл уже актуален на сегодня, повторное скачивание не требуется")
-        return "skipped"
 
     progress.update(2, "Запуск браузера и открытие dohod.ru")
     with sync_playwright() as pw:
@@ -232,6 +234,8 @@ def main() -> int:
 
     logger = build_logger(config.log_path)
     progress = ConsoleProgress(total_steps=5)
+
+    logger.info("Конфиг DOHOD_Bonds: enabled=%s required_for_pipeline=%s output=%s", config.enabled, config.required_for_pipeline, config.output_excel_path)
 
     if not config.enabled:
         logger.info("DOHOD_Bonds отключен в YAML (dohod.enabled=false), запуск пропущен")

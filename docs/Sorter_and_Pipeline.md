@@ -132,4 +132,9 @@ sorter:
 
 ### Раздел `dohod`
 Новый шаг пайплайна, который качает Excel с dohod.ru после сортировки.
+
+Ключевая настройка:
+- `dohod.required_for_pipeline: false` (по умолчанию) — если DOHOD-шаг падает, `main.py` не падает, а завершает запуск с предупреждением.
+- `dohod.required_for_pipeline: true` — ошибка DOHOD-шагa завершает пайплайн ошибкой.
+
 Подробно: `docs/DOHOD_Bonds.md`.
