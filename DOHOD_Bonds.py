@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import logging
 import time
 from dataclasses import dataclass
@@ -12,7 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 DEFAULT_CONFIG_PATH = Path("config/moex_bonds.yaml")
 
@@ -88,6 +92,9 @@ def _deep_get(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
 
 
 def load_config(path: Path) -> DohodConfig:
+    if yaml is None:
+        raise RuntimeError("Не установлен PyYAML. Установите зависимость: pip install pyyaml")
+
     if not path.exists():
         raise FileNotFoundError(f"Не найден YAML-конфиг: {path}")
 
@@ -180,6 +187,7 @@ def download_bonds_excel(config: DohodConfig, logger: logging.Logger, progress: 
 
         logger.info("Открываю страницу: %s", config.page_url)
         page.goto(config.page_url, timeout=config.timeout_sec * 1000, wait_until="domcontentloaded")
+        logger.info("Заголовок страницы: %s", page.title())
 
         progress.update(3, "Поиск кнопки 'Скачать Excel'")
         button = _wait_for_button(page, config.download_button_text, config.timeout_sec, progress, logger)
@@ -187,7 +195,7 @@ def download_bonds_excel(config: DohodConfig, logger: logging.Logger, progress: 
         progress.update(4, "Ожидание и сохранение файла")
         try:
             with page.expect_download(timeout=config.download_timeout_sec * 1000) as download_info:
-                button.click()
+                button.click(force=True)
             download = download_info.value
         except PlaywrightTimeoutError as exc:
             raise TimeoutError("Не удалось получить download-событие от кнопки 'Скачать Excel'") from exc
@@ -238,9 +246,23 @@ def main() -> int:
         return 0
     except Exception as exc:  # noqa: BLE001
         logger.exception("Ошибка DOHOD_Bonds: %s", exc)
-        print(f"\n{Ansi.RED}Ошибка DOHOD_Bonds. См. лог: {config.log_path}{Ansi.RESET}")
+        message = str(exc)
+        if "libatk-1.0.so.0" in message:
+            print(
+                f"\n{Ansi.RED}Ошибка запуска браузера Playwright: отсутствуют системные библиотеки (пример: libatk-1.0.so.0). См. лог: {config.log_path}{Ansi.RESET}"
+            )
+        else:
+            print(f"\n{Ansi.RED}Ошибка DOHOD_Bonds. См. лог: {config.log_path}{Ansi.RESET}")
         return 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    if code != 0:
+        try:
+            import sys
+
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            os._exit(code)
