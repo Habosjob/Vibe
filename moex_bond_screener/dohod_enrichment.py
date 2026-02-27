@@ -1000,9 +1000,9 @@ def _canonicalize_corpbonds_label(raw_label: str) -> str:
         return "Купон лесенкой"
     if "формула купона" in label:
         return "Формула купона"
-    if "вечн" in label:
+    if "вечн" in label or "бессроч" in label or "perpetual" in raw_label_lower:
         return "Вечные"
-    if "субординир" in label:
+    if "субординир" in label or "суборд" in label or "subordinat" in raw_label_lower or "subord" in raw_label_lower:
         return "Субординированные"
     if "дата ближайшей оферты" in label or "дата оферты" in label or "ближайшая оферта" in label:
         return "Дата ближайшей оферты"
