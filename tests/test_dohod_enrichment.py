@@ -895,7 +895,7 @@ def test_parse_corpbonds_payload_handles_tooltip_labels_for_price_and_offerdate(
     assert payload.ytm_date == "2039-10-24"
 
 
-def test_parse_corpbonds_payload_extracts_bond_type_flags() -> None:
+def test_parse_bond_payload_extracts_bond_type_flags() -> None:
     html = """
     <table><tbody>
       <tr><td><p>Вечные</p></td><td><p class="val">Да</p></td></tr>
@@ -903,13 +903,13 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags() -> None:
     </tbody></table>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.perpetual == "да"
     assert payload.subordinated == "нет"
 
 
-def test_parse_corpbonds_payload_extracts_bond_type_flags_from_dl_and_mixed_letters() -> None:
+def test_parse_bond_payload_extracts_bond_type_flags_from_dl_and_mixed_letters() -> None:
     html = """
     <dl>
       <dt>Вечные</dt><dd>Да</dd>
@@ -917,7 +917,7 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags_from_dl_and_mixed_lett
     </dl>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.perpetual == "да"
     assert payload.subordinated == "нет"
@@ -925,7 +925,7 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags_from_dl_and_mixed_lett
 
 
 
-def test_parse_corpbonds_payload_extracts_bond_type_flags_from_yes_no_compound_value() -> None:
+def test_parse_bond_payload_extracts_bond_type_flags_from_yes_no_compound_value() -> None:
     html = """
     <table><tbody>
       <tr><td><p>Вечные</p></td><td><p class="val">Да/Нет</p></td></tr>
@@ -933,7 +933,7 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags_from_yes_no_compound_v
     </tbody></table>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.perpetual == "да"
     assert payload.subordinated == "нет"
@@ -955,7 +955,7 @@ def test_parse_bond_payload_extracts_type_flags_from_json_like_blob_with_1_0() -
     assert payload.subordinated == "нет"
 
 
-def test_parse_corpbonds_payload_extracts_type_flags_from_json_like_blob_with_bool() -> None:
+def test_parse_bond_payload_extracts_type_flags_from_json_like_blob_with_bool() -> None:
     html = """
     <html><body>
       <script>
@@ -964,14 +964,14 @@ def test_parse_corpbonds_payload_extracts_type_flags_from_json_like_blob_with_bo
     </body></html>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.perpetual == "нет"
     assert payload.subordinated == "да"
 
 
 
-def test_parse_corpbonds_payload_ignores_generic_subordinated_filter_flags() -> None:
+def test_parse_bond_payload_ignores_generic_subordinated_filter_flags() -> None:
     html = """
     <html><body>
       <script>
@@ -983,13 +983,13 @@ def test_parse_corpbonds_payload_ignores_generic_subordinated_filter_flags() -> 
     </body></html>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.subordinated == "нет"
 
 
 
-def test_parse_corpbonds_payload_ignores_generic_is_subordinated_flags_outside_bond_blob() -> None:
+def test_parse_bond_payload_ignores_generic_is_subordinated_flags_outside_bond_blob() -> None:
     html = """
     <html><body>
       <script>
@@ -1001,7 +1001,7 @@ def test_parse_corpbonds_payload_ignores_generic_is_subordinated_flags_outside_b
     </body></html>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.subordinated == "нет"
 
@@ -1052,7 +1052,7 @@ def test_enrich_uses_corpbonds_realprice_instead_of_dohod_ask() -> None:
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
     enricher._fetch_live_index_values = lambda: {"RUONIA": 14.5, "CBR_RATE": 14.0, "Z_CURVE_RUS": 13.0}  # type: ignore[method-assign]
 
-    def fake_fetch(_primary: str, _secondary: str | None):
+    def fake_fetch(_primary: str, _secondary: str | None, _needs_corpbonds: bool = True):
         return DohodBondPayload(ask_price=88.0, real_price=99.5), 0
 
     enricher._fetch_with_fallback = fake_fetch  # type: ignore[method-assign]
@@ -1062,6 +1062,45 @@ def test_enrich_uses_corpbonds_realprice_instead_of_dohod_ask() -> None:
 
     assert errors == 0
     assert bonds[0]["RealPrice"] == 99.5
+
+
+
+def test_parse_corpbonds_payload_does_not_extract_bond_type_flags_from_english_aliases() -> None:
+    html = """
+    <table><tbody>
+      <tr><td><p>Perpetual bonds</p></td><td><p class="val">Yes</p></td></tr>
+      <tr><td><p>Subordinated debt</p></td><td><p class="val">No</p></td></tr>
+    </tbody></table>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.perpetual == ""
+    assert payload.subordinated == ""
+
+
+def test_fetch_and_parse_skips_corpbonds_when_not_needed() -> None:
+    class _Response:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def raise_for_status(self) -> None:
+            return None
+
+    config = AppConfig(retries=1)
+    enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
+    enricher._corpbonds_secid_by_isin = {"RU1": "RU1_SEC"}
+    enricher._get_with_rate_limit = lambda *_args, **_kwargs: _Response('<script>{"ask":"97.4"}</script>')  # type: ignore[method-assign]
+
+    def _unexpected_corpbonds(_secid: str) -> DohodBondPayload:
+        raise AssertionError("CorpBonds fetch must be skipped")
+
+    enricher._fetch_and_parse_corpbonds = _unexpected_corpbonds  # type: ignore[method-assign]
+
+    payload, errors = enricher._fetch_and_parse("RU1", needs_corpbonds=False)
+
+    assert errors == 0
+    assert payload.ask_price == 97.4
 
 def test_parse_corpbonds_payload_handles_offerdate_alias_label() -> None:
     html = """
@@ -1081,7 +1120,7 @@ def test_enrich_bonds_counts_corpbonds_offerdate_and_formula_stats() -> None:
     enricher = DohodEnricher(config=config, logger=logging.getLogger("test"))
     enricher._fetch_live_index_values = lambda: {"RUONIA": 14.5, "CBR_RATE": 14.0, "Z_CURVE_RUS": 13.0}  # type: ignore[method-assign]
 
-    def fake_fetch(_primary: str, _secondary: str | None):
+    def fake_fetch(_primary: str, _secondary: str | None, _needs_corpbonds: bool = True):
         return DohodBondPayload(index_name="RUONIA", index_spread=1.1, ytm_date="2030-01-01", event_name="оферта", formula_source="corpbonds", offer_source="corpbonds"), 0
 
     enricher._fetch_with_fallback = fake_fetch  # type: ignore[method-assign]
