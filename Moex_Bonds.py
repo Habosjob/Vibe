@@ -92,6 +92,8 @@ class AppConfig:
     skip_rebuild_if_unchanged: bool
     heatmap_columns: list[str]
     drop_columns: list[str]
+    text_columns: list[str]
+    move_to_end_columns: list[str]
 
 
 class ConsoleProgress:
@@ -167,8 +169,10 @@ def load_config(path: Path) -> AppConfig:
         cache_ttl_sec=int(_deep_get(loaded, "cache", "ttl_sec", default=3600)),
         width_sample_rows=int(_deep_get(loaded, "performance", "width_sample_rows", default=350)),
         skip_rebuild_if_unchanged=bool(_deep_get(loaded, "performance", "skip_rebuild_if_unchanged", default=True)),
-        heatmap_columns=list(_deep_get(loaded, "output", "heatmap_columns", default=["YIELD", "EFFECTIVEYIELD", "DURATION", "COUPON"])),
+        heatmap_columns=list(_deep_get(loaded, "output", "heatmap_columns", default=["YIELD", "EFFECTIVEYIELD", "COUPON"])),
         drop_columns=list(_deep_get(loaded, "output", "drop_columns", default=DEFAULT_DROP_COLUMNS)),
+        text_columns=list(_deep_get(loaded, "output", "text_columns", default=["INN"])),
+        move_to_end_columns=list(_deep_get(loaded, "output", "move_to_end_columns", default=["WAPRICE"])),
     )
 
 
@@ -260,13 +264,18 @@ def download_rates(config: AppConfig, logger: logging.Logger) -> DownloadResult:
     return DownloadResult(frame=df, source_hash=source_hash, from_cache=use_cache)
 
 
-def auto_convert_types(df: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame:
+def auto_convert_types(df: pd.DataFrame, logger: logging.Logger, text_columns: list[str]) -> pd.DataFrame:
     converted = df.copy()
     date_keys = ("DATE", "MATDATE", "ISSUEDATE", "OFFERDATE")
+    force_text = {name.upper() for name in text_columns}
 
     for col in converted.columns:
         upper = col.upper()
         series = converted[col]
+
+        if upper in force_text:
+            converted[col] = series.where(series.notna(), "")
+            continue
 
         if any(key in upper for key in date_keys):
             converted[col] = pd.to_datetime(series, format="%d.%m.%Y", errors="coerce")
@@ -282,6 +291,20 @@ def auto_convert_types(df: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame
 
     logger.info("Автоконвертация типов завершена")
     return converted
+
+
+def move_columns_to_end(df: pd.DataFrame, columns_to_move: list[str], logger: logging.Logger) -> pd.DataFrame:
+    if not columns_to_move:
+        return df
+
+    existing = [column for column in columns_to_move if column in df.columns]
+    if not existing:
+        logger.info("Колонки для переноса в конец не найдены")
+        return df
+
+    ordered = [column for column in df.columns if column not in existing] + existing
+    logger.info("Переношу в конец колонок: %s", ", ".join(existing))
+    return df.loc[:, ordered]
 
 
 def drop_unneeded_columns(df: pd.DataFrame, drop_columns: list[str], logger: logging.Logger) -> pd.DataFrame:
@@ -395,7 +418,8 @@ def save_to_excel(
             if (col_idx + 1) % 10 == 0 or (col_idx + 1) == col_count:
                 progress.pulse(f"Шаг 4/5: Форматирование колонок {col_idx + 1}/{col_count}")
 
-        heatmap_targets = [c for c in df.columns if any(key.upper() in c.upper() for key in heatmap_columns)]
+        heatmap_targets_upper = {column.upper() for column in heatmap_columns}
+        heatmap_targets = [column for column in df.columns if column.upper() in heatmap_targets_upper]
         for col_name in heatmap_targets:
             col_idx = df.columns.get_loc(col_name)
             progress.pulse(f"Шаг 4/5: Цветовая шкала {col_name}")
@@ -447,9 +471,10 @@ def main() -> int:
         progress.update(2, "Очистка мусорных и пустых колонок")
         raw_df = drop_unneeded_columns(raw_df, config.drop_columns, logger)
         raw_df = raw_df.dropna(axis=1, how="all")
+        raw_df = move_columns_to_end(raw_df, config.move_to_end_columns, logger)
 
         progress.update(3, "Определение форматов данных")
-        final_df = auto_convert_types(raw_df, logger)
+        final_df = auto_convert_types(raw_df, logger, config.text_columns)
 
         progress.update(4, "Экспорт в Excel (xlsxwriter)")
         save_to_excel(
