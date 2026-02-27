@@ -13,6 +13,8 @@ forced_groups:
   DATA_STATUS_REASON: Прочее
   LESENKA: Купоны и номинал
   COUPONTYPE: Купоны и номинал
+  Вечные: Прочее
+  Субординированные: Прочее
 
 priority_fields:
   - SHORTNAME

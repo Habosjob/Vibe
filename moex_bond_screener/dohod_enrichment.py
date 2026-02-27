@@ -20,7 +20,7 @@ from .raw_store import RawStore
 
 DohodProgressCallback = Callable[[dict[str, Any]], None]
 DohodCheckpointSaver = Callable[[dict[str, Any]], None]
-DOHOD_CHECKPOINT_VERSION = 5
+DOHOD_CHECKPOINT_VERSION = 7
 
 LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -61,6 +61,8 @@ class DohodBondPayload:
     real_price: float | None = None
     coupon_type: str = ""
     lesenka: str = ""
+    perpetual: str = ""
+    subordinated: str = ""
     formula_source: str = ""
     offer_source: str = ""
 
@@ -189,6 +191,8 @@ class DohodEnricher:
                         "ytm_date": payload.ytm_date,
                         "coupon_type": payload.coupon_type,
                         "lesenka": payload.lesenka,
+                        "perpetual": payload.perpetual,
+                        "subordinated": payload.subordinated,
                         "formula_source": payload.formula_source,
                         "offer_source": payload.offer_source,
                         "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -250,6 +254,10 @@ class DohodEnricher:
                     payload.coupon_type = corpbonds_payload.coupon_type
                 if corpbonds_payload.lesenka:
                     payload.lesenka = corpbonds_payload.lesenka
+                if corpbonds_payload.perpetual:
+                    payload.perpetual = corpbonds_payload.perpetual
+                if corpbonds_payload.subordinated:
+                    payload.subordinated = corpbonds_payload.subordinated
                 if corpbonds_payload.index_name:
                     payload.index_name = corpbonds_payload.index_name
                     payload.index_spread = corpbonds_payload.index_spread
@@ -341,6 +349,12 @@ class DohodEnricher:
         real_price = _parse_corpbonds_price(corpbonds_values.get("Цена последняя", ""))
         coupon_type = corpbonds_values.get("Тип купона", "")
         lesenka = corpbonds_values.get("Купон лесенкой", "")
+        perpetual = _normalize_yes_no(corpbonds_values.get("Вечные", ""))
+        subordinated = _normalize_yes_no(corpbonds_values.get("Субординированные", ""))
+        if not perpetual or not subordinated:
+            blob_perpetual, blob_subordinated = _extract_type_flags_from_html_blob(html)
+            perpetual = perpetual or blob_perpetual
+            subordinated = subordinated or blob_subordinated
         formula_value = corpbonds_values.get("Формула купона", "")
         if formula_value:
             formula_index_name, formula_spread = _parse_index_and_spread(formula_value)
@@ -354,7 +368,21 @@ class DohodEnricher:
             ytm_date = _to_iso_date(offer_date_raw)
             event_name = "оферта"
 
-        return DohodBondPayload(ask_price=ask_price, index_name=index_name, index_spread=spread, index_tenor_years=tenor_years, event_name=event_name, ytm_date=ytm_date, real_price=real_price, coupon_type=coupon_type, lesenka=lesenka, formula_source="corpbonds" if formula_value else "", offer_source="corpbonds" if offer_date_raw and ytm_date else "")
+        return DohodBondPayload(
+            ask_price=ask_price,
+            index_name=index_name,
+            index_spread=spread,
+            index_tenor_years=tenor_years,
+            event_name=event_name,
+            ytm_date=ytm_date,
+            real_price=real_price,
+            coupon_type=coupon_type,
+            lesenka=lesenka,
+            perpetual=perpetual,
+            subordinated=subordinated,
+            formula_source="corpbonds" if formula_value else "",
+            offer_source="corpbonds" if offer_date_raw and ytm_date else "",
+        )
 
     @staticmethod
     def parse_corpbonds_payload(html: str) -> DohodBondPayload:
@@ -362,6 +390,12 @@ class DohodEnricher:
         real_price = _parse_corpbonds_price(values.get("Цена последняя", ""))
         coupon_type = values.get("Тип купона", "")
         lesenka = values.get("Купон лесенкой", "")
+        perpetual = _normalize_yes_no(values.get("Вечные", ""))
+        subordinated = _normalize_yes_no(values.get("Субординированные", ""))
+        if not perpetual or not subordinated:
+            blob_perpetual, blob_subordinated = _extract_type_flags_from_html_blob(html)
+            perpetual = perpetual or blob_perpetual
+            subordinated = subordinated or blob_subordinated
         formula_value = values.get("Формула купона", "")
         index_name, spread = _parse_index_and_spread(formula_value)
         tenor_years = _parse_tenor_years(formula_value) if index_name == "Z_CURVE_RUS" else None
@@ -371,7 +405,20 @@ class DohodEnricher:
         if offer_date_raw and offer_date_raw.strip().lower() not in {"нет", "нет данных", "no", "n/a"}:
             ytm_date = _to_iso_date(offer_date_raw)
             event_name = "оферта"
-        return DohodBondPayload(index_name=index_name, index_spread=spread, index_tenor_years=tenor_years, event_name=event_name, ytm_date=ytm_date, real_price=real_price, coupon_type=coupon_type, lesenka=lesenka, formula_source="corpbonds" if formula_value else "", offer_source="corpbonds" if ytm_date else "")
+        return DohodBondPayload(
+            index_name=index_name,
+            index_spread=spread,
+            index_tenor_years=tenor_years,
+            event_name=event_name,
+            ytm_date=ytm_date,
+            real_price=real_price,
+            coupon_type=coupon_type,
+            lesenka=lesenka,
+            perpetual=perpetual,
+            subordinated=subordinated,
+            formula_source="corpbonds" if formula_value else "",
+            offer_source="corpbonds" if ytm_date else "",
+        )
 
     def _resolve_index_values(self, checkpoint: dict[str, Any]) -> dict[str, float]:
         live_values = self._fetch_live_index_values()
@@ -524,9 +571,11 @@ class DohodEnricher:
         event_name = str(payload.get("event_name") or "").strip()
         coupon_type = str(payload.get("coupon_type") or "").strip()
         lesenka = str(payload.get("lesenka") or "").strip()
+        perpetual = str(payload.get("perpetual") or "").strip()
+        subordinated = str(payload.get("subordinated") or "").strip()
         if isinstance(real_price, (int, float)) and float(real_price) > 0:
             return True
-        return bool(index_name or ytm_date or event_name or coupon_type or lesenka)
+        return bool(index_name or ytm_date or event_name or coupon_type or lesenka or perpetual or subordinated)
 
     @staticmethod
     def _parse_iso_datetime(raw: Any) -> datetime | None:
@@ -558,6 +607,8 @@ class DohodEnricher:
         ytm_date = str(payload.get("ytm_date") or "")
         coupon_type = str(payload.get("coupon_type") or "").strip()
         lesenka = str(payload.get("lesenka") or "").strip()
+        perpetual = _normalize_yes_no(str(payload.get("perpetual") or ""))
+        subordinated = _normalize_yes_no(str(payload.get("subordinated") or ""))
         formula_source = str(payload.get("formula_source") or "").strip()
         offer_source = str(payload.get("offer_source") or "").strip()
 
@@ -581,6 +632,12 @@ class DohodEnricher:
                 if not str(bond.get("Lesenka") or "").strip():
                     self.last_stats.corpbonds_lesenka_added += 1
                 bond["Lesenka"] = lesenka
+
+            if perpetual:
+                bond["Вечные"] = perpetual
+
+            if subordinated:
+                bond["Субординированные"] = subordinated
 
             coupon_raw = str(bond.get("COUPONPERCENT") or "").strip()
             base_rate = float(index_values.get(index_name, 0.0))
@@ -768,7 +825,30 @@ def _extract_label_map_loose(html: str) -> dict[str, str]:
 
 
 def _normalize_label(raw: str) -> str:
-    normalized = raw.strip().lower().replace("ё", "е")
+    normalized = raw.strip().translate(
+        str.maketrans(
+            {
+                "A": "А",
+                "a": "а",
+                "B": "В",
+                "E": "Е",
+                "e": "е",
+                "K": "К",
+                "M": "М",
+                "H": "Н",
+                "O": "О",
+                "o": "о",
+                "P": "Р",
+                "C": "С",
+                "c": "с",
+                "T": "Т",
+                "X": "Х",
+                "x": "х",
+                "Y": "У",
+                "y": "у",
+            }
+        )
+    ).lower().replace("ё", "е")
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized
 
@@ -860,6 +940,17 @@ def _extract_corpbonds_values(html: str) -> dict[str, str]:
         if not label or label in values:
             continue
         values[label] = value
+
+    if values.get("Вечные") and values.get("Субординированные"):
+        return values
+
+    for raw_label, raw_value in DL_PAIR_RE.findall(html):
+        label = _canonicalize_corpbonds_label(_strip_html(raw_label))
+        value = _strip_html(raw_value)
+        if not label or label in values:
+            continue
+        values[label] = value
+
     return values
 
 
@@ -878,12 +969,69 @@ def _canonicalize_corpbonds_label(raw_label: str) -> str:
         return "Купон лесенкой"
     if "формула купона" in label:
         return "Формула купона"
+    if "вечн" in label:
+        return "Вечные"
+    if "субординир" in label:
+        return "Субординированные"
     if "дата ближайшей оферты" in label or "дата оферты" in label or "ближайшая оферта" in label:
         return "Дата ближайшей оферты"
     if "ближайшая дата" in label:
         return "Ближайшая дата"
     return raw_label.strip()
 
+
+
+
+def _extract_type_flags_from_html_blob(html: str) -> tuple[str, str]:
+    source = unescape(str(html or ""))
+
+    def _extract_by_key_aliases(aliases: tuple[str, ...]) -> str:
+        for alias in aliases:
+            pattern = re.compile(
+                rf"[\"']?{alias}[\"']?\s*[:=]\s*[\"']?(да|нет|yes|no|true|false|1|0)[\"']?",
+                re.IGNORECASE,
+            )
+            match = pattern.search(source)
+            if match:
+                normalized = _normalize_yes_no(match.group(1))
+                if normalized:
+                    return normalized
+        return ""
+
+    def _extract_by_label_context(label_patterns: tuple[str, ...]) -> str:
+        value_re = re.compile(r'(да|нет|yes|no|true|false|1|0)', re.IGNORECASE)
+        for label_pattern in label_patterns:
+            for label_match in re.finditer(label_pattern, source, re.IGNORECASE):
+                tail = source[label_match.end() : label_match.end() + 140]
+                value_match = value_re.search(tail)
+                if not value_match:
+                    continue
+                normalized = _normalize_yes_no(value_match.group(1))
+                if normalized:
+                    return normalized
+        return ""
+
+    perpetual = _extract_by_key_aliases((
+        'isPerpetual',
+        'perpetual',
+        'isEternal',
+        'eternal',
+        'is_perpetual',
+        'is_eternal',
+    ))
+    if not perpetual:
+        perpetual = _extract_by_label_context((r'вечн[а-яa-z]*', r'perpetual', r'eternal'))
+
+    subordinated = _extract_by_key_aliases((
+        'isSubordinated',
+        'subordinated',
+        'isSubordinate',
+        'is_subordinated',
+    ))
+    if not subordinated:
+        subordinated = _extract_by_label_context((r'[cс]убординир[а-яa-z]*', r'subordinated'))
+
+    return perpetual, subordinated
 
 def _parse_corpbonds_price(raw: str) -> float | None:
     value = str(raw or '').strip().lower()
@@ -1164,6 +1312,8 @@ def _is_payload_empty(payload: DohodBondPayload) -> bool:
         and not payload.ytm_date
         and not payload.coupon_type
         and not payload.lesenka
+        and not payload.perpetual
+        and not payload.subordinated
     )
 
 
@@ -1174,6 +1324,44 @@ def _as_float_or_none(value: Any) -> float | None:
         return float(str(value).replace(",", ".").strip())
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_yes_no(raw: str) -> str:
+    raw_value = str(raw or "").strip().lower()
+    if not raw_value:
+        return ""
+
+    yes_tokens = ("да", "yes", "y", "true", "1", "+")
+    no_tokens = ("нет", "no", "n", "false", "0", "-")
+
+    # Сначала проверяем исходное значение (без трансформации латиницы в кириллицу),
+    # иначе англоязычные токены вроде "false" могут исказиться.
+    if raw_value in yes_tokens:
+        return "да"
+    if raw_value in no_tokens:
+        return "нет"
+
+    value = _normalize_label(raw_value)
+    if value in yes_tokens:
+        return "да"
+    if value in no_tokens:
+        return "нет"
+
+    # Нестандартная верстка может возвращать варианты вроде "Да/Нет" или "Да Нет".
+    # Выбираем первый явно встреченный токен.
+    compact = re.sub(r"[^\wа-я]+", " ", value, flags=re.IGNORECASE)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    if not compact:
+        return ""
+
+    yes_pos = min((compact.find(token) for token in yes_tokens if token and token in compact), default=-1)
+    no_pos = min((compact.find(token) for token in no_tokens if token and token in compact), default=-1)
+
+    if yes_pos >= 0 and (no_pos < 0 or yes_pos < no_pos):
+        return "да"
+    if no_pos >= 0 and (yes_pos < 0 or no_pos < yes_pos):
+        return "нет"
+    return ""
 
 
 def _should_enrich_coupon(
