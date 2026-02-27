@@ -20,7 +20,7 @@ from .raw_store import RawStore
 
 DohodProgressCallback = Callable[[dict[str, Any]], None]
 DohodCheckpointSaver = Callable[[dict[str, Any]], None]
-DOHOD_CHECKPOINT_VERSION = 6
+DOHOD_CHECKPOINT_VERSION = 7
 
 LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -817,7 +817,30 @@ def _extract_label_map_loose(html: str) -> dict[str, str]:
 
 
 def _normalize_label(raw: str) -> str:
-    normalized = raw.strip().lower().replace("ё", "е")
+    normalized = raw.strip().translate(
+        str.maketrans(
+            {
+                "A": "А",
+                "a": "а",
+                "B": "В",
+                "E": "Е",
+                "e": "е",
+                "K": "К",
+                "M": "М",
+                "H": "Н",
+                "O": "О",
+                "o": "о",
+                "P": "Р",
+                "C": "С",
+                "c": "с",
+                "T": "Т",
+                "X": "Х",
+                "x": "х",
+                "Y": "У",
+                "y": "у",
+            }
+        )
+    ).lower().replace("ё", "е")
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized
 
@@ -909,6 +932,17 @@ def _extract_corpbonds_values(html: str) -> dict[str, str]:
         if not label or label in values:
             continue
         values[label] = value
+
+    if values.get("Вечные") and values.get("Субординированные"):
+        return values
+
+    for raw_label, raw_value in DL_PAIR_RE.findall(html):
+        label = _canonicalize_corpbonds_label(_strip_html(raw_label))
+        value = _strip_html(raw_value)
+        if not label or label in values:
+            continue
+        values[label] = value
+
     return values
 
 

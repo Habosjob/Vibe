@@ -909,6 +909,20 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags() -> None:
     assert payload.subordinated == "нет"
 
 
+def test_parse_corpbonds_payload_extracts_bond_type_flags_from_dl_and_mixed_letters() -> None:
+    html = """
+    <dl>
+      <dt>Вечные</dt><dd>Да</dd>
+      <dt>Cубординированные</dt><dd>Нет</dd>
+    </dl>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.perpetual == "да"
+    assert payload.subordinated == "нет"
+
+
 def test_parse_corpbonds_payload_extracts_price_coupon_and_offer() -> None:
     html = """
     <table><tbody>
