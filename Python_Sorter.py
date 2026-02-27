@@ -13,6 +13,8 @@ from typing import Any
 import pandas as pd
 import yaml
 
+from Moex_Bonds import auto_convert_types, save_to_excel
+
 DEFAULT_CONFIG_PATH = Path("config/moex_bonds.yaml")
 
 
@@ -31,6 +33,8 @@ class ConsoleProgress:
     def __init__(self, total_steps: int) -> None:
         self.total_steps = total_steps
         self.width = 28
+        self.spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self.spin_idx = 0
 
     def update(self, step: int, message: str) -> None:
         ratio = max(0.0, min(1.0, step / self.total_steps))
@@ -44,6 +48,15 @@ class ConsoleProgress:
         )
         if step == self.total_steps:
             print()
+
+    def pulse(self, message: str) -> None:
+        spin = self.spinner[self.spin_idx % len(self.spinner)]
+        self.spin_idx += 1
+        print(f"\r{Ansi.CYAN}{spin}{Ansi.RESET} {message:90}", end="", flush=True)
+
+    @staticmethod
+    def done_line() -> None:
+        print()
 
 
 @dataclass
@@ -65,6 +78,9 @@ class SorterConfig:
     dropped_encoding: str
     log_path: Path
     filters: list[FilterRule]
+    width_sample_rows: int
+    heatmap_columns: list[str]
+    text_columns: list[str]
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,6 +132,9 @@ def load_config(path: Path) -> SorterConfig:
         dropped_encoding=str(_deep_get(loaded, "sorter", "output", "dropped_encoding", default="utf-8-sig")),
         log_path=Path(str(_deep_get(loaded, "sorter", "logging", "path", default="logs/Python_Sorter.log"))),
         filters=filters,
+        width_sample_rows=int(_deep_get(loaded, "performance", "width_sample_rows", default=350)),
+        heatmap_columns=list(_deep_get(loaded, "output", "heatmap_columns", default=["YIELD", "EFFECTIVEYIELD", "COUPON"])),
+        text_columns=list(_deep_get(loaded, "output", "text_columns", default=["INN"])),
     )
 
 
@@ -228,12 +247,30 @@ def apply_filters(df: pd.DataFrame, rules: list[FilterRule], logger: logging.Log
     return working_df, excluded_df
 
 
-def save_outputs(kept_df: pd.DataFrame, excluded_df: pd.DataFrame, config: SorterConfig, logger: logging.Logger) -> None:
+def save_outputs(
+    kept_df: pd.DataFrame,
+    excluded_df: pd.DataFrame,
+    config: SorterConfig,
+    logger: logging.Logger,
+    progress: ConsoleProgress,
+) -> None:
     config.output_excel_path.parent.mkdir(parents=True, exist_ok=True)
     config.dropped_path.parent.mkdir(parents=True, exist_ok=True)
 
-    kept_df.to_excel(config.output_excel_path, index=False, sheet_name=config.output_sheet_name)
-    logger.info("Сохранен итоговый Excel: %s (строк: %s)", config.output_excel_path, len(kept_df))
+    progress.pulse("Подготовка типов данных для сохранения форматирования")
+    prepared_kept = auto_convert_types(kept_df, logger, config.text_columns)
+
+    progress.pulse("Сохранение Moex_Bonds.xlsx с форматированием")
+    save_to_excel(
+        prepared_kept,
+        config.output_excel_path,
+        config.output_sheet_name,
+        logger,
+        progress,
+        config.width_sample_rows,
+        config.heatmap_columns,
+    )
+    logger.info("Сохранен итоговый Excel с форматированием: %s (строк: %s)", config.output_excel_path, len(prepared_kept))
 
     dropped_columns = ["ISIN", "SECID", "Причина", "Фильтр"]
     prepared_dropped = excluded_df.copy()
@@ -286,7 +323,7 @@ def main() -> int:
             merged_dropped = merged_dropped.drop(columns=["__key"])
 
         progress.update(3, "Сохранение результатов")
-        save_outputs(kept_df, merged_dropped, config, logger)
+        save_outputs(kept_df, merged_dropped, config, logger, progress)
 
         elapsed = time.perf_counter() - run_start
         progress.update(4, f"Готово: kept={len(kept_df)}, dropped={len(merged_dropped)} за {elapsed:0.1f}с")
