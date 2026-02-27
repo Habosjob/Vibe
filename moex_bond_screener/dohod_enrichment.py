@@ -20,7 +20,7 @@ from .raw_store import RawStore
 
 DohodProgressCallback = Callable[[dict[str, Any]], None]
 DohodCheckpointSaver = Callable[[dict[str, Any]], None]
-DOHOD_CHECKPOINT_VERSION = 8
+DOHOD_CHECKPOINT_VERSION = 9
 
 LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -94,7 +94,7 @@ class DohodEnricher:
         self.raw_store = raw_store
         self.session = requests.Session()
         self._request_lock = threading.Lock()
-        self._next_request_ts = 0.0
+        self._next_request_ts_by_host: dict[str, float] = {}
         self._thread_local = threading.local()
         self._missing_base_warning_counts: dict[tuple[str, float], int] = {}
         self.last_stats = DohodEnrichmentStats()
@@ -281,7 +281,7 @@ class DohodEnricher:
             response = self._get_with_rate_limit(
                 f"https://corpbonds.ru/bond/{secid}",
                 timeout=self.config.timeout_seconds,
-                delay_seconds=float(getattr(self.config, "dohod_request_delay_seconds", 0.05)),
+                delay_seconds=float(getattr(self.config, "corpbonds_request_delay_seconds", 0.0)),
             )
             response.raise_for_status()
             html = response.text
@@ -565,6 +565,7 @@ class DohodEnricher:
     def _is_cached_payload_usable(payload: Any) -> bool:
         if not isinstance(payload, dict):
             return False
+        ask_price = payload.get("ask_price")
         real_price = payload.get("real_price")
         index_name = str(payload.get("index_name") or "").strip()
         ytm_date = str(payload.get("ytm_date") or "").strip()
@@ -573,6 +574,8 @@ class DohodEnricher:
         lesenka = str(payload.get("lesenka") or "").strip()
         perpetual = str(payload.get("perpetual") or "").strip()
         subordinated = str(payload.get("subordinated") or "").strip()
+        if isinstance(ask_price, (int, float)) and float(ask_price) > 0:
+            return True
         if isinstance(real_price, (int, float)) and float(real_price) > 0:
             return True
         return bool(index_name or ytm_date or event_name or coupon_type or lesenka or perpetual or subordinated)
@@ -689,12 +692,15 @@ class DohodEnricher:
     def _get_with_rate_limit(self, url: str, timeout: int, delay_seconds: float) -> requests.Response:
         sleep_for = 0.0
         delay = max(0.0, delay_seconds)
+        host_match = re.match(r"^https?://([^/]+)", url.strip(), re.IGNORECASE)
+        host_key = (host_match.group(1).lower() if host_match else "")
         if delay > 0:
             with self._request_lock:
                 now = time.monotonic()
-                sleep_for = max(0.0, self._next_request_ts - now)
-                reserve_from = max(now, self._next_request_ts)
-                self._next_request_ts = reserve_from + delay
+                next_ts = float(self._next_request_ts_by_host.get(host_key, 0.0))
+                sleep_for = max(0.0, next_ts - now)
+                reserve_from = max(now, next_ts)
+                self._next_request_ts_by_host[host_key] = reserve_from + delay
         if sleep_for > 0:
             time.sleep(sleep_for)
         session = self._get_thread_session()
@@ -985,33 +991,34 @@ def _canonicalize_corpbonds_label(raw_label: str) -> str:
 def _extract_type_flags_from_html_blob(html: str) -> tuple[str, str]:
     source = unescape(str(html or ""))
 
-    def _extract_by_key_aliases(aliases: tuple[str, ...]) -> str:
+    def _extract_by_key_aliases(payload: str, aliases: tuple[str, ...]) -> str:
         for alias in aliases:
+            escaped_alias = re.escape(alias)
             pattern = re.compile(
-                rf"[\"']?{alias}[\"']?\s*[:=]\s*[\"']?(да|нет|yes|no|true|false|1|0)[\"']?",
+                rf"(?<![A-Za-z0-9_])[\"']{escaped_alias}[\"']\s*[:=]\s*[\"']?(да|нет|yes|no|true|false|1|0)[\"']?",
                 re.IGNORECASE,
             )
-            match = pattern.search(source)
+            match = pattern.search(payload)
             if match:
                 normalized = _normalize_yes_no(match.group(1))
                 if normalized:
                     return normalized
         return ""
 
-    def _extract_by_label_context(label_patterns: tuple[str, ...]) -> str:
-        value_re = re.compile(r'(да|нет|yes|no|true|false|1|0)', re.IGNORECASE)
-        for label_pattern in label_patterns:
-            for label_match in re.finditer(label_pattern, source, re.IGNORECASE):
-                tail = source[label_match.end() : label_match.end() + 140]
-                value_match = value_re.search(tail)
-                if not value_match:
-                    continue
-                normalized = _normalize_yes_no(value_match.group(1))
-                if normalized:
-                    return normalized
-        return ""
+    bond_blob_match = re.search(r"__BOND__\s*=\s*(\{.*?\})\s*;", source, re.IGNORECASE | re.DOTALL)
+    bond_blob = bond_blob_match.group(1) if bond_blob_match else ""
 
-    perpetual = _extract_by_key_aliases((
+    if not bond_blob:
+        script_json_matches = re.findall(r"<script[^>]*application/json[^>]*>(.*?)</script>", source, re.IGNORECASE | re.DOTALL)
+        for script_payload in script_json_matches:
+            if re.search(r'\"(?:subordinated|perpetual|isSubordinated|isPerpetual)\"', script_payload, re.IGNORECASE):
+                bond_blob = script_payload
+                break
+
+    if not bond_blob:
+        return "", ""
+
+    perpetual = _extract_by_key_aliases(bond_blob, (
         'isPerpetual',
         'perpetual',
         'isEternal',
@@ -1019,18 +1026,11 @@ def _extract_type_flags_from_html_blob(html: str) -> tuple[str, str]:
         'is_perpetual',
         'is_eternal',
     ))
-    if not perpetual:
-        perpetual = _extract_by_label_context((r'вечн[а-яa-z]*', r'perpetual', r'eternal'))
-
-    subordinated = _extract_by_key_aliases((
+    subordinated = _extract_by_key_aliases(bond_blob, (
         'isSubordinated',
         'subordinated',
-        'isSubordinate',
         'is_subordinated',
     ))
-    if not subordinated:
-        subordinated = _extract_by_label_context((r'[cс]убординир[а-яa-z]*', r'subordinated'))
-
     return perpetual, subordinated
 
 def _parse_corpbonds_price(raw: str) -> float | None:

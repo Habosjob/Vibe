@@ -30,6 +30,7 @@ class AppConfig:
     amortization_workers: int = 8
     dohod_workers: int = 12
     dohod_request_delay_seconds: float = 0.03
+    corpbonds_request_delay_seconds: float = 0.0
     dohod_checkpoint_save_every: int = 25
     cbr_key_rate_url: str = "https://www.cbr.ru/hd_base/KeyRate/"
     cbr_ruonia_url: str = "https://www.cbr.ru/hd_base/ruonia/"
