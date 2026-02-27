@@ -895,7 +895,7 @@ def test_parse_corpbonds_payload_handles_tooltip_labels_for_price_and_offerdate(
     assert payload.ytm_date == "2039-10-24"
 
 
-def test_parse_corpbonds_payload_extracts_bond_type_flags() -> None:
+def test_parse_bond_payload_extracts_bond_type_flags() -> None:
     html = """
     <table><tbody>
       <tr><td><p>Вечные</p></td><td><p class="val">Да</p></td></tr>
@@ -903,13 +903,13 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags() -> None:
     </tbody></table>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.perpetual == "да"
     assert payload.subordinated == "нет"
 
 
-def test_parse_corpbonds_payload_extracts_bond_type_flags_from_dl_and_mixed_letters() -> None:
+def test_parse_bond_payload_extracts_bond_type_flags_from_dl_and_mixed_letters() -> None:
     html = """
     <dl>
       <dt>Вечные</dt><dd>Да</dd>
@@ -917,7 +917,7 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags_from_dl_and_mixed_lett
     </dl>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.perpetual == "да"
     assert payload.subordinated == "нет"
@@ -925,7 +925,7 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags_from_dl_and_mixed_lett
 
 
 
-def test_parse_corpbonds_payload_extracts_bond_type_flags_from_yes_no_compound_value() -> None:
+def test_parse_bond_payload_extracts_bond_type_flags_from_yes_no_compound_value() -> None:
     html = """
     <table><tbody>
       <tr><td><p>Вечные</p></td><td><p class="val">Да/Нет</p></td></tr>
@@ -933,7 +933,7 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags_from_yes_no_compound_v
     </tbody></table>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.perpetual == "да"
     assert payload.subordinated == "нет"
@@ -955,7 +955,7 @@ def test_parse_bond_payload_extracts_type_flags_from_json_like_blob_with_1_0() -
     assert payload.subordinated == "нет"
 
 
-def test_parse_corpbonds_payload_extracts_type_flags_from_json_like_blob_with_bool() -> None:
+def test_parse_bond_payload_extracts_type_flags_from_json_like_blob_with_bool() -> None:
     html = """
     <html><body>
       <script>
@@ -964,14 +964,14 @@ def test_parse_corpbonds_payload_extracts_type_flags_from_json_like_blob_with_bo
     </body></html>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.perpetual == "нет"
     assert payload.subordinated == "да"
 
 
 
-def test_parse_corpbonds_payload_ignores_generic_subordinated_filter_flags() -> None:
+def test_parse_bond_payload_ignores_generic_subordinated_filter_flags() -> None:
     html = """
     <html><body>
       <script>
@@ -983,13 +983,13 @@ def test_parse_corpbonds_payload_ignores_generic_subordinated_filter_flags() -> 
     </body></html>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.subordinated == "нет"
 
 
 
-def test_parse_corpbonds_payload_ignores_generic_is_subordinated_flags_outside_bond_blob() -> None:
+def test_parse_bond_payload_ignores_generic_is_subordinated_flags_outside_bond_blob() -> None:
     html = """
     <html><body>
       <script>
@@ -1001,7 +1001,7 @@ def test_parse_corpbonds_payload_ignores_generic_is_subordinated_flags_outside_b
     </body></html>
     """
 
-    payload = DohodEnricher.parse_corpbonds_payload(html)
+    payload = DohodEnricher.parse_bond_payload(html)
 
     assert payload.subordinated == "нет"
 
@@ -1065,7 +1065,7 @@ def test_enrich_uses_corpbonds_realprice_instead_of_dohod_ask() -> None:
 
 
 
-def test_parse_corpbonds_payload_extracts_bond_type_flags_from_english_aliases() -> None:
+def test_parse_corpbonds_payload_does_not_extract_bond_type_flags_from_english_aliases() -> None:
     html = """
     <table><tbody>
       <tr><td><p>Perpetual bonds</p></td><td><p class="val">Yes</p></td></tr>
@@ -1075,8 +1075,8 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags_from_english_aliases()
 
     payload = DohodEnricher.parse_corpbonds_payload(html)
 
-    assert payload.perpetual == "да"
-    assert payload.subordinated == "нет"
+    assert payload.perpetual == ""
+    assert payload.subordinated == ""
 
 
 def test_fetch_and_parse_skips_corpbonds_when_not_needed() -> None:

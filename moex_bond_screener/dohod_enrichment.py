@@ -20,7 +20,7 @@ from .raw_store import RawStore
 
 DohodProgressCallback = Callable[[dict[str, Any]], None]
 DohodCheckpointSaver = Callable[[dict[str, Any]], None]
-DOHOD_CHECKPOINT_VERSION = 11
+DOHOD_CHECKPOINT_VERSION = 12
 
 LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -134,7 +134,7 @@ class DohodEnricher:
             identifier_to_bonds.setdefault(primary_identifier, []).append(bond)
             if primary_identifier not in requires_corpbonds_by_identifier:
                 requires_corpbonds_by_identifier[primary_identifier] = False
-            if self._needs_corpbonds_enrichment(bond):
+            if self._needs_corpbonds_enrichment(payload=DohodBondPayload(), bond=bond):
                 requires_corpbonds_by_identifier[primary_identifier] = True
 
         self._corpbonds_secid_by_isin = dict(secid_by_identifier)
@@ -258,7 +258,7 @@ class DohodEnricher:
                     self.raw_store.dump_html(f"dohod_empty_{isin}.html", html)
                 secid = self._corpbonds_secid_by_isin.get(isin, "")
                 corpbonds_payload = DohodBondPayload()
-                if needs_corpbonds and secid:
+                if needs_corpbonds and secid and self._needs_corpbonds_enrichment(payload=payload, bond=None):
                     corpbonds_payload = self._fetch_and_parse_corpbonds(secid)
                 if corpbonds_payload.real_price is not None:
                     payload.real_price = corpbonds_payload.real_price
@@ -266,10 +266,6 @@ class DohodEnricher:
                     payload.coupon_type = corpbonds_payload.coupon_type
                 if corpbonds_payload.lesenka:
                     payload.lesenka = corpbonds_payload.lesenka
-                if corpbonds_payload.perpetual:
-                    payload.perpetual = corpbonds_payload.perpetual
-                if corpbonds_payload.subordinated:
-                    payload.subordinated = corpbonds_payload.subordinated
                 if corpbonds_payload.index_name:
                     payload.index_name = corpbonds_payload.index_name
                     payload.index_spread = corpbonds_payload.index_spread
@@ -329,15 +325,13 @@ class DohodEnricher:
         return payload, errors
 
     @staticmethod
-    def _needs_corpbonds_enrichment(bond: dict[str, Any]) -> bool:
-        has_real_price = _as_float_or_none(bond.get("RealPrice")) is not None
-        has_coupon_type = bool(str(bond.get("CouponType") or "").strip())
-        has_lesenka = bool(str(bond.get("Lesenka") or "").strip())
-        has_perpetual = bool(_normalize_yes_no(str(bond.get("Вечные") or "")))
-        has_subordinated = bool(_normalize_yes_no(str(bond.get("Субординированные") or "")))
-        has_offer_date = bool(str(bond.get("OFFERDATE") or "").strip())
+    def _needs_corpbonds_enrichment(payload: DohodBondPayload, bond: dict[str, Any] | None) -> bool:
+        bond_data = bond or {}
+        has_real_price = (_as_float_or_none(bond_data.get("RealPrice")) is not None) or payload.real_price is not None
+        has_coupon_type = bool(str(bond_data.get("CouponType") or "").strip()) or bool(payload.coupon_type)
+        has_lesenka = bool(str(bond_data.get("Lesenka") or "").strip()) or bool(payload.lesenka)
 
-        return not (has_real_price and has_coupon_type and has_lesenka and has_perpetual and has_subordinated and has_offer_date)
+        return not (has_real_price and has_coupon_type and has_lesenka)
 
     @staticmethod
     def _resolve_bond_identifier(bond: dict[str, Any]) -> str:
@@ -427,12 +421,6 @@ class DohodEnricher:
         real_price = _parse_corpbonds_price(values.get("Цена последняя", ""))
         coupon_type = values.get("Тип купона", "")
         lesenka = values.get("Купон лесенкой", "")
-        perpetual = _normalize_yes_no(values.get("Вечные", ""))
-        subordinated = _normalize_yes_no(values.get("Субординированные", ""))
-        if not perpetual or not subordinated:
-            blob_perpetual, blob_subordinated = _extract_type_flags_from_html_blob(html)
-            perpetual = perpetual or blob_perpetual
-            subordinated = subordinated or blob_subordinated
         formula_value = values.get("Формула купона", "")
         index_name, spread = _parse_index_and_spread(formula_value)
         tenor_years = _parse_tenor_years(formula_value) if index_name == "Z_CURVE_RUS" else None
@@ -451,8 +439,6 @@ class DohodEnricher:
             real_price=real_price,
             coupon_type=coupon_type,
             lesenka=lesenka,
-            perpetual=perpetual,
-            subordinated=subordinated,
             formula_source="corpbonds" if formula_value else "",
             offer_source="corpbonds" if ytm_date else "",
         )
