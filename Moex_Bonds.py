@@ -7,6 +7,7 @@ import argparse
 import io
 import logging
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -54,6 +55,11 @@ def print_progress(step: int, total: int, message: str) -> None:
     print(f"\r[{bar}] {step:>2}/{total} | {message}", end="", flush=True)
     if step == total:
         print()
+
+
+def print_activity(message: str) -> None:
+    """Промежуточный интерактивный вывод внутри длинного шага."""
+    print(f"\r⏳ {message}", end="", flush=True)
 
 
 def _detect_delimiter(header_line: str) -> str:
@@ -116,6 +122,7 @@ def _set_column_widths(ws) -> None:
 
 def apply_styles(ws, df: pd.DataFrame, logger: logging.Logger) -> None:
     logger.info("Применяю стили к листу Excel")
+    started_at = time.perf_counter()
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
 
@@ -125,9 +132,14 @@ def apply_styles(ws, df: pd.DataFrame, logger: logging.Logger) -> None:
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     # Подсветка чётных строк (минимально затратная для читаемости)
+    total_rows = max(ws.max_row - 1, 1)
     for row_idx in range(2, ws.max_row + 1, 2):
         for cell in ws[row_idx]:
             cell.fill = ALT_ROW_FILL
+        if row_idx % 200 == 0:
+            done_rows = min(row_idx - 1, total_rows)
+            ratio = (done_rows / total_rows) * 100
+            print_activity(f"Шаг 4/5: Стилизация строк {done_rows}/{total_rows} ({ratio:0.1f}%)")
 
     # Форматы только по типам колонок
     for col_idx, column_name in enumerate(df.columns, start=1):
@@ -143,14 +155,20 @@ def apply_styles(ws, df: pd.DataFrame, logger: logging.Logger) -> None:
                 ws.cell(row=row_idx, column=col_idx).number_format = "#,##0.00"
 
     _set_column_widths(ws)
+    elapsed = time.perf_counter() - started_at
+    print_activity(f"Шаг 4/5: Стилизация завершена за {elapsed:0.1f}с")
+    print()
+    logger.info("Стили применены за %.2f сек", elapsed)
 
 
 def save_to_excel(df: pd.DataFrame, output_path: Path, sheet_name: str, logger: logging.Logger) -> None:
     logger.info("Сохраняю Excel: %s", output_path)
+    start = time.perf_counter()
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
         ws = writer.book[sheet_name]
         apply_styles(ws, df, logger)
+    logger.info("Excel сохранён за %.2f сек", time.perf_counter() - start)
 
 
 def parse_args() -> argparse.Namespace:
@@ -159,7 +177,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default="Moex_Bonds.xlsx", help="Путь выходного XLSX")
     parser.add_argument("--sheet", default="MOEX_BONDS", help="Имя листа")
     parser.add_argument("--timeout", type=int, default=60, help="Таймаут HTTP (сек)")
-    parser.add_argument("--log", default="Moex_Bonds.log", help="Путь лог-файла")
+    parser.add_argument("--log", default=f"{Path(__file__).stem}.log", help="Путь лог-файла")
     return parser.parse_args()
 
 
