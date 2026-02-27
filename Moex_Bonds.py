@@ -26,6 +26,45 @@ DEFAULT_URL = (
     "iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru"
 )
 DEFAULT_CONFIG_PATH = Path("config/moex_bonds.yaml")
+DEFAULT_DROP_COLUMNS = [
+    "TYPENAME",
+    "REGNUMBER",
+    "LISTLEVEL",
+    "IS_COLLATERAL",
+    "IS_EXTERNAL",
+    "PRIMARY_BOARDID",
+    "PRIMARY_BOARD_TITLE",
+    "IS_RII",
+    "INCLUDEDBYMOEX",
+    "EVENINGSESSION",
+    "MORNINGSESSION",
+    "WEEKENDSESSION",
+    "SUSPENSION_LISTING",
+    "ZSPREAD",
+    "COUPONDAYSPASSED",
+    "COUPONDAYSREMAIN",
+    "COUPONLENGTH",
+    "INITIALFACEVALUE",
+    "STARTDATEMOEX",
+    "REPLBOND",
+    "DAYSTOREDEMPTION",
+    "LOTSIZE",
+    "RTL1",
+    "RTH1",
+    "RTL2",
+    "RTH2",
+    "RTL3",
+    "RTH3",
+    "DISCOUNT1",
+    "LIMIT1",
+    "DISCOUNT2",
+    "LIMIT2",
+    "DISCOUNT3",
+    "DISCOUNTL0",
+    "DISCOUNTH0",
+    "FULLCOVERED",
+    "FULL_COVERED_LIMIT",
+]
 
 
 class Ansi:
@@ -52,6 +91,7 @@ class AppConfig:
     width_sample_rows: int
     skip_rebuild_if_unchanged: bool
     heatmap_columns: list[str]
+    drop_columns: list[str]
 
 
 class ConsoleProgress:
@@ -128,6 +168,7 @@ def load_config(path: Path) -> AppConfig:
         width_sample_rows=int(_deep_get(loaded, "performance", "width_sample_rows", default=350)),
         skip_rebuild_if_unchanged=bool(_deep_get(loaded, "performance", "skip_rebuild_if_unchanged", default=True)),
         heatmap_columns=list(_deep_get(loaded, "output", "heatmap_columns", default=["YIELD", "EFFECTIVEYIELD", "DURATION", "COUPON"])),
+        drop_columns=list(_deep_get(loaded, "output", "drop_columns", default=DEFAULT_DROP_COLUMNS)),
     )
 
 
@@ -241,6 +282,25 @@ def auto_convert_types(df: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame
 
     logger.info("Автоконвертация типов завершена")
     return converted
+
+
+def drop_unneeded_columns(df: pd.DataFrame, drop_columns: list[str], logger: logging.Logger) -> pd.DataFrame:
+    if not drop_columns:
+        return df
+
+    existing = [column for column in drop_columns if column in df.columns]
+    missing = [column for column in drop_columns if column not in df.columns]
+
+    if existing:
+        logger.info("Удаляю %s служебных столбцов: %s", len(existing), ", ".join(existing))
+        df = df.drop(columns=existing)
+    else:
+        logger.info("Служебные столбцы для удаления не найдены в текущей выгрузке")
+
+    if missing:
+        logger.info("Отсутствовали в выгрузке (пропущены): %s", ", ".join(missing))
+
+    return df
 
 
 def _estimate_col_width(series: pd.Series, header_name: str, sample_rows: int) -> int:
@@ -384,7 +444,8 @@ def main() -> int:
                 print(f"{Ansi.YELLOW}Изменений в данных нет — пересборка Excel пропущена.{Ansi.RESET}")
                 return 0
 
-        progress.update(2, "Очистка пустых колонок")
+        progress.update(2, "Очистка мусорных и пустых колонок")
+        raw_df = drop_unneeded_columns(raw_df, config.drop_columns, logger)
         raw_df = raw_df.dropna(axis=1, how="all")
 
         progress.update(3, "Определение форматов данных")
