@@ -69,7 +69,8 @@ sorter:
     excel_path: "Moex_Bonds.xlsx"
     sheet_name: "MOEX_BONDS"
   output:
-    filtered_excel_path: "Moex_Bonds_Filtered.xlsx"
+    # Итог после сортировки перезаписывает основной файл
+    excel_path: "Moex_Bonds.xlsx"
     sheet_name: "MOEX_BONDS"
     dropped_path: "DropedBonds.csv"
     dropped_encoding: "utf-8-sig"
