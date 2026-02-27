@@ -19,7 +19,7 @@ import yaml
 
 
 DEFAULT_FIELDS = ["SECID", "SHORTNAME", "ISIN", "CURRENCYID", "PREVLEGALCLOSEPRICE", "MATDATE"]
-MANDATORY_EXPORT_FIELDS = ["HASDEFAULT", "RealPrice", "CouponType", "Lesenka"]
+MANDATORY_EXPORT_FIELDS = ["HASDEFAULT", "RealPrice", "CouponType", "Lesenka", "Вечные", "Субординированные"]
 UNWANTED_FIELDS = {
     "BOARDID",
     "LOTSIZE",
