@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
+import json
 import logging
 import sys
 import time
@@ -45,8 +47,11 @@ class AppConfig:
     timeout_sec: int
     log_path: Path
     cache_path: Path
+    state_path: Path
     cache_ttl_sec: int
     width_sample_rows: int
+    skip_rebuild_if_unchanged: bool
+    heatmap_columns: list[str]
 
 
 class ConsoleProgress:
@@ -81,6 +86,13 @@ class ConsoleProgress:
         print()
 
 
+@dataclass
+class DownloadResult:
+    frame: pd.DataFrame
+    source_hash: str
+    from_cache: bool
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Загрузить CSV MOEX и сохранить в Excel с форматированием")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Путь к YAML-конфигу")
@@ -111,8 +123,11 @@ def load_config(path: Path) -> AppConfig:
         timeout_sec=int(_deep_get(loaded, "network", "timeout_sec", default=60)),
         log_path=Path(str(_deep_get(loaded, "logging", "path", default="logs/Moex_Bonds.log"))),
         cache_path=Path(str(_deep_get(loaded, "cache", "csv_path", default="logs/cache/moex_rates.csv"))),
+        state_path=Path(str(_deep_get(loaded, "cache", "state_path", default="logs/cache/moex_rates_state.json"))),
         cache_ttl_sec=int(_deep_get(loaded, "cache", "ttl_sec", default=3600)),
         width_sample_rows=int(_deep_get(loaded, "performance", "width_sample_rows", default=350)),
+        skip_rebuild_if_unchanged=bool(_deep_get(loaded, "performance", "skip_rebuild_if_unchanged", default=True)),
+        heatmap_columns=list(_deep_get(loaded, "output", "heatmap_columns", default=["YIELD", "EFFECTIVEYIELD", "DURATION", "COUPON"])),
     )
 
 
@@ -157,13 +172,34 @@ def _read_csv_text_to_df(table_text: str) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(table_text), sep=delimiter, decimal=",", dtype=str)
 
 
-def download_rates(config: AppConfig, logger: logging.Logger) -> pd.DataFrame:
+def _hash_text(payload: str) -> str:
+    return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _load_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_state(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def download_rates(config: AppConfig, logger: logging.Logger) -> DownloadResult:
     use_cache = config.cache_path.exists() and (time.time() - config.cache_path.stat().st_mtime) <= config.cache_ttl_sec
 
     if use_cache:
         logger.info("Использую кеш CSV: %s", config.cache_path)
-        table_text = _extract_table_text(config.cache_path.read_text(encoding="utf-8"))
+        csv_text = config.cache_path.read_text(encoding="utf-8")
+        table_text = _extract_table_text(csv_text)
         df = _read_csv_text_to_df(table_text)
+        source_hash = _hash_text(table_text)
     else:
         logger.info("Начинаю загрузку CSV: %s", config.url)
         with requests.Session() as session:
@@ -176,10 +212,11 @@ def download_rates(config: AppConfig, logger: logging.Logger) -> pd.DataFrame:
 
         table_text = _extract_table_text(csv_text)
         df = _read_csv_text_to_df(table_text)
+        source_hash = _hash_text(table_text)
 
     df = df.apply(lambda col: col.str.strip() if col.dtype == "object" else col)
     logger.info("CSV обработан. Строк: %s; столбцов: %s", len(df), len(df.columns))
-    return df
+    return DownloadResult(frame=df, source_hash=source_hash, from_cache=use_cache)
 
 
 def auto_convert_types(df: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame:
@@ -222,6 +259,7 @@ def save_to_excel(
     logger: logging.Logger,
     progress: ConsoleProgress,
     sample_rows: int,
+    heatmap_columns: list[str],
 ) -> None:
     logger.info("Сохраняю Excel: %s", output_path)
     start = time.perf_counter()
@@ -256,9 +294,21 @@ def save_to_excel(
         int_fmt = workbook.add_format({"num_format": "#,##0"})
         float_fmt = workbook.add_format({"num_format": "#,##0.00"})
 
-        worksheet.freeze_panes(1, 0)
-        worksheet.autofilter(0, 0, row_count - 1, col_count - 1)
         worksheet.set_row(0, 28, header_fmt)
+        worksheet.freeze_panes(1, 0)
+
+        table_columns = [{"header": column_name} for column_name in df.columns]
+        worksheet.add_table(
+            0,
+            0,
+            row_count - 1,
+            col_count - 1,
+            {
+                "style": "Table Style Medium 13",
+                "columns": table_columns,
+                "autofilter": True,
+            },
+        )
 
         progress.pulse("Шаг 4/5: Применение полосатой заливки")
         worksheet.conditional_format(
@@ -285,6 +335,23 @@ def save_to_excel(
             if (col_idx + 1) % 10 == 0 or (col_idx + 1) == col_count:
                 progress.pulse(f"Шаг 4/5: Форматирование колонок {col_idx + 1}/{col_count}")
 
+        heatmap_targets = [c for c in df.columns if any(key.upper() in c.upper() for key in heatmap_columns)]
+        for col_name in heatmap_targets:
+            col_idx = df.columns.get_loc(col_name)
+            progress.pulse(f"Шаг 4/5: Цветовая шкала {col_name}")
+            worksheet.conditional_format(
+                1,
+                col_idx,
+                row_count - 1,
+                col_idx,
+                {
+                    "type": "3_color_scale",
+                    "min_color": "#F8696B",
+                    "mid_color": "#FFEB84",
+                    "max_color": "#63BE7B",
+                },
+            )
+
     elapsed = time.perf_counter() - start
     progress.done_line()
     logger.info("Excel сохранён за %.2f сек", elapsed)
@@ -305,7 +372,17 @@ def main() -> int:
 
     try:
         progress.update(1, "Загрузка CSV из MOEX/кеша")
-        raw_df = download_rates(config, logger)
+        rates = download_rates(config, logger)
+        raw_df = rates.frame
+
+        if config.skip_rebuild_if_unchanged and config.output.exists():
+            state = _load_state(config.state_path)
+            if state.get("source_hash") == rates.source_hash:
+                total_elapsed = time.perf_counter() - run_start
+                progress.update(5, f"Без изменений: {config.output} | {total_elapsed:0.1f}с")
+                logger.info("Данные не изменились (hash=%s). Пересборка Excel пропущена.", rates.source_hash)
+                print(f"{Ansi.YELLOW}Изменений в данных нет — пересборка Excel пропущена.{Ansi.RESET}")
+                return 0
 
         progress.update(2, "Очистка пустых колонок")
         raw_df = raw_df.dropna(axis=1, how="all")
@@ -314,7 +391,26 @@ def main() -> int:
         final_df = auto_convert_types(raw_df, logger)
 
         progress.update(4, "Экспорт в Excel (xlsxwriter)")
-        save_to_excel(final_df, config.output, config.sheet, logger, progress, config.width_sample_rows)
+        save_to_excel(
+            final_df,
+            config.output,
+            config.sheet,
+            logger,
+            progress,
+            config.width_sample_rows,
+            config.heatmap_columns,
+        )
+
+        _save_state(
+            config.state_path,
+            {
+                "source_hash": rates.source_hash,
+                "rows": len(final_df),
+                "columns": len(final_df.columns),
+                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "from_cache": rates.from_cache,
+            },
+        )
 
         total_elapsed = time.perf_counter() - run_start
         progress.update(5, f"Готово: {config.output} | {total_elapsed:0.1f}с")

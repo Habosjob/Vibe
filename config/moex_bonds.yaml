@@ -7,13 +7,18 @@ network:
 output:
   excel_path: "Moex_Bonds.xlsx"
   sheet_name: "MOEX_BONDS"
+  # По маскам столбцов будет добавлена цветовая шкала в Excel (без учета регистра)
+  heatmap_columns: ["YIELD", "EFFECTIVEYIELD", "DURATION", "COUPON", "SPREAD"]
 
 logging:
   path: "logs/Moex_Bonds.log"
 
 cache:
   csv_path: "logs/cache/moex_rates.csv"
+  state_path: "logs/cache/moex_rates_state.json"
   ttl_sec: 3600
 
 performance:
-  width_sample_rows: 350
+  width_sample_rows: 250
+  # Если исходные данные не изменились, Excel не пересобирается (самый быстрый повторный запуск)
+  skip_rebuild_if_unchanged: true
