@@ -137,7 +137,6 @@ def save_to_excel(df: pd.DataFrame, output_path: Path, sheet_name: str, logger: 
     with pd.ExcelWriter(
         output_path,
         engine="xlsxwriter",
-        engine_kwargs={"options": {"constant_memory": True}},
         datetime_format="dd.mm.yyyy",
     ) as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
