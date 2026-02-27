@@ -34,9 +34,10 @@
 ---
 
 ## `main.py`
-Оркестратор пайплайна без изменений по шагам:
+Оркестратор пайплайна теперь запускает 3 шага:
 1. Запускает `Moex_Bonds.py`.
 2. Затем запускает `Python_Sorter.py`.
+3. После сортера запускает `DOHOD_Bonds.py`.
 
 Запуск:
 ```bash
@@ -56,6 +57,7 @@ python3 main.py --config config/moex_bonds.yaml
 - `logs/Moex_Bonds.log`
 - `logs/Python_Sorter.log`
 - `logs/main.log`
+- `logs/DOHOD_Bonds.log`
 
 Логов достаточно для дебага полного сценария по шагам.
 
@@ -66,8 +68,8 @@ python3 main.py --config config/moex_bonds.yaml
 
 ### Управление колонками в итоговом Excel
 - `Python_Sorter.py` использует те же настройки `output.date_formats`, что и `Moex_Bonds.py`, чтобы стабильно конвертировать `*DATE` колонки перед сохранением Excel.
-- В `output.drop_columns` добавлены `COUPONDATE` и `ISSUEDATE`.
-- `OFFERDATE` и `MATDATE` удалены из списка `output.drop_columns`, поэтому снова остаются в итоговом Excel.
+- В `output.drop_columns` добавлены `COUPONDATE`, `ISSUEDATE`, `MATDATE`, `OFFERDATE`.
+- В итоговом Excel эти поля теперь удаляются как служебные.
 
 ### Раздел `sorter`
 ```yaml
@@ -126,3 +128,13 @@ sorter:
    - сколько бумаг исключено как «ранее отброшенные»;
    - сколько новых бумаг исключено фильтрами;
    - был ли пропуск пересборки из-за отсутствия изменений.
+
+
+### Раздел `dohod`
+Новый шаг пайплайна, который качает Excel с dohod.ru после сортировки.
+
+Ключевая настройка:
+- `dohod.required_for_pipeline: false` (по умолчанию) — если DOHOD-шаг падает, `main.py` не падает, а завершает запуск с предупреждением.
+- `dohod.required_for_pipeline: true` — ошибка DOHOD-шагa завершает пайплайн ошибкой.
+
+Подробно: `docs/DOHOD_Bonds.md`.

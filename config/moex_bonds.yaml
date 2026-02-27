@@ -50,6 +50,8 @@ output:
     - "NAME"
     - "COUPONDATE"
     - "ISSUEDATE"
+    - "MATDATE"
+    - "OFFERDATE"
     - "YIELDATWAP"
   # Цветовая шкала применяется только к точным именам колонок (без масок)
   heatmap_columns: ["YIELD", "EFFECTIVEYIELD", "COUPON", "SPREAD"]
@@ -67,6 +69,23 @@ logging:
 pipeline:
   logging:
     path: "logs/main.log"
+
+dohod:
+  enabled: true
+  # false: ошибка DOHOD_Bonds не роняет весь main.py
+  required_for_pipeline: false
+  source:
+    url: "https://www.dohod.ru/analytic/bonds"
+    download_button_text: "СКАЧАТЬ EXCEL"
+  output:
+    excel_path: "Dohod_Bonds.xlsx"
+  network:
+    timeout_sec: 90
+    download_timeout_sec: 120
+  browser:
+    headless: true
+  logging:
+    path: "logs/DOHOD_Bonds.log"
 
 sorter:
   input:
