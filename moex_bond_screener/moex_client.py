@@ -18,7 +18,7 @@ from .raw_store import RawStore
 ProgressCallback = Callable[[dict[str, Any]], None]
 CheckpointSaver = Callable[[dict[str, Any]], None]
 
-AMORTIZATION_CHECKPOINT_VERSION = 6
+AMORTIZATION_CHECKPOINT_VERSION = 7
 AMORTIZATION_FLAG_FIELDS = ("ISQUALIFIEDINVESTORS", "HASTECHNICALDEFAULT", "HASDEFAULT")
 
 
