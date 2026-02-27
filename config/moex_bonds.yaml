@@ -48,9 +48,9 @@ output:
     - "FULL_COVERED_LIMIT"
     - "DURATION"
     - "NAME"
-    - "OFFERDATE"
+    - "COUPONDATE"
+    - "ISSUEDATE"
     - "YIELDATWAP"
-    - "MATDATE"
   # Цветовая шкала применяется только к точным именам колонок (без масок)
   heatmap_columns: ["YIELD", "EFFECTIVEYIELD", "COUPON", "SPREAD"]
   # Колонки, которые принудительно остаются текстом
@@ -93,6 +93,12 @@ sorter:
       column: "IS_QUALIFIED_INVESTORS"
       equals: "1"
       reason: "IS_QUALIFIED_INVESTORS = 1"
+      ttl_days: 30
+    - name: "exclude_high_risk"
+      enabled: true
+      column: "HIGH_RISK"
+      equals: "1"
+      reason: "HIGH_RISK = 1"
       ttl_days: 30
 
 cache:

@@ -28,6 +28,8 @@
    - бессрочное исключение (`permanent: true`).
 2. `IS_QUALIFIED_INVESTORS = 1`
    - исключение на 30 дней (`ttl_days: 30`).
+3. `HIGH_RISK = 1`
+   - исключение на 30 дней (`ttl_days: 30`).
 
 ---
 
@@ -62,8 +64,9 @@ python3 main.py --config config/moex_bonds.yaml
 ## Настройка через YAML
 Все настройки вынесены в `config/moex_bonds.yaml`.
 
-### Удаление столбца `MATDATE`
-`MATDATE` добавлен в `output.drop_columns`, поэтому больше не попадает в итоговый Excel.
+### Управление колонками в итоговом Excel
+- В `output.drop_columns` добавлены `COUPONDATE` и `ISSUEDATE`.
+- `OFFERDATE` и `MATDATE` удалены из списка `output.drop_columns`, поэтому снова остаются в итоговом Excel.
 
 ### Раздел `sorter`
 ```yaml
@@ -94,6 +97,12 @@ sorter:
       column: "IS_QUALIFIED_INVESTORS"
       equals: "1"
       reason: "IS_QUALIFIED_INVESTORS = 1"
+      ttl_days: 30
+    - name: "exclude_high_risk"
+      enabled: true
+      column: "HIGH_RISK"
+      equals: "1"
+      reason: "HIGH_RISK = 1"
       ttl_days: 30
 ```
 
