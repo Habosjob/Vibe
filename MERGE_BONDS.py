@@ -199,6 +199,16 @@ def _parse_date_series(series: pd.Series, formats: list[str]) -> pd.Series:
     return parsed
 
 
+def _first_non_empty(series: pd.Series) -> str | pd.NA:
+    """Вернуть первое непустое значение по группе дубликатов ISIN."""
+
+    normalized = series.astype("string").str.strip()
+    non_empty = normalized[normalized.notna() & normalized.ne("")]
+    if non_empty.empty:
+        return pd.NA
+    return non_empty.iloc[0]
+
+
 def merge_data(config: MergeConfig, logger: logging.Logger, progress: ConsoleProgress) -> pd.DataFrame:
     if not config.moex_excel_path.exists():
         raise FileNotFoundError(f"Не найден Moex Excel: {config.moex_excel_path}")
@@ -231,7 +241,16 @@ def merge_data(config: MergeConfig, logger: logging.Logger, progress: ConsolePro
     dohod_work = dohod_work[dohod_work["ISIN_KEY"].notna() & dohod_work["ISIN_KEY"].ne("")].copy()
 
     selected_cols = ["ISIN_KEY", *resolved.values()]
-    dohod_selected = dohod_work[selected_cols].drop_duplicates(subset=["ISIN_KEY"], keep="first").copy()
+    dohod_for_merge = dohod_work[selected_cols].copy()
+    duplicated_isin_count = dohod_for_merge["ISIN_KEY"].duplicated(keep=False).sum()
+    if duplicated_isin_count:
+        logger.info(
+            "В Dohod найдены дубликаты ISIN: %s строк будут схлопнуты с выбором первого непустого значения по каждому полю",
+            duplicated_isin_count,
+        )
+
+    agg_map = {col: _first_non_empty for col in resolved.values()}
+    dohod_selected = dohod_for_merge.groupby("ISIN_KEY", as_index=False).agg(agg_map)
     dohod_selected = dohod_selected.rename(columns={src: target for target, src in resolved.items()})
 
     progress.update(4, "Склеиваю данные по ISIN")
@@ -247,6 +266,9 @@ def merge_data(config: MergeConfig, logger: logging.Logger, progress: ConsolePro
 
     matched_count = final_df[next(iter(resolved.keys()))].notna().sum()
     logger.info("Сопоставлено строк по ISIN: %s из %s", matched_count, len(final_df))
+    if matched_count < len(final_df):
+        unmatched = final_df[final_df[next(iter(resolved.keys()))].isna()]["ISIN"].astype("string").head(20).tolist()
+        logger.info("Примеры ISIN без матчей в Dohod (до 20): %s", unmatched)
 
     missing_targets = [target for target in config.dohod_columns if target not in final_df.columns]
     if missing_targets:
