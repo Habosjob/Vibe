@@ -20,7 +20,7 @@ from .raw_store import RawStore
 
 DohodProgressCallback = Callable[[dict[str, Any]], None]
 DohodCheckpointSaver = Callable[[dict[str, Any]], None]
-DOHOD_CHECKPOINT_VERSION = 8
+DOHOD_CHECKPOINT_VERSION = 9
 
 LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -565,6 +565,7 @@ class DohodEnricher:
     def _is_cached_payload_usable(payload: Any) -> bool:
         if not isinstance(payload, dict):
             return False
+        ask_price = payload.get("ask_price")
         real_price = payload.get("real_price")
         index_name = str(payload.get("index_name") or "").strip()
         ytm_date = str(payload.get("ytm_date") or "").strip()
@@ -573,6 +574,8 @@ class DohodEnricher:
         lesenka = str(payload.get("lesenka") or "").strip()
         perpetual = str(payload.get("perpetual") or "").strip()
         subordinated = str(payload.get("subordinated") or "").strip()
+        if isinstance(ask_price, (int, float)) and float(ask_price) > 0:
+            return True
         if isinstance(real_price, (int, float)) and float(real_price) > 0:
             return True
         return bool(index_name or ytm_date or event_name or coupon_type or lesenka or perpetual or subordinated)
@@ -987,8 +990,9 @@ def _extract_type_flags_from_html_blob(html: str) -> tuple[str, str]:
 
     def _extract_by_key_aliases(aliases: tuple[str, ...]) -> str:
         for alias in aliases:
+            escaped_alias = re.escape(alias)
             pattern = re.compile(
-                rf"[\"']?{alias}[\"']?\s*[:=]\s*[\"']?(да|нет|yes|no|true|false|1|0)[\"']?",
+                rf"(?<![A-Za-z0-9_])[\"']?{escaped_alias}[\"']?(?![A-Za-z0-9_])\s*[:=]\s*[\"']?(да|нет|yes|no|true|false|1|0)[\"']?",
                 re.IGNORECASE,
             )
             match = pattern.search(source)
@@ -1024,12 +1028,12 @@ def _extract_type_flags_from_html_blob(html: str) -> tuple[str, str]:
 
     subordinated = _extract_by_key_aliases((
         'isSubordinated',
-        'subordinated',
         'isSubordinate',
+        'subordinated',
         'is_subordinated',
     ))
     if not subordinated:
-        subordinated = _extract_by_label_context((r'[cс]убординир[а-яa-z]*', r'subordinated'))
+        subordinated = _extract_by_label_context((r'[cс]убординир[а-яa-z]*',))
 
     return perpetual, subordinated
 
