@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Общий запуск пайплайна: Moex_Bonds -> Python_Sorter."""
+"""Общий запуск пайплайна: Moex_Bonds -> Python_Sorter -> DOHOD_Bonds."""
 
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def run_step(label: str, command: list[str], logger: logging.Logger) -> None:
 def main() -> int:
     args = parse_args()
     config_path = Path(args.config)
-    progress = ConsoleProgress(total_steps=3)
+    progress = ConsoleProgress(total_steps=4)
 
     if not config_path.exists():
         print(f"{Ansi.RED}Файл конфига не найден: {config_path}{Ansi.RESET}")
@@ -99,14 +99,17 @@ def main() -> int:
     run_started = time.perf_counter()
 
     try:
-        progress.update(1, "Шаг 1/2: запуск Moex_Bonds.py")
+        progress.update(1, "Шаг 1/3: запуск Moex_Bonds.py")
         run_step("Moex_Bonds", [sys.executable, "Moex_Bonds.py", "--config", str(config_path)], logger)
 
-        progress.update(2, "Шаг 2/2: запуск Python_Sorter.py")
+        progress.update(2, "Шаг 2/3: запуск Python_Sorter.py")
         run_step("Python_Sorter", [sys.executable, "Python_Sorter.py", "--config", str(config_path)], logger)
 
+        progress.update(3, "Шаг 3/3: запуск DOHOD_Bonds.py")
+        run_step("DOHOD_Bonds", [sys.executable, "DOHOD_Bonds.py", "--config", str(config_path)], logger)
+
         elapsed = time.perf_counter() - run_started
-        progress.update(3, f"Пайплайн завершен за {elapsed:0.1f}с")
+        progress.update(4, f"Пайплайн завершен за {elapsed:0.1f}с")
         logger.info("Полный пайплайн завершен успешно за %.2f сек", elapsed)
         print(f"{Ansi.GREEN}Пайплайн завершен. Лог: {resolve_pipeline_log(config_path)}{Ansi.RESET}")
         return 0
@@ -118,4 +121,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
