@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Скрипт выгрузки облигаций MOEX в Excel с форматированием и логированием."""
+"""Скрипт выгрузки облигаций MOEX в Excel с быстрым форматированием и логированием."""
 
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
 
 DEFAULT_URL = (
     "https://iss.moex.com/iss/apps/infogrid/emission/rates.csv?"
@@ -23,9 +21,32 @@ DEFAULT_URL = (
     "iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru"
 )
 
-HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
-HEADER_FONT = Font(color="FFFFFF", bold=True)
-ALT_ROW_FILL = PatternFill("solid", fgColor="F2F8FC")
+
+class ConsoleProgress:
+    """Интерактивный прогресс по шагам и подшагам без сторонних зависимостей."""
+
+    def __init__(self, total_steps: int) -> None:
+        self.total_steps = total_steps
+        self.width = 32
+        self.spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self.spin_idx = 0
+
+    def update(self, step: int, message: str) -> None:
+        ratio = max(0.0, min(1.0, step / self.total_steps))
+        filled = int(self.width * ratio)
+        bar = "█" * filled + "-" * (self.width - filled)
+        print(f"\r[{bar}] {step:>2}/{self.total_steps} | {message:60}", end="", flush=True)
+        if step == self.total_steps:
+            print()
+
+    def pulse(self, message: str) -> None:
+        spin = self.spinner[self.spin_idx % len(self.spinner)]
+        self.spin_idx += 1
+        print(f"\r{spin} {message:80}", end="", flush=True)
+
+    @staticmethod
+    def done_line() -> None:
+        print()
 
 
 def build_logger(log_path: Path) -> logging.Logger:
@@ -45,21 +66,6 @@ def build_logger(log_path: Path) -> logging.Logger:
     sh.setFormatter(fmt)
     logger.addHandler(sh)
     return logger
-
-
-def print_progress(step: int, total: int, message: str) -> None:
-    width = 30
-    ratio = max(0.0, min(1.0, step / total))
-    filled = int(width * ratio)
-    bar = "█" * filled + "-" * (width - filled)
-    print(f"\r[{bar}] {step:>2}/{total} | {message}", end="", flush=True)
-    if step == total:
-        print()
-
-
-def print_activity(message: str) -> None:
-    """Промежуточный интерактивный вывод внутри длинного шага."""
-    print(f"\r⏳ {message}", end="", flush=True)
 
 
 def _detect_delimiter(header_line: str) -> str:
@@ -103,72 +109,90 @@ def auto_convert_types(df: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame
             converted[col] = pd.to_datetime(series, format="%d.%m.%Y", errors="coerce")
             continue
 
-        sanitized = series.astype(str).str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
-        if sanitized.str.fullmatch(r"-?\d+(\.\d+)?").mean() > 0.8:
-            converted[col] = pd.to_numeric(sanitized, errors="coerce")
+        if series.dtype != "object":
+            continue
+
+        sanitized = series.str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
+        numeric = pd.to_numeric(sanitized, errors="coerce")
+        if numeric.notna().mean() > 0.8:
+            converted[col] = numeric
 
     logger.info("Автоконвертация типов завершена")
     return converted
 
 
-def _set_column_widths(ws) -> None:
-    for idx, column_cells in enumerate(ws.iter_cols(min_row=1, max_row=ws.max_row), start=1):
-        max_len = 0
-        for cell in column_cells:
-            if cell.value is not None:
-                max_len = max(max_len, len(str(cell.value)))
-        ws.column_dimensions[get_column_letter(idx)].width = min(max(10, max_len + 2), 45)
+def _estimate_col_width(series: pd.Series, header_name: str) -> int:
+    if pd.api.types.is_datetime64_any_dtype(series):
+        max_len = 10
+    else:
+        sample = series.dropna().astype(str).head(2000)
+        max_len = sample.str.len().max() if not sample.empty else 0
+    return int(min(max(10, max(len(header_name), int(max_len)) + 2), 45))
 
 
-def apply_styles(ws, df: pd.DataFrame, logger: logging.Logger) -> None:
-    logger.info("Применяю стили к листу Excel")
-    started_at = time.perf_counter()
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-
-    for cell in ws[1]:
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    # Подсветка чётных строк (минимально затратная для читаемости)
-    total_rows = max(ws.max_row - 1, 1)
-    for row_idx in range(2, ws.max_row + 1, 2):
-        for cell in ws[row_idx]:
-            cell.fill = ALT_ROW_FILL
-        if row_idx % 200 == 0:
-            done_rows = min(row_idx - 1, total_rows)
-            ratio = (done_rows / total_rows) * 100
-            print_activity(f"Шаг 4/5: Стилизация строк {done_rows}/{total_rows} ({ratio:0.1f}%)")
-
-    # Форматы только по типам колонок
-    for col_idx, column_name in enumerate(df.columns, start=1):
-        series = df[column_name]
-        if pd.api.types.is_datetime64_any_dtype(series):
-            for row_idx in range(2, ws.max_row + 1):
-                ws.cell(row=row_idx, column=col_idx).number_format = "DD.MM.YYYY"
-        elif pd.api.types.is_integer_dtype(series):
-            for row_idx in range(2, ws.max_row + 1):
-                ws.cell(row=row_idx, column=col_idx).number_format = "#,##0"
-        elif pd.api.types.is_float_dtype(series):
-            for row_idx in range(2, ws.max_row + 1):
-                ws.cell(row=row_idx, column=col_idx).number_format = "#,##0.00"
-
-    _set_column_widths(ws)
-    elapsed = time.perf_counter() - started_at
-    print_activity(f"Шаг 4/5: Стилизация завершена за {elapsed:0.1f}с")
-    print()
-    logger.info("Стили применены за %.2f сек", elapsed)
-
-
-def save_to_excel(df: pd.DataFrame, output_path: Path, sheet_name: str, logger: logging.Logger) -> None:
+def save_to_excel(df: pd.DataFrame, output_path: Path, sheet_name: str, logger: logging.Logger, progress: ConsoleProgress) -> None:
     logger.info("Сохраняю Excel: %s", output_path)
     start = time.perf_counter()
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+
+    with pd.ExcelWriter(
+        output_path,
+        engine="xlsxwriter",
+        datetime_format="dd.mm.yyyy",
+    ) as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
-        ws = writer.book[sheet_name]
-        apply_styles(ws, df, logger)
-    logger.info("Excel сохранён за %.2f сек", time.perf_counter() - start)
+        workbook = writer.book
+        worksheet = writer.sheets[sheet_name]
+
+        row_count = len(df) + 1
+        col_count = len(df.columns)
+
+        header_fmt = workbook.add_format(
+            {
+                "bold": True,
+                "font_color": "#FFFFFF",
+                "bg_color": "#1F4E78",
+                "align": "center",
+                "valign": "vcenter",
+                "text_wrap": True,
+            }
+        )
+        alt_row_fmt = workbook.add_format({"bg_color": "#F2F8FC"})
+        date_fmt = workbook.add_format({"num_format": "dd.mm.yyyy"})
+        int_fmt = workbook.add_format({"num_format": "#,##0"})
+        float_fmt = workbook.add_format({"num_format": "#,##0.00"})
+
+        worksheet.freeze_panes(1, 0)
+        worksheet.autofilter(0, 0, row_count - 1, col_count - 1)
+        worksheet.set_row(0, 28, header_fmt)
+
+        progress.pulse("Шаг 4/5: Применение полосатой заливки")
+        worksheet.conditional_format(
+            1,
+            0,
+            row_count - 1,
+            col_count - 1,
+            {"type": "formula", "criteria": "=MOD(ROW(),2)=0", "format": alt_row_fmt},
+        )
+
+        for col_idx, column_name in enumerate(df.columns):
+            series = df[column_name]
+            col_fmt = None
+            if pd.api.types.is_datetime64_any_dtype(series):
+                col_fmt = date_fmt
+            elif pd.api.types.is_integer_dtype(series):
+                col_fmt = int_fmt
+            elif pd.api.types.is_float_dtype(series):
+                col_fmt = float_fmt
+
+            width = _estimate_col_width(series, column_name)
+            worksheet.set_column(col_idx, col_idx, width, col_fmt)
+
+            if (col_idx + 1) % 8 == 0 or (col_idx + 1) == col_count:
+                progress.pulse(f"Шаг 4/5: Форматирование колонок {col_idx + 1}/{col_count}")
+
+    elapsed = time.perf_counter() - start
+    progress.done_line()
+    logger.info("Excel сохранён за %.2f сек", elapsed)
 
 
 def parse_args() -> argparse.Namespace:
@@ -184,23 +208,25 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     logger = build_logger(Path(args.log))
-    total = 5
+    progress = ConsoleProgress(total_steps=5)
+    run_start = time.perf_counter()
 
     try:
-        print_progress(1, total, "Загрузка CSV из MOEX")
+        progress.update(1, "Загрузка CSV из MOEX")
         raw_df = download_rates(args.url, args.timeout, logger)
 
-        print_progress(2, total, "Очистка пустых колонок")
+        progress.update(2, "Очистка пустых колонок")
         raw_df = raw_df.dropna(axis=1, how="all")
 
-        print_progress(3, total, "Определение форматов данных")
+        progress.update(3, "Определение форматов данных")
         final_df = auto_convert_types(raw_df, logger)
 
-        print_progress(4, total, "Экспорт в Excel")
-        save_to_excel(final_df, Path(args.output), args.sheet, logger)
+        progress.update(4, "Экспорт в Excel (ускоренный движок xlsxwriter)")
+        save_to_excel(final_df, Path(args.output), args.sheet, logger, progress)
 
-        print_progress(5, total, f"Готово: {args.output}")
-        logger.info("Скрипт завершён успешно")
+        total_elapsed = time.perf_counter() - run_start
+        progress.update(5, f"Готово: {args.output} | {total_elapsed:0.1f}с")
+        logger.info("Скрипт завершён успешно за %.2f сек", total_elapsed)
         return 0
     except Exception as exc:  # noqa: BLE001
         logger.exception("Ошибка выполнения: %s", exc)
