@@ -138,3 +138,10 @@ sorter:
 - `dohod.required_for_pipeline: true` — ошибка DOHOD-шагa завершает пайплайн ошибкой.
 
 Подробно: `docs/DOHOD_Bonds.md`.
+
+
+---
+
+## MERGE_BONDS.py
+Дополнительный скрипт для склейки `Moex_Bonds.xlsx` и `Dohod_Bonds.xlsx` по `ISIN` с сохранением в `BondsFinal.xlsx`.
+Подробная документация и настройки: `docs/MERGE_BONDS.md`.

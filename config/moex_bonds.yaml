@@ -132,3 +132,36 @@ performance:
   width_sample_rows: 250
   # Если исходные данные не изменились, Excel не пересобирается (самый быстрый повторный запуск)
   skip_rebuild_if_unchanged: true
+
+merge_bonds:
+  input:
+    moex_excel_path: "Moex_Bonds.xlsx"
+    moex_sheet_name: "MOEX_BONDS"
+    dohod_excel_path: "Dohod_Bonds.xlsx"
+    # null = первый лист
+    dohod_sheet_name: null
+  output:
+    excel_path: "BondsFinal.xlsx"
+    sheet_name: "BONDS_FINAL"
+  logging:
+    path: "logs/MERGE_BONDS.log"
+  # Для каждой целевой колонки можно перечислить алиасы колонок из Dohod_Bonds
+  dohod_columns:
+    "Дата":
+      - "Ближайшая дата погашения/оферты (Дата)"
+      - "Дата погашения/оферты"
+      - "Дата"
+    "Текущий номинал":
+      - "Текущий номинал"
+    "Тип купона":
+      - "Тип купона"
+    "Субординированная (да/нет)":
+      - "Субординированная (да/нет)"
+      - "Субординированная"
+    "Базовый индекс (для FRN)":
+      - "Базовый индекс (для FRN)"
+      - "Базовый индекс"
+    "Премия/Дисконт к базовому индексу (для FRN)":
+      - "Премия/Дисконт к базовому индексу (для FRN)"
+      - "Премия/Дисконт к базовому индексу"
+
