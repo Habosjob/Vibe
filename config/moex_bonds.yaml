@@ -46,8 +46,16 @@ output:
     - "DISCOUNTH0"
     - "FULLCOVERED"
     - "FULL_COVERED_LIMIT"
-  # По маскам столбцов будет добавлена цветовая шкала в Excel (без учета регистра)
-  heatmap_columns: ["YIELD", "EFFECTIVEYIELD", "DURATION", "COUPON", "SPREAD"]
+    - "DURATION"
+    - "NAME"
+    - "OFFERDATE"
+    - "YIELDATWAP"
+  # Цветовая шкала применяется только к точным именам колонок (без масок)
+  heatmap_columns: ["YIELD", "EFFECTIVEYIELD", "COUPON", "SPREAD"]
+  # Колонки, которые принудительно остаются текстом
+  text_columns: ["INN"]
+  # Колонки, которые переносятся в конец таблицы
+  move_to_end_columns: ["WAPRICE"]
 
 logging:
   path: "logs/Moex_Bonds.log"
