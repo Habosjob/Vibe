@@ -1,0 +1,19 @@
+source:
+  url: "https://iss.moex.com/iss/apps/infogrid/emission/rates.csv?sec_type=stock_ofz_bond,stock_cb_bond,stock_subfederal_bond,stock_municipal_bond,stock_corporate_bond,stock_exchange_bond&iss.dp=comma&iss.df=%25d.%25m.%25Y&iss.tf=%25H:%25M:%25S&iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru"
+
+network:
+  timeout_sec: 60
+
+output:
+  excel_path: "Moex_Bonds.xlsx"
+  sheet_name: "MOEX_BONDS"
+
+logging:
+  path: "logs/Moex_Bonds.log"
+
+cache:
+  csv_path: "logs/cache/moex_rates.csv"
+  ttl_sec: 3600
+
+performance:
+  width_sample_rows: 350
