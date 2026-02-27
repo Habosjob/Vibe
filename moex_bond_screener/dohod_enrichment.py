@@ -351,6 +351,10 @@ class DohodEnricher:
         lesenka = corpbonds_values.get("Купон лесенкой", "")
         perpetual = _normalize_yes_no(corpbonds_values.get("Вечные", ""))
         subordinated = _normalize_yes_no(corpbonds_values.get("Субординированные", ""))
+        if not perpetual or not subordinated:
+            blob_perpetual, blob_subordinated = _extract_type_flags_from_html_blob(html)
+            perpetual = perpetual or blob_perpetual
+            subordinated = subordinated or blob_subordinated
         formula_value = corpbonds_values.get("Формула купона", "")
         if formula_value:
             formula_index_name, formula_spread = _parse_index_and_spread(formula_value)
@@ -388,6 +392,10 @@ class DohodEnricher:
         lesenka = values.get("Купон лесенкой", "")
         perpetual = _normalize_yes_no(values.get("Вечные", ""))
         subordinated = _normalize_yes_no(values.get("Субординированные", ""))
+        if not perpetual or not subordinated:
+            blob_perpetual, blob_subordinated = _extract_type_flags_from_html_blob(html)
+            perpetual = perpetual or blob_perpetual
+            subordinated = subordinated or blob_subordinated
         formula_value = values.get("Формула купона", "")
         index_name, spread = _parse_index_and_spread(formula_value)
         tenor_years = _parse_tenor_years(formula_value) if index_name == "Z_CURVE_RUS" else None
@@ -972,6 +980,59 @@ def _canonicalize_corpbonds_label(raw_label: str) -> str:
     return raw_label.strip()
 
 
+
+
+def _extract_type_flags_from_html_blob(html: str) -> tuple[str, str]:
+    source = unescape(str(html or ""))
+
+    def _extract_by_key_aliases(aliases: tuple[str, ...]) -> str:
+        for alias in aliases:
+            pattern = re.compile(
+                rf"[\"']?{alias}[\"']?\s*[:=]\s*[\"']?(да|нет|yes|no|true|false|1|0)[\"']?",
+                re.IGNORECASE,
+            )
+            match = pattern.search(source)
+            if match:
+                normalized = _normalize_yes_no(match.group(1))
+                if normalized:
+                    return normalized
+        return ""
+
+    def _extract_by_label_context(label_patterns: tuple[str, ...]) -> str:
+        value_re = re.compile(r'(да|нет|yes|no|true|false|1|0)', re.IGNORECASE)
+        for label_pattern in label_patterns:
+            for label_match in re.finditer(label_pattern, source, re.IGNORECASE):
+                tail = source[label_match.end() : label_match.end() + 140]
+                value_match = value_re.search(tail)
+                if not value_match:
+                    continue
+                normalized = _normalize_yes_no(value_match.group(1))
+                if normalized:
+                    return normalized
+        return ""
+
+    perpetual = _extract_by_key_aliases((
+        'isPerpetual',
+        'perpetual',
+        'isEternal',
+        'eternal',
+        'is_perpetual',
+        'is_eternal',
+    ))
+    if not perpetual:
+        perpetual = _extract_by_label_context((r'вечн[а-яa-z]*', r'perpetual', r'eternal'))
+
+    subordinated = _extract_by_key_aliases((
+        'isSubordinated',
+        'subordinated',
+        'isSubordinate',
+        'is_subordinated',
+    ))
+    if not subordinated:
+        subordinated = _extract_by_label_context((r'[cс]убординир[а-яa-z]*', r'subordinated'))
+
+    return perpetual, subordinated
+
 def _parse_corpbonds_price(raw: str) -> float | None:
     value = str(raw or '').strip().lower()
     if not value or value in {'нет данных', 'нет', 'n/a', 'na'}:
@@ -1266,13 +1327,21 @@ def _as_float_or_none(value: Any) -> float | None:
 
 
 def _normalize_yes_no(raw: str) -> str:
-    value = _normalize_label(str(raw or ""))
-    if not value:
+    raw_value = str(raw or "").strip().lower()
+    if not raw_value:
         return ""
 
     yes_tokens = ("да", "yes", "y", "true", "1", "+")
     no_tokens = ("нет", "no", "n", "false", "0", "-")
 
+    # Сначала проверяем исходное значение (без трансформации латиницы в кириллицу),
+    # иначе англоязычные токены вроде "false" могут исказиться.
+    if raw_value in yes_tokens:
+        return "да"
+    if raw_value in no_tokens:
+        return "нет"
+
+    value = _normalize_label(raw_value)
     if value in yes_tokens:
         return "да"
     if value in no_tokens:

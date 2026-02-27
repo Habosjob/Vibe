@@ -938,6 +938,37 @@ def test_parse_corpbonds_payload_extracts_bond_type_flags_from_yes_no_compound_v
     assert payload.perpetual == "да"
     assert payload.subordinated == "нет"
 
+
+
+def test_parse_bond_payload_extracts_type_flags_from_json_like_blob_with_1_0() -> None:
+    html = """
+    <html><body>
+      <script type="application/json">
+        {"isPerpetual": 1, "isSubordinated": 0}
+      </script>
+    </body></html>
+    """
+
+    payload = DohodEnricher.parse_bond_payload(html)
+
+    assert payload.perpetual == "да"
+    assert payload.subordinated == "нет"
+
+
+def test_parse_corpbonds_payload_extracts_type_flags_from_json_like_blob_with_bool() -> None:
+    html = """
+    <html><body>
+      <script>
+        window.__BOND__ = {"perpetual": false, "subordinated": true};
+      </script>
+    </body></html>
+    """
+
+    payload = DohodEnricher.parse_corpbonds_payload(html)
+
+    assert payload.perpetual == "нет"
+    assert payload.subordinated == "да"
+
 def test_parse_corpbonds_payload_extracts_price_coupon_and_offer() -> None:
     html = """
     <table><tbody>
