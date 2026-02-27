@@ -20,7 +20,7 @@ from .raw_store import RawStore
 
 DohodProgressCallback = Callable[[dict[str, Any]], None]
 DohodCheckpointSaver = Callable[[dict[str, Any]], None]
-DOHOD_CHECKPOINT_VERSION = 10
+DOHOD_CHECKPOINT_VERSION = 11
 
 LABEL_VALUE_RE = r"{label}\s*</[^>]+>\s*<[^>]+[^>]*>(.*?)</"
 ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.IGNORECASE | re.DOTALL)
@@ -123,6 +123,7 @@ class DohodEnricher:
 
         identifier_to_bonds: dict[str, list[dict[str, Any]]] = {}
         secid_by_identifier: dict[str, str] = {}
+        requires_corpbonds_by_identifier: dict[str, bool] = {}
         for bond in bonds:
             primary_identifier = self._resolve_bond_identifier(bond)
             if not primary_identifier:
@@ -131,6 +132,10 @@ class DohodEnricher:
             if secid:
                 secid_by_identifier.setdefault(primary_identifier, secid)
             identifier_to_bonds.setdefault(primary_identifier, []).append(bond)
+            if primary_identifier not in requires_corpbonds_by_identifier:
+                requires_corpbonds_by_identifier[primary_identifier] = False
+            if self._needs_corpbonds_enrichment(bond):
+                requires_corpbonds_by_identifier[primary_identifier] = True
 
         self._corpbonds_secid_by_isin = dict(secid_by_identifier)
         pending: list[str] = []
@@ -163,7 +168,12 @@ class DohodEnricher:
         workers = max(1, int(getattr(self.config, "dohod_workers", 8)))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(self._fetch_with_fallback, identifier, None): identifier
+                executor.submit(
+                    self._fetch_with_fallback,
+                    identifier,
+                    None,
+                    requires_corpbonds_by_identifier.get(identifier, True),
+                ): identifier
                 for identifier in pending
             }
             for future in as_completed(futures):
@@ -231,7 +241,7 @@ class DohodEnricher:
 
         return errors
 
-    def _fetch_and_parse(self, isin: str) -> tuple[DohodBondPayload, int]:
+    def _fetch_and_parse(self, isin: str, needs_corpbonds: bool = True) -> tuple[DohodBondPayload, int]:
         for attempt in range(1, self.config.retries + 1):
             try:
                 response = self._get_with_rate_limit(
@@ -247,7 +257,9 @@ class DohodEnricher:
                 if self.raw_store and _is_payload_empty(payload):
                     self.raw_store.dump_html(f"dohod_empty_{isin}.html", html)
                 secid = self._corpbonds_secid_by_isin.get(isin, "")
-                corpbonds_payload = self._fetch_and_parse_corpbonds(secid) if secid else DohodBondPayload()
+                corpbonds_payload = DohodBondPayload()
+                if needs_corpbonds and secid:
+                    corpbonds_payload = self._fetch_and_parse_corpbonds(secid)
                 if corpbonds_payload.real_price is not None:
                     payload.real_price = corpbonds_payload.real_price
                 if corpbonds_payload.coupon_type:
@@ -293,14 +305,39 @@ class DohodEnricher:
             return DohodBondPayload()
 
 
-    def _fetch_with_fallback(self, primary_identifier: str, secondary_identifier: str | None = None) -> tuple[DohodBondPayload, int]:
-        payload, errors = self._fetch_and_parse(primary_identifier)
+    def _fetch_with_fallback(
+        self,
+        primary_identifier: str,
+        secondary_identifier: str | None = None,
+        needs_corpbonds: bool = True,
+    ) -> tuple[DohodBondPayload, int]:
+        def _call_fetch(identifier: str) -> tuple[DohodBondPayload, int]:
+            fetcher = self._fetch_and_parse
+            try:
+                return fetcher(identifier, needs_corpbonds)
+            except TypeError as error:
+                if "positional argument" not in str(error) and "unexpected keyword argument" not in str(error):
+                    raise
+                return fetcher(identifier)
+
+        payload, errors = _call_fetch(primary_identifier)
         if secondary_identifier and (errors > 0 or _is_payload_empty(payload)):
-            fallback_payload, fallback_errors = self._fetch_and_parse(secondary_identifier)
+            fallback_payload, fallback_errors = _call_fetch(secondary_identifier)
             if fallback_errors == 0 and not _is_payload_empty(fallback_payload):
                 return fallback_payload, 0
             errors += fallback_errors
         return payload, errors
+
+    @staticmethod
+    def _needs_corpbonds_enrichment(bond: dict[str, Any]) -> bool:
+        has_real_price = _as_float_or_none(bond.get("RealPrice")) is not None
+        has_coupon_type = bool(str(bond.get("CouponType") or "").strip())
+        has_lesenka = bool(str(bond.get("Lesenka") or "").strip())
+        has_perpetual = bool(_normalize_yes_no(str(bond.get("Вечные") or "")))
+        has_subordinated = bool(_normalize_yes_no(str(bond.get("Субординированные") or "")))
+        has_offer_date = bool(str(bond.get("OFFERDATE") or "").strip())
+
+        return not (has_real_price and has_coupon_type and has_lesenka and has_perpetual and has_subordinated and has_offer_date)
 
     @staticmethod
     def _resolve_bond_identifier(bond: dict[str, Any]) -> str:
@@ -961,8 +998,10 @@ def _extract_corpbonds_values(html: str) -> dict[str, str]:
 
 
 def _canonicalize_corpbonds_label(raw_label: str) -> str:
-    label = _normalize_label(raw_label)
-    if not label:
+    raw_label_clean = str(raw_label or "").strip()
+    raw_label_lower = raw_label_clean.lower()
+    label = _normalize_label(raw_label_clean)
+    if not label and not raw_label_lower:
         return ""
 
     if "цена послед" in label:
@@ -975,9 +1014,9 @@ def _canonicalize_corpbonds_label(raw_label: str) -> str:
         return "Купон лесенкой"
     if "формула купона" in label:
         return "Формула купона"
-    if "вечн" in label:
+    if "вечн" in label or "бессроч" in label or "perpetual" in raw_label_lower:
         return "Вечные"
-    if "субординир" in label:
+    if "субординир" in label or "суборд" in label or "subordinat" in raw_label_lower or "subord" in raw_label_lower:
         return "Субординированные"
     if "дата ближайшей оферты" in label or "дата оферты" in label or "ближайшая оферта" in label:
         return "Дата ближайшей оферты"
