@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -67,3 +68,15 @@ class HttpClient:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         return await self._client.get(url, params=params, headers=headers)
+
+
+async def moex_get(
+    client: HttpClient,
+    endpoint: str,
+    params: dict[str, Any] | None = None,
+    ttl_s: int | None = None,
+) -> dict[str, Any]:
+    base_url = "https://iss.moex.com"
+    normalized_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    payload = await client.get(f"{base_url}{normalized_endpoint}", params=params, ttl_s=ttl_s)
+    return json.loads(payload.decode("utf-8"))
