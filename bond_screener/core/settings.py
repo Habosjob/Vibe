@@ -46,12 +46,18 @@ class Stage1Settings:
 
 
 @dataclass(frozen=True)
+class Stage2Settings:
+    dropped_ui_filename: str
+
+
+@dataclass(frozen=True)
 class AppSettings:
     excel_debug: bool
     excel_debug_exports: list[str]
     net: NetSettings
     db: DbSettings
     stage1: Stage1Settings
+    stage2: Stage2Settings
     paths: ProjectPaths
 
 
@@ -106,6 +112,9 @@ def load_settings(project_root: Path | None = None) -> AppSettings:
             ttl_hours=int(raw.get("stage1", {}).get("ttl_hours", 24)),
             emitents_page_size=int(raw.get("stage1", {}).get("emitents_page_size", 100)),
             emitents_max_pages=int(raw.get("stage1", {}).get("emitents_max_pages", 1000)),
+        ),
+        stage2=Stage2Settings(
+            dropped_ui_filename=str(raw.get("stage2", {}).get("dropped_ui_filename", "Dropped_bonds.xlsx")),
         ),
         paths=paths,
     )

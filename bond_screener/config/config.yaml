@@ -1,5 +1,5 @@
 excel_debug: true
-excel_debug_exports: [stage1]
+excel_debug_exports: [stage2]
 
 paths:
   logs_dir: logs
@@ -30,3 +30,6 @@ stage1:
 
 db:
   filename: db/bonds.db
+
+stage2:
+  dropped_ui_filename: Dropped_bonds.xlsx

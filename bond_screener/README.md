@@ -18,6 +18,7 @@
 `main.py` запускает стадии последовательно:
 1. `Stage0` — инфраструктурные проверки и reset-инструменты.
 2. `Stage1` — сбор эмитентов/облигаций MOEX и пересборка `Emitents.xlsx`.
+3. `Stage2` — отбор `candidate_bonds` по `Greenlist` + применение ручных исключений `Dropped_bonds.xlsx`.
 
 ## Где что лежит
 
@@ -34,10 +35,11 @@
 Ключевые параметры:
 
 - `excel_debug: true|false` — включить/выключить Excel выгрузки.
-- `excel_debug_exports: [stage1, ...]` — какие витрины выгружать (по имени).
+- `excel_debug_exports: [stage2, ...]` — какие debug-витрины выгружать (по имени stage).
 - `stage1.ttl_hours` — TTL в часах для сетевого обновления Stage1.
 - `stage1.emitents_page_size` — размер страницы для справочника эмитентов MOEX (`/iss/securities.json`).
 - `stage1.emitents_max_pages` — защитный лимит страниц справочника эмитентов, чтобы исключить бесконечный цикл при проблемах API.
+- `stage2.dropped_ui_filename` — имя ручного файла исключений (по умолчанию `Dropped_bonds.xlsx`).
 - `paths.*` — относительные пути директорий.
 - `net.timeout` — явные сетевые таймауты (`connect/read/write/pool`).
 - `net.retry` — retry с exponential backoff + jitter.
@@ -60,6 +62,22 @@ Stage1 создаёт и поддерживает:
 
 Подробно: `scripts/stage1/README.md`.
 
+## Stage2 (кратко)
+
+Stage2 создаёт и поддерживает:
+- `candidate_bonds`
+- `dropped_manual`
+- `dropped_auto`
+- `dropped_effective` (VIEW с приоритетом `manual` над `auto`)
+- `source/xlsx/Dropped_bonds.xlsx` — ручной UI для исключений бумаг
+
+Правила Stage2:
+- `ScoringSelector` читает `emitents_effective` и `securities_raw` из БД, берёт только `Greenlist` и полностью пересобирает `candidate_bonds` на каждом запуске.
+- `DroppedManager` читает `Dropped_bonds.xlsx`, синхронизирует его в `dropped_manual` (UPSERT), затем удаляет из `candidate_bonds` бумаги из `dropped_effective`.
+- TTL для dropped записей: если `until < today`, запись считается истекшей и автоматически не применяется во view `dropped_effective` (история остаётся в Excel/SQLite).
+
+Подробно: `scripts/stage2/README.md`.
+
 ## Логи и интерактивность
 
 - Stage0:
@@ -69,5 +87,9 @@ Stage1 создаёт и поддерживает:
 - Stage1:
   - `logs/stage1_run.log`
   - `logs/stage1_moex_emitents_collector.log`
+- Stage2:
+  - `logs/stage2_run.log`
+  - `logs/stage2_scoring_selector.log`
+  - `logs/stage2_dropped_manager.log`
 
 В консоли показываются прогрессбары (`tqdm`) и статусы выполнения.
