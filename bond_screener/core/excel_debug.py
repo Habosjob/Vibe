@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from pathlib import Path
 
 import pandas as pd
@@ -23,8 +24,23 @@ def export_dataframe(settings: AppSettings, filename: str, df: pd.DataFrame, exp
         return None
     out_path = settings.paths.source_xlsx_dir / filename
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_excel(out_path, index=False)
+
+    safe_df = df.copy()
+    for col in safe_df.columns:
+        series = safe_df[col]
+        if pd.api.types.is_datetime64tz_dtype(series):
+            safe_df[col] = series.dt.tz_localize(None)
+        elif pd.api.types.is_object_dtype(series):
+            safe_df[col] = series.map(_normalize_excel_datetime)
+
+    safe_df.to_excel(out_path, index=False)
     return out_path
+
+
+def _normalize_excel_datetime(value: Any) -> Any:
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
 
 
 def export_dataframe_styled(
@@ -39,7 +55,16 @@ def export_dataframe_styled(
 
     out_path = settings.paths.source_xlsx_dir / filename
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_excel(out_path, index=False)
+
+    safe_df = df.copy()
+    for col in safe_df.columns:
+        series = safe_df[col]
+        if pd.api.types.is_datetime64tz_dtype(series):
+            safe_df[col] = series.dt.tz_localize(None)
+        elif pd.api.types.is_object_dtype(series):
+            safe_df[col] = series.map(_normalize_excel_datetime)
+
+    safe_df.to_excel(out_path, index=False)
 
     wb = load_workbook(out_path)
     ws = wb.active
@@ -59,9 +84,14 @@ def export_dataframe_styled(
             value = cell.value
             if value is None:
                 continue
+            value = _normalize_excel_datetime(value)
+            if value is not cell.value:
+                cell.value = value
             if col_name in date_columns_lower and isinstance(value, str):
                 try:
                     dt = datetime.fromisoformat(value)
+                    if dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
                     cell.value = dt
                     cell.number_format = "DD.MM.YYYY"
                     value = dt.strftime("%d.%m.%Y")
