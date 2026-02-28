@@ -25,6 +25,8 @@ net:
 
 stage1:
   ttl_hours: 24
+  emitents_page_size: 100
+  emitents_max_pages: 1000
 
 db:
   filename: db/bonds.db

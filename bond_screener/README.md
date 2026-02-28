@@ -36,6 +36,8 @@
 - `excel_debug: true|false` — включить/выключить Excel выгрузки.
 - `excel_debug_exports: [stage1, ...]` — какие витрины выгружать (по имени).
 - `stage1.ttl_hours` — TTL в часах для сетевого обновления Stage1.
+- `stage1.emitents_page_size` — размер страницы для справочника эмитентов MOEX (`/iss/securities.json`).
+- `stage1.emitents_max_pages` — защитный лимит страниц справочника эмитентов, чтобы исключить бесконечный цикл при проблемах API.
 - `paths.*` — относительные пути директорий.
 - `net.timeout` — явные сетевые таймауты (`connect/read/write/pool`).
 - `net.retry` — retry с exponential backoff + jitter.

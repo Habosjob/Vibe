@@ -41,6 +41,8 @@ class DbSettings:
 @dataclass(frozen=True)
 class Stage1Settings:
     ttl_hours: int
+    emitents_page_size: int
+    emitents_max_pages: int
 
 
 @dataclass(frozen=True)
@@ -100,7 +102,11 @@ def load_settings(project_root: Path | None = None) -> AppSettings:
             cache_ttl_s_default=int(raw["net"]["cache_ttl_s_default"]),
         ),
         db=DbSettings(filename=db_filename),
-        stage1=Stage1Settings(ttl_hours=int(raw.get("stage1", {}).get("ttl_hours", 24))),
+        stage1=Stage1Settings(
+            ttl_hours=int(raw.get("stage1", {}).get("ttl_hours", 24)),
+            emitents_page_size=int(raw.get("stage1", {}).get("emitents_page_size", 100)),
+            emitents_max_pages=int(raw.get("stage1", {}).get("emitents_max_pages", 1000)),
+        ),
         paths=paths,
     )
 

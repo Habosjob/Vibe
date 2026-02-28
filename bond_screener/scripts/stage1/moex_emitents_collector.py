@@ -132,7 +132,8 @@ class MoexEmitentsCollector:
         client = HttpClient(self.settings, cache)
         try:
             securities = await self._fetch_securities(client)
-            emitents_ref = await self._fetch_emitents_reference(client)
+            target_secids = {str(row.get("SECID")) for row in securities if row.get("SECID")}
+            emitents_ref = await self._fetch_emitents_reference(client, target_secids)
         finally:
             await client.aclose()
 
@@ -182,24 +183,14 @@ class MoexEmitentsCollector:
             "iss.meta": "off",
             "iss.only": "securities",
             "securities.columns": "SECID,ISIN,SHORTNAME,MATDATE,FACEVALUE,FACEUNIT,TYPENAME,STATUS",
-            "limit": 100,
-            "start": 0,
         }
-        all_rows: list[dict[str, Any]] = []
-        pbar = tqdm(desc="Stage1/MOEX bonds", unit="page", dynamic_ncols=True)
-        while True:
+        with tqdm(total=1, desc="Stage1/MOEX bonds", unit="req", dynamic_ncols=True) as pbar:
             payload = await moex_get(client, "/iss/engines/stock/markets/bonds/securities.json", params=params)
-            block = payload.get("securities", {})
-            cols = block.get("columns", [])
-            rows = [dict(zip(cols, row, strict=False)) for row in block.get("data", [])]
-            if not rows:
-                break
-            all_rows.extend(rows)
-            params["start"] = int(params["start"]) + len(rows)
             pbar.update(1)
-            if len(rows) < int(params["limit"]):
-                break
-        pbar.close()
+
+        block = payload.get("securities", {})
+        cols = block.get("columns", [])
+        all_rows = [dict(zip(cols, row, strict=False)) for row in block.get("data", [])]
 
         today = date.today()
         filtered = []
@@ -229,34 +220,74 @@ class MoexEmitentsCollector:
         )
         return unique_rows
 
-    async def _fetch_emitents_reference(self, client: HttpClient) -> dict[str, dict[str, Any]]:
+    async def _fetch_emitents_reference(
+        self,
+        client: HttpClient,
+        target_secids: set[str],
+    ) -> dict[str, dict[str, Any]]:
         params = {
             "iss.meta": "off",
             "iss.only": "securities",
             "engine": "stock",
             "market": "bonds",
-            "limit": 100,
+            "limit": max(1, self.settings.stage1.emitents_page_size),
             "start": 0,
         }
+
+        remaining = {secid for secid in target_secids if secid}
         out: dict[str, dict[str, Any]] = {}
-        pbar = tqdm(desc="Stage1/MOEX emitents", unit="page", dynamic_ncols=True)
-        while True:
-            payload = await moex_get(client, "/iss/securities.json", params=params)
-            block = payload.get("securities", {})
-            cols = block.get("columns", [])
-            rows = [dict(zip(cols, row, strict=False)) for row in block.get("data", [])]
-            if not rows:
-                break
-            for row in rows:
-                secid = row.get("secid")
-                if secid and row.get("emitent_id"):
-                    out[str(secid)] = row
-            params["start"] = int(params["start"]) + len(rows)
-            pbar.update(1)
-            if len(rows) < int(params["limit"]):
-                break
-        pbar.close()
-        self.logger.info("Получены reference эмитентов: %s", len(out))
+        seen_page_signatures: set[tuple[int, str]] = set()
+        pages_processed = 0
+
+        with tqdm(total=len(remaining), desc="Stage1/MOEX emitents", unit="sec", dynamic_ncols=True) as pbar:
+            while remaining:
+                if pages_processed >= max(1, self.settings.stage1.emitents_max_pages):
+                    self.logger.warning(
+                        "Достигнут лимит страниц emitents_max_pages=%s. Останавливаем цикл.",
+                        self.settings.stage1.emitents_max_pages,
+                    )
+                    break
+
+                payload = await moex_get(client, "/iss/securities.json", params=params)
+                block = payload.get("securities", {})
+                cols = block.get("columns", [])
+                rows = [dict(zip(cols, row, strict=False)) for row in block.get("data", [])]
+                if not rows:
+                    break
+
+                first_secid = str(rows[0].get("secid") or "")
+                signature = (int(params["start"]), first_secid)
+                if signature in seen_page_signatures:
+                    self.logger.warning(
+                        "Детектирован повтор страницы MOEX emitents: start=%s secid=%s. Останавливаем цикл.",
+                        params["start"],
+                        first_secid,
+                    )
+                    break
+                seen_page_signatures.add(signature)
+
+                newly_found = 0
+                for row in rows:
+                    secid = row.get("secid")
+                    if not secid:
+                        continue
+                    secid_str = str(secid)
+                    if secid_str in remaining and row.get("emitent_id"):
+                        out[secid_str] = row
+                        remaining.remove(secid_str)
+                        newly_found += 1
+
+                if newly_found:
+                    pbar.update(newly_found)
+
+                params["start"] = int(params["start"]) + len(rows)
+                pages_processed += 1
+                if len(rows) < int(params["limit"]):
+                    break
+
+        if remaining:
+            self.logger.warning("Не удалось найти emitent reference для %s бумаг.", len(remaining))
+        self.logger.info("Получены reference эмитентов: %s из %s", len(out), len(target_secids))
         return out
 
     def _save_raw_data(self, emitents_rows: list[dict[str, Any]], securities_rows: list[dict[str, Any]]) -> None:
