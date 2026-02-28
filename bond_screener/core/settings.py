@@ -51,6 +51,32 @@ class Stage2Settings:
 
 
 @dataclass(frozen=True)
+class Stage3BondizationSettings:
+    enabled: bool
+    include_offers: bool
+    from_date: str
+    till: str
+
+
+@dataclass(frozen=True)
+class Stage3MoexSettings:
+    engine: str
+    market: str
+    boards: list[str]
+    page_size: int
+    bondization: Stage3BondizationSettings
+
+
+@dataclass(frozen=True)
+class Stage3Settings:
+    enabled: bool
+    ttl_hours: int
+    batch_size: int
+    concurrency: int
+    moex: Stage3MoexSettings
+
+
+@dataclass(frozen=True)
 class AppSettings:
     excel_debug: bool
     excel_debug_exports: list[str]
@@ -58,6 +84,7 @@ class AppSettings:
     db: DbSettings
     stage1: Stage1Settings
     stage2: Stage2Settings
+    stage3: Stage3Settings
     paths: ProjectPaths
 
 
@@ -115,6 +142,24 @@ def load_settings(project_root: Path | None = None) -> AppSettings:
         ),
         stage2=Stage2Settings(
             dropped_ui_filename=str(raw.get("stage2", {}).get("dropped_ui_filename", "Dropped_bonds.xlsx")),
+        ),
+        stage3=Stage3Settings(
+            enabled=bool(raw.get("stage3", {}).get("enabled", True)),
+            ttl_hours=int(raw.get("stage3", {}).get("ttl_hours", 6)),
+            batch_size=int(raw.get("stage3", {}).get("batch_size", 200)),
+            concurrency=int(raw.get("stage3", {}).get("concurrency", 20)),
+            moex=Stage3MoexSettings(
+                engine=str(raw.get("stage3", {}).get("moex", {}).get("engine", "stock")),
+                market=str(raw.get("stage3", {}).get("moex", {}).get("market", "bonds")),
+                boards=list(raw.get("stage3", {}).get("moex", {}).get("boards", [])),
+                page_size=int(raw.get("stage3", {}).get("moex", {}).get("page_size", 100)),
+                bondization=Stage3BondizationSettings(
+                    enabled=bool(raw.get("stage3", {}).get("moex", {}).get("bondization", {}).get("enabled", True)),
+                    include_offers=bool(raw.get("stage3", {}).get("moex", {}).get("bondization", {}).get("include_offers", True)),
+                    from_date=str(raw.get("stage3", {}).get("moex", {}).get("bondization", {}).get("from", "")),
+                    till=str(raw.get("stage3", {}).get("moex", {}).get("bondization", {}).get("till", "")),
+                ),
+            ),
         ),
         paths=paths,
     )
