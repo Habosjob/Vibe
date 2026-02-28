@@ -18,6 +18,15 @@ Stage3 читает `candidate_bonds` (результат Stage2) и по каж
 
 Если `bondization` вернул 404 или пусто по `coupons+amortizations`, в `moex_export_items.last_error` пишется `bondization_unavailable`, но security/marketdata всё равно сохраняются.
 
+
+## Почему раньше могли быть пустые `coupons/amortizations/offers`
+MOEX `bondization` при `iss.json=extended` отдает ответ в виде массива:
+`[{"charsetinfo": ...}, {"coupons": [...], "amortizations": [...], "offers": [...]}]`.
+
+Теперь Stage3 корректно разбирает **оба** формата (и стандартный, и `extended`),
+поэтому таблицы/Excel-файлы `stage3_debug_moex_coupons`, `stage3_debug_moex_amortizations`,
+`stage3_debug_moex_offers` заполняются данными, если они есть на стороне MOEX.
+
 ## Checkpoints и TTL
 - Таблица `moex_export_items` хранит `status`, `fetched_at`, флаги `info_ok/market_ok/bondization_ok/offers_ok`.
 - Если `status=done` и запись свежее `stage3.ttl_hours`, бумага пропускается.
