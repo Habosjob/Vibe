@@ -329,18 +329,47 @@ class MoexExporter:
         return out
 
     @staticmethod
-    def _extract_table_rows(payload: dict[str, Any], table_name: str) -> list[dict[str, Any]]:
+    def _extract_table_rows(payload: Any, table_name: str) -> list[dict[str, Any]]:
+        # Формат iss.json=extended:
+        # [ {"charsetinfo": ...}, {"coupons": [...], "amortizations": [...], ...} ]
+        if isinstance(payload, list):
+            for node in payload:
+                if not isinstance(node, dict) or table_name not in node:
+                    continue
+                block = node[table_name]
+                if isinstance(block, list):
+                    if not block:
+                        return []
+                    if isinstance(block[0], dict) and "columns" not in block[0]:
+                        return [dict(row) for row in block if isinstance(row, dict)]
+                    if len(block) >= 2 and isinstance(block[0], dict):
+                        cols = block[0].get("columns", [])
+                        return [dict(zip(cols, row, strict=False)) for row in block[1]]
+                if isinstance(block, dict):
+                    cols = block.get("columns", [])
+                    return [dict(zip(cols, row, strict=False)) for row in block.get("data", [])]
+            return []
+
+        if not isinstance(payload, dict):
+            return []
+
+        # Стандартный формат ISS: {'table': {'columns': [...], 'data': [...]}}
         block = payload.get(table_name)
         if isinstance(block, dict):
             cols = block.get("columns", [])
             return [dict(zip(cols, row, strict=False)) for row in block.get("data", [])]
+        # Альтернативный формат ISS: {'table': [{'field': value, ...}, ...]}
+        if isinstance(block, list) and block and isinstance(block[0], dict) and "columns" not in block[0]:
+            return [dict(row) for row in block]
         if isinstance(block, list) and len(block) >= 2 and isinstance(block[0], dict):
             cols = block[0].get("columns", [])
             return [dict(zip(cols, row, strict=False)) for row in block[1]]
         return []
 
     @staticmethod
-    def _extract_table_cursor(payload: dict[str, Any], table_name: str) -> dict[str, Any] | None:
+    def _extract_table_cursor(payload: Any, table_name: str) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
         block = payload.get(f"{table_name}.cursor")
         if isinstance(block, dict):
             data = block.get("data", [])
