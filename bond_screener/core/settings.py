@@ -39,11 +39,17 @@ class DbSettings:
 
 
 @dataclass(frozen=True)
+class Stage1Settings:
+    ttl_hours: int
+
+
+@dataclass(frozen=True)
 class AppSettings:
     excel_debug: bool
     excel_debug_exports: list[str]
     net: NetSettings
     db: DbSettings
+    stage1: Stage1Settings
     paths: ProjectPaths
 
 
@@ -94,6 +100,7 @@ def load_settings(project_root: Path | None = None) -> AppSettings:
             cache_ttl_s_default=int(raw["net"]["cache_ttl_s_default"]),
         ),
         db=DbSettings(filename=db_filename),
+        stage1=Stage1Settings(ttl_hours=int(raw.get("stage1", {}).get("ttl_hours", 24))),
         paths=paths,
     )
 
