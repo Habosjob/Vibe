@@ -1,5 +1,5 @@
 excel_debug: true
-excel_debug_exports: [stage0]
+excel_debug_exports: [stage1]
 
 paths:
   logs_dir: logs
@@ -22,6 +22,11 @@ net:
     backoff_max_s: 10
     jitter_s: 0.5
   cache_ttl_s_default: 3600
+
+stage1:
+  ttl_hours: 24
+  emitents_page_size: 100
+  emitents_max_pages: 1000
 
 db:
   filename: db/bonds.db

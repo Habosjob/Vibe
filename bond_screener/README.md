@@ -13,13 +13,19 @@
    python main.py
    ```
 
+## Порядок запуска
+
+`main.py` запускает стадии последовательно:
+1. `Stage0` — инфраструктурные проверки и reset-инструменты.
+2. `Stage1` — сбор эмитентов/облигаций MOEX и пересборка `Emitents.xlsx`.
+
 ## Где что лежит
 
 - `config/config.yaml` — все основные настройки приложения.
 - `config/reset.yaml` — одноразовые флаги сброса данных на следующий запуск.
 - `db/bonds.db` — SQLite, главный источник правды.
 - `logs/*.log` — перезаписываемые логи по одному файлу на каждый скрипт.
-- `source/xlsx/*.xlsx` — debug-выгрузки в Excel.
+- `source/xlsx/*.xlsx` — ручной UI и debug-выгрузки.
 - `cache/http` — HTTP cache c TTL.
 - `cache/checkpoints` — директория под файлы чекпоинтов (резерв), текущая реализация чекпоинтов хранится в SQLite (`job_items`).
 
@@ -28,58 +34,40 @@
 Ключевые параметры:
 
 - `excel_debug: true|false` — включить/выключить Excel выгрузки.
-- `excel_debug_exports: [stage0, ...]` — какие витрины выгружать (по имени).
+- `excel_debug_exports: [stage1, ...]` — какие витрины выгружать (по имени).
+- `stage1.ttl_hours` — TTL в часах для сетевого обновления Stage1.
+- `stage1.emitents_page_size` — размер страницы для справочника эмитентов MOEX (`/iss/securities.json`).
+- `stage1.emitents_max_pages` — защитный лимит страниц справочника эмитентов, чтобы исключить бесконечный цикл при проблемах API.
 - `paths.*` — относительные пути директорий.
 - `net.timeout` — явные сетевые таймауты (`connect/read/write/pool`).
 - `net.retry` — retry с exponential backoff + jitter.
 - `net.cache_ttl_s_default` — TTL кэша по умолчанию.
 - `db.filename` — путь к SQLite.
 
-## Reset-процедура (`config/reset.yaml`)
+## Stage1 (кратко)
 
-Файл используется скриптом `scripts/stage0/reset_tool.py`.
+Stage1 создаёт и поддерживает:
+- `emitents_raw`
+- `securities_raw`
+- `emitents_manual`
+- `emitents_effective` (VIEW)
+- `source/xlsx/Emitents.xlsx` — ручной UI с валидацией `scoring_flag`.
 
-Пример:
+Правила ручных полей:
+- `scoring_flag` допускает только `Greenlist | Yellowlist | Redlist | ""`.
+- `scoring_date` хранится в Excel как дата с форматом `DD.MM.YYYY`, в SQLite — строкой `DD.MM.YYYY`.
+- Если `scoring_flag` пустой — `scoring_date` очищается.
 
-```yaml
-reset_mode: ["cache", "checkpoints"]
-cache:
-  clear_all: true
-checkpoints:
-  clear_all: true
-```
-
-После применения reset tool автоматически возвращает `reset.yaml` к безопасному состоянию:
-
-- `reset_mode: []`
-- все флаги `false`
-
-Это защищает от случайного повторного удаления данных на каждом запуске.
+Подробно: `scripts/stage1/README.md`.
 
 ## Логи и интерактивность
 
-- Каждый Stage0-скрипт пишет отдельный лог:
+- Stage0:
   - `logs/stage0_env_check.log`
   - `logs/stage0_reset_tool.log`
   - `logs/stage0_run_registry.log`
-- Формат логов:
-  - `timestamp | level | module | message`
-- В консоли показывается прогрессбар (`tqdm`) и статусы:
-  - `[STAGE0][env_check] OK | 0.42s | msg...`
-  - `[STAGE0][env_check] FAIL | 0.10s | error=...`
+- Stage1:
+  - `logs/stage1_run.log`
+  - `logs/stage1_moex_emitents_collector.log`
 
-## Что реализовано в Stage0
-
-- Базовая структура проекта.
-- Загрузка YAML-конфигов.
-- Инициализация SQLite и таблиц `runs`, `job_items`.
-- Run registry (`open_run`, `close_run_success`, `close_run_fail`).
-- HTTP cache с TTL и API `get/set/is_expired/clear`.
-- Async HTTP client (`httpx`) с retry (`tenacity`) и cache.
-- Checkpoint интерфейс на SQLite:
-  - `start_job(job_name, items)`
-  - `mark_done(item)`
-  - `mark_failed(item, error)`
-  - `resume_pending(job_name)`
-
-Подробнее: `scripts/stage0/README.md`.
+В консоли показываются прогрессбары (`tqdm`) и статусы выполнения.
