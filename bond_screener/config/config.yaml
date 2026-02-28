@@ -1,5 +1,5 @@
 excel_debug: true
-excel_debug_exports: [stage2]
+excel_debug_exports: [stage2, stage3]
 
 paths:
   logs_dir: logs
@@ -33,3 +33,19 @@ db:
 
 stage2:
   dropped_ui_filename: Dropped_bonds.xlsx
+
+stage3:
+  enabled: true
+  ttl_hours: 6
+  batch_size: 200
+  concurrency: 20
+  moex:
+    engine: "stock"
+    market: "bonds"
+    boards: []
+    page_size: 100
+    bondization:
+      enabled: true
+      include_offers: true
+      from: ""
+      till: ""
