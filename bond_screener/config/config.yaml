@@ -1,0 +1,27 @@
+excel_debug: true
+excel_debug_exports: [stage0]
+
+paths:
+  logs_dir: logs
+  db_dir: db
+  cache_http_dir: cache/http
+  cache_checkpoints_dir: cache/checkpoints
+  source_xlsx_dir: source/xlsx
+  source_parquet_dir: source/parquet
+
+net:
+  concurrency: 20
+  timeout:
+    connect_s: 10
+    read_s: 30
+    write_s: 30
+    pool_s: 30
+  retry:
+    max_attempts: 5
+    backoff_initial_s: 0.5
+    backoff_max_s: 10
+    jitter_s: 0.5
+  cache_ttl_s_default: 3600
+
+db:
+  filename: db/bonds.db
