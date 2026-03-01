@@ -1,9 +1,0 @@
-reset_mode: []
-cache:
-  clear_all: false
-db:
-  delete_db_file: false
-checkpoints:
-  clear_all: false
-ttl:
-  reset_fetched_at_tables: []
