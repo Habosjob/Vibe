@@ -1,0 +1,44 @@
+v2:
+  enabled: true
+  export_all_columns: true
+
+  sources:
+    moex_rates_csv_url: "https://iss.moex.com/iss/apps/infogrid/emission/rates.csv?sec_type=stock_ofz_bond,stock_cb_bond,stock_subfederal_bond,stock_municipal_bond,stock_corporate_bond,stock_exchange_bond&iss.dp=comma&iss.df=%25d.%25m.%25Y&iss.tf=%25H:%25M:%25S&iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru"
+    dohod_url: "https://www.dohod.ru/analytic/bonds"
+    cbr_ruonia_url: "https://www.cbr.ru/hd_base/ruonia/"
+    cbr_zcyc_url: "https://www.cbr.ru/hd_base/zcyc_params/zcyc/"
+
+  ttl_hours:
+    moex_rates: 12
+    dohod_excel: 12
+    market_indices: 12
+    moex_bondization: 72
+
+  moex:
+    concurrency: 15
+
+  dohod:
+    use_playwright: true
+    headless: true
+    timeout_s: 60
+
+  scenario:
+    # rolling horizon: y0/y1/y2, далее = y2
+    key_rate_avg_percent: [14.0, 8.5, 8.0]
+    linker_inflation_percent: [5.0, 4.0, 4.0]
+    key_rate_today_percent: 14.0   # для калибровки RUONIA-spread
+
+  floating:
+    # режим B (реализм/сложность):
+    # RUONIA(t)=key_rate(t)+ (ruonia_today-key_rate_today)
+    # ZCYC(t)=ZCYC_today(tenor)+ (key_rate(t)-key_rate_today)
+    ruonia_mode: "calibrate_today"
+    zcyc_mode: "shift_by_key_rate_delta"
+
+  filters:
+    min_days_to_amort: 365
+
+  pricing:
+    price_priority: ["dohod", "moex"]
+    nkd_priority: ["dohod", "moex", "zero"]
+    fx_convert: false
