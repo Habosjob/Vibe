@@ -77,3 +77,39 @@ python main.py
 1. Смотри блок `Self-check top ytm rows` — там топ-10 по `ytm_calc` вместе с `price_unit`, `dirty_price_amt` и номиналом.
 2. Если много `ytm_outlier`, проверь, не попали ли инструменты с ценой в % в ветку `currency` или наоборот.
 3. Для обычных рублевых облигаций `dirty_price_amt` чаще всего должен быть близок к номиналу (или его разумной доле), а не на порядки меньше/больше.
+
+## Troubleshooting: moex_rates header + price units
+
+### `moex_rates_norm` пустой по `norm_secid` / `norm_isin`
+
+Причина обычно в преамбуле MOEX CSV: заголовок находится не в первой строке.
+Пайплайн теперь:
+
+- читает первые строки как текст (cp1251),
+- находит строку-заголовок по `SECID`/`ISIN`,
+- только потом делает `read_csv` с правильным `skiprows/header`.
+
+В `logs/app.log` проверяй:
+
+- `MOEX rates detected header_row=...`
+- `MOEX rates columns(first30)=...`
+- `MOEX rates notnull: SECID=... ISIN=... NAME=...`
+
+Если после этого `SECID` так и не найден, пайплайн аварийно завершится с явной ошибкой `ValueError` — это ожидаемое защитное поведение.
+
+### Bondization показывает `universe_rows=0`
+
+Теперь universe строится в первую очередь из `moex_rates_norm.norm_secid` (без фильтра по ISIN).
+Если по какой-то причине `norm_secid` пустой, включается fallback из `dohod_norm.norm_isin` как временный `secid`.
+Если даже после fallback universe пустой — выбрасывается `RuntimeError`, потому что дальнейшие расчёты бессмысленны.
+
+### `ytm_calc` “космический”
+
+Пайплайн нормализует единицы до расчетов:
+
+- выбирает `nominal_used` (`dohod_current_nominal` → `moex_facevalue` → `1000`),
+- переводит цену в сумму (`price_unit`: `% от номинала` или `currency`),
+- считает `dirty_price_amt = clean_price_amt + nkd_amt`,
+- ставит предупреждения `dirty_price_too_low`, `bad_dirty_price`, `ytm_outlier`.
+
+Для аудита смотри колонки: `nominal_used`, `price_unit`, `clean_price_amt`, `nkd_amt`, `dirty_price_amt`, `ytm_is_outlier`.
