@@ -1,51 +1,138 @@
-# Stage3 — MOEX export (security/marketdata/coupons/amortizations/offers)
+# Stage3 — параллельный экспорт MOEX + DOHOD
 
 ## Что делает
-Stage3 читает `candidate_bonds` (результат Stage2) и по каждой бумаге (`secid`) загружает:
-- `moex_security_info` — идентификаторы и параметры бумаги;
-- `moex_marketdata` — торговые поля (цены, доходности, НКД и т.п.);
-- `moex_coupons` — график купонов;
-- `moex_amortizations` — график амортизаций (**обязательно**);
-- `moex_offers` — оферты (если включено в конфиге);
-- `moex_export_items` — checkpoint/статус по каждой бумаге.
+Stage3 читает `candidate_bonds` (результат Stage2) и запускает два источника:
+- `moex_export` по `secid` (MOEX ISS);
+- `dohod_export` по `isin` (страница `https://analytics.dohod.ru/bond/{isin}`).
 
-## Endpoint'ы
-- Security + marketdata:
-  - `/iss/engines/{engine}/markets/{market}/securities/{SECID}.json`
-- Купоны/амортизации/оферты (основной):
-  - `/iss/statistics/engines/{engine}/markets/{market}/bondization/{SECID}.json`
-  - параметры: `iss.meta=off`, `iss.json=extended`, `iss.only=amortizations,coupons[,offers]`, опционально `from`, `till`.
+Каждый источник регистрируется в `runs` отдельно (`stage=stage3`, `script=moex_export|dohod_export`).
 
-Если `bondization` вернул 404 или пусто по `coupons+amortizations`, в `moex_export_items.last_error` пишется `bondization_unavailable`, но security/marketdata всё равно сохраняются.
+## Параллельный запуск источников
+В `config/config.yaml -> stage3.run_sources_in_parallel`:
+- `true` — источники запускаются параллельно (`asyncio.gather` + отдельные потоки);
+- `false` — последовательный запуск.
 
+Правило итогового статуса `scripts/stage3/run.py`:
+- **OK**, если успешно отработал хотя бы один источник;
+- **FAIL**, если оба источника завершились с ошибкой.
 
-## Почему раньше могли быть пустые `coupons/amortizations/offers`
-MOEX `bondization` при `iss.json=extended` отдает ответ в виде массива:
-`[{"charsetinfo": ...}, {"coupons": [...], "amortizations": [...], "offers": [...]}]`.
+Ошибка одного источника не останавливает второй.
 
-Теперь Stage3 корректно разбирает **оба** формата (и стандартный, и `extended`),
-поэтому таблицы/Excel-файлы `stage3_debug_moex_coupons`, `stage3_debug_moex_amortizations`,
-`stage3_debug_moex_offers` заполняются данными, если они есть на стороне MOEX.
+## DOHOD: входные данные и валидация
+Вход — список `isin` из `candidate_bonds`.
+- пустой `isin` → `INFO` и skip;
+- `isin`, не похожий на `RU**********` (паттерн `^RU[A-Z0-9]{10}$`) → `WARN` и skip.
 
-## Checkpoints и TTL
-- Таблица `moex_export_items` хранит `status`, `fetched_at`, флаги `info_ok/market_ok/bondization_ok/offers_ok`.
-- Если `status=done` и запись свежее `stage3.ttl_hours`, бумага пропускается.
-- Повторный запуск продолжает обработку с `pending/failed` и просроченных `done`.
+## DOHOD: что парсится
+Парсинг делается через `BeautifulSoup` по схеме `label -> value` (таблицы, `dt/dd`, fallback по `key:value`).
 
-## Защита от зацикливания в пагинации
-Для любых таблиц с курсором используется только `<table>.cursor`:
-- продолжение по `INDEX + PAGESIZE < TOTAL`;
-- anti-loop: если повторилась сигнатура страницы `(start, first_row)` — цикл прерывается и пишется WARN в лог.
+Минимальные поля:
+- `isin`
+- `bond_name`
+- `status`
+- `currency`
+- `issue_date` (`DD.MM.YYYY`)
+- `maturity_date` (`DD.MM.YYYY`)
+- `ytm_percent` (`REAL`)
+- `price_last` (`REAL`)
+- `nkd` (`REAL`)
+- `current_nominal` (`REAL`)
+- `coupon_freq_per_year` (`INTEGER`)
+- `coupon_type`
+- `coupon_formula_text`
+- `next_payment_date` (`DD.MM.YYYY`)
+- `internal_rating`
+- `liquidity_score` (`REAL`)
+- `warning_text`
+- `fetched_at` (ISO)
+- `source_hash`
 
-## Что можно настроить в config/config.yaml
-`stage3`:
-- `enabled` — запуск Stage3;
-- `ttl_hours` — TTL checkpoint;
-- `batch_size` — размер пачки бумаг;
-- `concurrency` — число параллельных задач;
-- `moex.engine`, `moex.market`, `moex.boards`, `moex.page_size`;
-- `moex.bondization.enabled`, `include_offers`, `from`, `till`.
+Если поле не найдено — сохраняется `NULL`, а в `warning_text` добавляется `missing:<field>`.
 
-Логи:
+## Таблицы Stage3
+### MOEX
+- `moex_security_info`
+- `moex_marketdata`
+- `moex_coupons`
+- `moex_amortizations`
+- `moex_offers`
+- `moex_export_items`
+
+### DOHOD
+- `dohod_bond_profile`
+- `dohod_export_items` (`status`, `last_error`, `fetched_at`)
+
+## TTL и checkpoint
+### MOEX
+- TTL: `stage3.moex.ttl_hours`.
+- Если `moex_export_items.status=done` и запись свежая — skip.
+
+### DOHOD
+- TTL: `stage3.dohod.ttl_hours`.
+- Если `dohod_export_items.status=done` и запись свежая — skip.
+- `failed` пробуется повторно, максимум **2 попытки** за один запуск для каждого ISIN.
+
+## Сеть, кэш, retry, polite режим (DOHOD)
+- Используется общий `HttpClient` + `HttpCache`.
+- `User-Agent` берется из `stage3.dohod.user_agent`.
+- Параллелизм: `stage3.dohod.concurrency` (по умолчанию 5).
+- Пауза в каждом worker: `await sleep(stage3.dohod.min_delay_s)`.
+- Позиция progressbar в консоли: `stage3.dohod.progressbar_position` (по умолчанию 1).
+- Retry только для сетевых ошибок/timeout/5xx.
+- На `403/404` retry не делается.
+- На `404` пишется `WARN`, checkpoint получает `status=failed`.
+
+## SQLite и параллелизм (обязательные требования)
+Для устойчивой параллельной записи MOEX + DOHOD:
+- включен `WAL` (`PRAGMA journal_mode=WAL`);
+- каждый источник открывает **свои** соединения к SQLite;
+- вставки/обновления выполняются батчами (`executemany`) внутри транзакции;
+- при `database is locked` используется retry с backoff.
+
+## Логи и прогресс
+
+## Progressbar в параллельном режиме
+Чтобы progressbar не «ломался» при одновременной работе источников, у каждого источника фиксируется своя строка в терминале:
+- `stage3.moex.progressbar_position` (обычно `0`),
+- `stage3.dohod.progressbar_position` (обычно `1`).
+
+Это позволяет видеть обновление обеих полос прогресса одновременно без взаимного перезаписывания.
+Для DOHOD прогресс обновляется инкрементально по мере завершения каждого ISIN (`asyncio.as_completed`), поэтому полоса не «застывает» до конца всей пачки.
+
 - `logs/stage3_run.log`
 - `logs/stage3_moex_export.log`
+- `logs/stage3_dohod_export.log`
+
+Логи перезаписываются на каждом запуске.
+В консоли показываются progressbar (`tqdm`) и финальные метрики.
+
+## Excel debug витрины
+`excel_debug` влияет **только** на debug-файлы `stageX_debug_*.xlsx`.
+Ручные UI-файлы (`Emitents.xlsx`, `Dropped_bonds.xlsx`) не зависят от debug.
+
+Если `excel_debug=true` и `stage3` присутствует в `excel_debug_exports`, создаются:
+- `source/xlsx/stage3_debug_moex_security_info.xlsx`
+- `source/xlsx/stage3_debug_moex_marketdata.xlsx`
+- `source/xlsx/stage3_debug_moex_coupons.xlsx`
+- `source/xlsx/stage3_debug_moex_amortizations.xlsx`
+- `source/xlsx/stage3_debug_moex_offers.xlsx` (если включены оферты)
+- `source/xlsx/stage3_debug_dohod_bond_profile.xlsx`
+
+Форматирование: bold headers, autofilter, freeze row, автоширина, даты `DD.MM.YYYY`.
+
+## Что настраивается в `config/config.yaml`
+`stage3`:
+- `enabled`
+- `run_sources_in_parallel`
+- `ttl_hours`
+- `batch_size`
+
+`stage3.moex`:
+- `enabled`, `ttl_hours`, `concurrency`, `progressbar_position`
+- `engine`, `market`, `boards`, `page_size`
+- `bondization.enabled`, `include_offers`, `from`, `till`
+
+`stage3.dohod`:
+- `enabled`, `ttl_hours`, `concurrency`, `progressbar_position`
+- `min_delay_s`, `page_timeout_s`
+- `base_url`, `user_agent`, `use_playwright`

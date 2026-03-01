@@ -12,7 +12,7 @@ import httpx
 import pandas as pd
 from tqdm import tqdm
 
-from core.db import get_connection, utc_now_iso
+from core.db import execute_with_retry, executemany_with_retry, get_connection, utc_now_iso
 from core.excel_debug import export_dataframe_styled, should_export
 from core.logging import get_script_logger
 from core.settings import AppSettings
@@ -36,7 +36,7 @@ class MoexExporter:
         self.logger = get_script_logger(settings.paths.logs_dir / "stage3_moex_export.log", "stage3.moex_export")
 
     def run(self) -> Stage3Stats:
-        if not self.cfg.enabled:
+        if not self.cfg.enabled or not self.cfg.moex.enabled:
             self.logger.info("Stage3 отключен в config: stage3.enabled=false")
             return Stage3Stats(total_candidates=0, processed=0, skipped_fresh=0, failed=0, duration_s=0.0)
 
@@ -53,7 +53,7 @@ class MoexExporter:
             len(candidates),
             len(to_process),
             skipped_fresh,
-            self.cfg.ttl_hours,
+            self.cfg.moex.ttl_hours,
         )
 
         failed = asyncio.run(self._process_all(to_process)) if to_process else 0
@@ -150,16 +150,19 @@ class MoexExporter:
 
     def _init_checkpoint_rows(self, candidates: list[dict[str, str | None]]) -> None:
         now_iso = utc_now_iso()
+        payload = [(row["secid"], now_iso) for row in candidates]
+        if not payload:
+            return
         with get_connection(self.settings.paths.db_file) as conn:
-            for row in candidates:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO moex_export_items
-                    (secid, status, last_error, fetched_at, info_ok, market_ok, bondization_ok, offers_ok)
-                    VALUES (?, 'pending', NULL, ?, 0, 0, 0, 0)
-                    """,
-                    (row["secid"], now_iso),
-                )
+            executemany_with_retry(
+                conn,
+                """
+                INSERT OR IGNORE INTO moex_export_items
+                (secid, status, last_error, fetched_at, info_ok, market_ok, bondization_ok, offers_ok)
+                VALUES (?, 'pending', NULL, ?, 0, 0, 0, 0)
+                """,
+                payload,
+            )
 
     def _is_fresh_done(self, secid: str, now_utc: datetime) -> bool:
         with get_connection(self.settings.paths.db_file) as conn:
@@ -170,14 +173,22 @@ class MoexExporter:
             fetched_at = datetime.fromisoformat(row["fetched_at"])
         except ValueError:
             return False
-        return now_utc - fetched_at < timedelta(hours=max(0, self.cfg.ttl_hours))
+        return now_utc - fetched_at < timedelta(hours=max(0, self.cfg.moex.ttl_hours))
 
     async def _process_all(self, items: list[dict[str, str | None]]) -> int:
-        sem = asyncio.Semaphore(max(1, self.cfg.concurrency))
+        sem = asyncio.Semaphore(max(1, self.cfg.moex.concurrency))
         client = HttpClient(self.settings, HttpCache(self.settings.paths.cache_http_dir))
         failed = 0
         try:
-            with tqdm(total=len(items), desc="Stage3/MOEX export", unit="sec", dynamic_ncols=True) as pbar:
+            with tqdm(
+                total=len(items),
+                desc="Stage3/MOEX export",
+                unit="sec",
+                dynamic_ncols=True,
+                position=max(0, self.cfg.moex.progressbar_position),
+                leave=True,
+                mininterval=0.2,
+            ) as pbar:
                 for start in range(0, len(items), max(1, self.cfg.batch_size)):
                     batch = items[start : start + max(1, self.cfg.batch_size)]
                     results = await asyncio.gather(*[self._process_one(client, sem, r) for r in batch], return_exceptions=True)
@@ -240,7 +251,7 @@ class MoexExporter:
                 "iss.only": "securities",
                 "securities.columns": "SECID,ISIN,SHORTNAME,NAME,MATDATE,FACEVALUE,FACEUNIT,CURRENCYID,TYPENAME,SECTYPE,PRIMARY_BOARDID",
             },
-            ttl_s=self.cfg.ttl_hours * 3600,
+            ttl_s=self.cfg.moex.ttl_hours * 3600,
         )
         sec_rows = self._extract_table_rows(sec_payload, "securities")
 
@@ -271,7 +282,7 @@ class MoexExporter:
             params["till"] = self.cfg.moex.bondization.till
         endpoint = f"/iss/statistics/engines/{self.cfg.moex.engine}/markets/{self.cfg.moex.market}/bondization/{secid}.json"
         try:
-            return await moex_get(client, endpoint, params=params, ttl_s=self.cfg.ttl_hours * 3600)
+            return await moex_get(client, endpoint, params=params, ttl_s=self.cfg.moex.ttl_hours * 3600)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 self.logger.warning("bondization 404 secid=%s", secid)
@@ -298,7 +309,7 @@ class MoexExporter:
         seen_signatures: set[tuple[int, str]] = set()
 
         while True:
-            payload = await moex_get(client, endpoint, params=local, ttl_s=self.cfg.ttl_hours * 3600)
+            payload = await moex_get(client, endpoint, params=local, ttl_s=self.cfg.moex.ttl_hours * 3600)
             rows = self._extract_table_rows(payload, table_name)
             out.extend(rows)
 
@@ -392,7 +403,8 @@ class MoexExporter:
         row = rows[0]
         source_hash = hashlib.sha256(json.dumps(row, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         with get_connection(self.settings.paths.db_file) as conn:
-            conn.execute(
+            execute_with_retry(
+                conn,
                 """
                 INSERT INTO moex_security_info (
                     secid, isin, shortname, name, issuer_key, matdate, facevalue, faceunit,
@@ -434,8 +446,8 @@ class MoexExporter:
 
     def _save_marketdata(self, secid: str, rows: list[dict[str, Any]], fetched_at: str) -> bool:
         with get_connection(self.settings.paths.db_file) as conn:
-            conn.execute("DELETE FROM moex_marketdata WHERE secid = ?", (secid,))
-            conn.executemany(
+            execute_with_retry(conn, "DELETE FROM moex_marketdata WHERE secid = ?", (secid,))
+            executemany_with_retry(conn,
                 """
                 INSERT INTO moex_marketdata (
                     secid, boardid, tradedate, last, close, bid, offer, waprice,
@@ -466,8 +478,8 @@ class MoexExporter:
 
     def _save_coupons(self, secid: str, rows: list[dict[str, Any]], fetched_at: str) -> None:
         with get_connection(self.settings.paths.db_file) as conn:
-            conn.execute("DELETE FROM moex_coupons WHERE secid = ?", (secid,))
-            conn.executemany(
+            execute_with_retry(conn, "DELETE FROM moex_coupons WHERE secid = ?", (secid,))
+            executemany_with_retry(conn,
                 "INSERT INTO moex_coupons VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
@@ -488,8 +500,8 @@ class MoexExporter:
 
     def _save_amortizations(self, secid: str, rows: list[dict[str, Any]], fetched_at: str) -> None:
         with get_connection(self.settings.paths.db_file) as conn:
-            conn.execute("DELETE FROM moex_amortizations WHERE secid = ?", (secid,))
-            conn.executemany(
+            execute_with_retry(conn, "DELETE FROM moex_amortizations WHERE secid = ?", (secid,))
+            executemany_with_retry(conn,
                 "INSERT INTO moex_amortizations VALUES (?, ?, ?, ?, ?, ?)",
                 [
                     (
@@ -506,8 +518,8 @@ class MoexExporter:
 
     def _save_offers(self, secid: str, rows: list[dict[str, Any]], fetched_at: str) -> None:
         with get_connection(self.settings.paths.db_file) as conn:
-            conn.execute("DELETE FROM moex_offers WHERE secid = ?", (secid,))
-            conn.executemany(
+            execute_with_retry(conn, "DELETE FROM moex_offers WHERE secid = ?", (secid,))
+            executemany_with_retry(conn,
                 "INSERT INTO moex_offers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
@@ -537,7 +549,8 @@ class MoexExporter:
         last_error: str | None,
     ) -> None:
         with get_connection(self.settings.paths.db_file) as conn:
-            conn.execute(
+            execute_with_retry(
+                conn,
                 """
                 INSERT INTO moex_export_items
                 (secid, status, last_error, fetched_at, info_ok, market_ok, bondization_ok, offers_ok)
