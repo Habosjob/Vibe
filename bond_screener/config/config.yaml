@@ -13,9 +13,24 @@ v2:
     dohod_excel: 12
     market_indices: 12
     moex_bondization: 72
+    smartlab: 12
 
   moex:
     concurrency: 15
+    bondization_bulk:
+      enabled: true
+      days_back: 30
+      days_forward: 400
+      page_size: 5000
+      max_pages: 20000
+      ttl_hours: 72
+
+  smartlab:
+    enabled: true
+    ttl_hours: 12
+    concurrency: 4
+    min_delay_s: 0.3
+    timeout_s: 30
 
   dohod:
     use_playwright: true
@@ -23,15 +38,11 @@ v2:
     timeout_s: 60
 
   scenario:
-    # rolling horizon: y0/y1/y2, далее = y2
     key_rate_avg_percent: [14.0, 8.5, 8.0]
     linker_inflation_percent: [5.0, 4.0, 4.0]
-    key_rate_today_percent: 14.0   # для калибровки RUONIA-spread
+    key_rate_today_percent: 14.0
 
   floating:
-    # режим B (реализм/сложность):
-    # RUONIA(t)=key_rate(t)+ (ruonia_today-key_rate_today)
-    # ZCYC(t)=ZCYC_today(tenor)+ (key_rate(t)-key_rate_today)
     ruonia_mode: "calibrate_today"
     zcyc_mode: "shift_by_key_rate_delta"
 

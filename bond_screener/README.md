@@ -1,115 +1,52 @@
 # bond_screener
 
-Монолитный пайплайн для построения скринера облигаций с учетом оферты/погашения, НКД, амортизаций и сценарных доходностей.
+Запуск: `python main.py`.
+Конфиг: `config/config.yaml`.
+Итог: `source/Screener.xlsx`.
 
-## Установка
+## Что сделано в v2
 
-```bash
-cd bond_screener
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m playwright install
-```
+- Монолит сохранен в `src/pipeline.py`, логика вынесена в `src/*`.
+- SORTER с таблицей `dropped_bonds` (перманентные/временные причины, TTL для оферты).
+- MOEX bondization переведен на bulk endpoint с пагинацией, anti-loop и checkpoint `cache/checkpoints/moex_bondization_bulk.json`.
+- Smart-Lab источник по SECID + кредитный рейтинг, включая fallback на общую таблицу `/q/bonds/`.
+- Smart-Lab circuit breaker: при 403/429/captcha источник выключается до конца запуска, в Excel ставится `smartlab_status=disabled_rate_limited`.
+- Параллельный запуск MOEX bulk и Smart-Lab + единый writer queue в SQLite (WAL, retry на lock, heartbeat).
+- Инкрементальность по `fetched_at` и TTL/checkpoints.
 
-## Запуск
+## SORTER / dropped
 
-```bash
-python main.py
-```
+Причины:
+- `AMORT_STARTED` — current_nominal < initial_nominal (перманентно).
+- `AMORT_LT_1Y` — амортизация < 365 дней (перманентно).
+- `MAT_LT_1Y` — погашение < 365 дней (перманентно).
+- `OFFER_LT_1Y` — оферта < 365 дней (временно, `until = offer_date + 1 day`).
 
-Без аргументов. Конфиг по умолчанию: `config/config.yaml`.
+В Excel добавляются поля:
+`dropped_flag`, `dropped_reason_code`, `dropped_until`, `dropped_is_permanent`, `amort_started_flag`, `amort_lt_1y`, `mat_lt_1y`, `offer_lt_1y`.
 
-## Что формируется
+## MOEX bulk bondization
 
-- `source/Screener.xlsx` — итоговый читабельный файл со всеми колонками и вычисленными полями.
-- `source/dohod_export.xlsx` — выгрузка DOHOD.
-- `data/bonds.db` — SQLite с raw/norm/merged/market таблицами.
-- `logs/app.log` — единый лог.
+- Endpoint: `.../statistics/engines/stock/markets/bonds/bondization`.
+- Горизонт по умолчанию: `today-30`..`today+400`.
+- Страницы пишутся сразу в БД (`получил -> записал`).
+- Таблицы: `moex_coupons`, `moex_amortizations`, агрегат `moex_amort_agg`.
 
-## TTL, кэш и чекпоинты
+## Smart-Lab
 
-- HTTP кэш: `cache/http` (TTL по источникам из `config.yaml`).
-- Bondization чекпоинты: `cache/checkpoints/bondization.json`.
-- Для SECID со статусом `done` и непротухшим TTL запрос повторно не идет.
-- `failed` SECID пробуются заново на следующем запуске.
+- Страница бумаги: `https://smart-lab.ru/q/bonds/{SECID}/`.
+- Парсятся котировки/даты/признаки/рейтинг.
+- Если рейтинг не найден, применяется fallback mapping из общей таблицы `/q/bonds/`.
+- Чекпоинт: `cache/checkpoints/smartlab_items.json`.
 
-## Модель RUONIA/ZCYC (вариант B)
+## Writer queue + WAL
 
-- `key_rate_scenario(date)` берет rolling из `scenario.key_rate_avg_percent` по году горизонта.
-- `ruonia_forecast(date) = key_rate_scenario(date) + (ruonia_today - key_rate_today_percent)`.
-- `zcyc_forecast(tenor, date) = zcyc_yield_today(tenor) + (key_rate_scenario(date) - key_rate_today_percent)`.
+- SQLite: `PRAGMA journal_mode=WAL`.
+- Один writer (`asyncio.Queue`) делает `executemany`/upsert.
+- Heartbeat в логах каждые ~7 секунд: сколько строк записано и размер очереди.
 
-## Правило оферта vs погашение
+## Проверка результата
 
-- `target_date = offer_date`, если оферта есть.
-- иначе `target_date = maturity_date`.
-- Все cashflow после `target_date` не учитываются.
-
-## Амортизация и фильтр
-
-- Амортизации учитываются всегда в cashflow.
-- Вычисляются: `has_amortization`, `days_to_amort` (до первой положительной амортизации).
-- Фильтр `filter_amort_ok = days_to_amort is null OR >= min_days_to_amort`.
-
-## Доходности
-
-- `fixed_cashflow`: IRR по фактическим купонам/амортизациям + redemption до горизонта, с dirty price (`clean + nkd`).
-- `floater_scenario`: IRR по прогнозным купонам от RUONIA/ZCYC + spread.
-- `linker_scenario`: базовый сценарий индексации по `linker_inflation_percent`.
-- `zero_coupon`: для дисконтных/нулевок без купонов.
-- `perpetual_compounded`: капитализированная купонная доходность для perpetual/subord.
-
-`warning_text` заполняется для всех бумаг, если были fallback/пропуски данных.
-
-## Как понять, что единицы цены корректны
-
-Пайплайн теперь явно нормализует цену и НКД в валюту номинала перед расчетом YTM и сохраняет дебаг-колонки:
-
-- `price_unit`: как интерпретирована clean price (`percent_of_nominal` или `currency`).
-- `clean_price_amt`: clean price после перевода в сумму в валюте номинала.
-- `nkd_amt`: НКД в той же валюте (с эвристикой для редкого случая НКД в %).
-- `dirty_price_amt`: итоговая dirty price = `clean_price_amt + nkd_amt`.
-- `warnings` / `warning_text`: сообщения о fallback и эвристиках (`nominal_defaulted_1000`, `nkd_assumed_percent`, `ytm_outlier` и т.д.).
-
-Быстрая проверка в `logs/app.log`:
-
-1. Смотри блок `Self-check top ytm rows` — там топ-10 по `ytm_calc` вместе с `price_unit`, `dirty_price_amt` и номиналом.
-2. Если много `ytm_outlier`, проверь, не попали ли инструменты с ценой в % в ветку `currency` или наоборот.
-3. Для обычных рублевых облигаций `dirty_price_amt` чаще всего должен быть близок к номиналу (или его разумной доле), а не на порядки меньше/больше.
-
-## Troubleshooting: moex_rates header + price units
-
-### `moex_rates_norm` пустой по `norm_secid` / `norm_isin`
-
-Причина обычно в преамбуле MOEX CSV: заголовок находится не в первой строке.
-Пайплайн теперь:
-
-- читает первые строки как текст (cp1251),
-- находит строку-заголовок по `SECID`/`ISIN`,
-- только потом делает `read_csv` с правильным `skiprows/header`.
-
-В `logs/app.log` проверяй:
-
-- `MOEX rates detected header_row=...`
-- `MOEX rates columns(first30)=...`
-- `MOEX rates notnull: SECID=... ISIN=... NAME=...`
-
-Если после этого `SECID` так и не найден, пайплайн аварийно завершится с явной ошибкой `ValueError` — это ожидаемое защитное поведение.
-
-### Bondization показывает `universe_rows=0`
-
-Теперь universe строится в первую очередь из `moex_rates_norm.norm_secid` (без фильтра по ISIN).
-Если по какой-то причине `norm_secid` пустой, включается fallback из `dohod_norm.norm_isin` как временный `secid`.
-Если даже после fallback universe пустой — выбрасывается `RuntimeError`, потому что дальнейшие расчёты бессмысленны.
-
-### `ytm_calc` “космический”
-
-Пайплайн нормализует единицы до расчетов:
-
-- выбирает `nominal_used` (`dohod_current_nominal` → `moex_facevalue` → `1000`),
-- переводит цену в сумму (`price_unit`: `% от номинала` или `currency`),
-- считает `dirty_price_amt = clean_price_amt + nkd_amt`,
-- ставит предупреждения `dirty_price_too_low`, `bad_dirty_price`, `ytm_outlier`.
-
-Для аудита смотри колонки: `nominal_used`, `price_unit`, `clean_price_amt`, `nkd_amt`, `dirty_price_amt`, `ytm_is_outlier`.
+1. Запустить `python main.py`.
+2. Проверить `logs/app.log` (summary, top-10 YTM, dropped counts, smartlab статус).
+3. Проверить `source/Screener.xlsx` (форматы, подсветка, все колонки).

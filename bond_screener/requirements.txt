@@ -6,3 +6,4 @@ tenacity
 tqdm
 playwright
 lxml
+beautifulsoup4
