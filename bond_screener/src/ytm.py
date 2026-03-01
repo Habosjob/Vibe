@@ -109,6 +109,7 @@ def compute_ytm(
     out["ytm_method"] = "unknown"
     out["warning_text"] = ""
     out["warnings"] = ""
+    out["nominal_used"] = None
     out["price_unit"] = None
     out["clean_price_amt"] = None
     out["nkd_amt"] = None
@@ -119,20 +120,17 @@ def compute_ytm(
     for idx, row in out.iterrows():
         secid = row.get("secid")
         horizon = row.get("target_date")
+        warn: list[str] = []
+
         if pd.isna(horizon):
-            out.at[idx, "warning_text"] = "missing target date"
+            warn.append("missing target date")
+            out.at[idx, "warning_text"] = "; ".join(warn)
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
         if isinstance(horizon, pd.Timestamp):
             horizon = horizon.date()
         if horizon <= today:
-            out.at[idx, "warning_text"] = "target date is not in future"
-            continue
-
-        clean = coalesce(row.get("dohod_dohod_price"), row.get("moex_moex_price"))
-        nkd_raw = coalesce(row.get("dohod_dohod_nkd"), row.get("moex_moex_nkd"))
-        warn = []
-        if clean is None or pd.isna(clean):
-            warn.append("missing price")
+            warn.append("target date is not in future")
             out.at[idx, "warning_text"] = "; ".join(warn)
             out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
@@ -141,6 +139,14 @@ def compute_ytm(
         nominal = float(nominal_src) if nominal_src is not None and pd.notna(nominal_src) else 1000.0
         if nominal_src is None or pd.isna(nominal_src):
             warn.append("nominal_defaulted_1000")
+        out.at[idx, "nominal_used"] = nominal
+
+        clean = coalesce(row.get("dohod_dohod_price"), row.get("moex_moex_price"))
+        if clean is None or pd.isna(clean):
+            warn.append("missing price")
+            out.at[idx, "warning_text"] = "; ".join(warn)
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
+            continue
 
         clean_amt, price_unit = normalize_price(float(clean), nominal)
         if clean_amt is None:
@@ -149,22 +155,24 @@ def compute_ytm(
             out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
 
+        nkd_raw = coalesce(row.get("dohod_dohod_nkd"), row.get("moex_moex_nkd"))
         if nkd_raw is None or pd.isna(nkd_raw):
             nkd_amt = 0.0
             warn.append("nkd_defaulted_zero")
         else:
-            nkd_val = float(nkd_raw)
-            if nominal > 0 and 0 <= nkd_val <= 20 and float(clean) <= 200:
-                nkd_amt = (nkd_val / 100.0) * nominal
-                warn.append("nkd_assumed_percent")
-            else:
-                nkd_amt = nkd_val
+            nkd_amt = float(nkd_raw)
+            if price_unit == "percent_of_nominal" and nkd_amt <= 20:
+                warn.append("warning_if_suspicious_nkd")
 
         dirty = float(clean_amt) + float(nkd_amt)
         out.at[idx, "price_unit"] = price_unit
         out.at[idx, "clean_price_amt"] = clean_amt
         out.at[idx, "nkd_amt"] = nkd_amt
         out.at[idx, "dirty_price_amt"] = dirty
+
+        if nominal > 0 and dirty < 0.05 * nominal:
+            warn.append("dirty_price_too_low")
+
         if dirty <= 0:
             warn.append("bad_dirty_price")
             out.at[idx, "warning_text"] = "; ".join(warn)
@@ -191,8 +199,9 @@ def compute_ytm(
             ppy = _payments_per_year(row, cpn)
             coupon_rate = coalesce(row.get("dohod_dohod_coupon_rate"), cpn["rate"].dropna().mean())
             if coupon_rate is None:
-                out.at[idx, "warning_text"] = "perpetual without coupon rate"
+                warn.append("perpetual without coupon rate")
                 out.at[idx, "ytm_method"] = "perpetual_compounded"
+                out.at[idx, "warning_text"] = "; ".join(warn)
                 out.at[idx, "warnings"] = out.at[idx, "warning_text"]
                 continue
             periodic = (outstanding * float(coupon_rate) / 100.0 / ppy) / dirty
@@ -292,13 +301,6 @@ def compute_ytm(
         out.at[idx, "ytm_method"] = "fixed_cashflow"
         out.at[idx, "warning_text"] = "; ".join(warn)
         out.at[idx, "warnings"] = out.at[idx, "warning_text"]
-
-        ytm_val = out.at[idx, "ytm_calc"]
-        if ytm_val is not None and pd.notna(ytm_val) and (ytm_val > 2.0 or ytm_val < -0.5):
-            out.at[idx, "ytm_is_outlier"] = True
-            extra = "ytm_outlier"
-            out.at[idx, "warning_text"] = "; ".join([w for w in [out.at[idx, "warning_text"], extra] if w])
-            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
 
     outlier_mask = out["ytm_calc"].notna() & ((out["ytm_calc"] > 2.0) | (out["ytm_calc"] < -0.5))
     out.loc[outlier_mask, "ytm_is_outlier"] = True

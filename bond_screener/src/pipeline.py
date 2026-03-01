@@ -32,7 +32,7 @@ class Pipeline:
         t0 = time.time()
         self.logger.info("Pipeline started")
 
-        moex_raw, moex_norm = load_moex_rates(self.config, self.cache)
+        moex_raw, moex_norm = load_moex_rates(self.config, self.cache, self.logger)
         moex_sample_cols = [c for c in ["norm_isin", "norm_secid", "norm_name"] if c in moex_norm.columns]
         self.logger.info(
             "Loaded moex_rates_norm rows=%s isin_notnull=%s secid_notnull=%s sample=%s",
@@ -62,24 +62,15 @@ class Pipeline:
         self.db.write_df("market_zcyc", m_zcyc)
 
         universe_src = moex_norm[["norm_isin", "norm_secid"]].rename(columns={"norm_isin": "isin", "norm_secid": "secid"}).copy()
-        inter = set(moex_norm.get("norm_isin", pd.Series(dtype=object)).dropna()) & set(dohod_norm.get("norm_isin", pd.Series(dtype=object)).dropna())
-        universe = universe_src[universe_src["secid"].notna()].drop_duplicates()
+        universe = universe_src[universe_src["secid"].notna() & (universe_src["secid"].astype(str).str.strip() != "")].drop_duplicates()
         reason = "moex_norm_secid"
-        if inter:
-            inter_universe = universe[universe["isin"].isin(inter)]
-            if not inter_universe.empty:
-                universe = inter_universe
-                reason = "isin_intersection"
-            else:
-                self.logger.warning("ISIN intersection exists but secid universe by intersection is empty; fallback to full moex SECID universe")
-        elif not universe.empty:
-            self.logger.warning("ISIN intersection empty; fallback to full moex SECID universe")
 
         if universe.empty:
-            fallback = universe_src[universe_src["isin"].notna()].copy()
+            fallback = dohod_norm[["norm_isin"]].rename(columns={"norm_isin": "isin"}).copy()
+            fallback = fallback[fallback["isin"].notna() & (fallback["isin"].astype(str).str.strip() != "")]
             fallback["secid"] = fallback["isin"]
-            universe = fallback.drop_duplicates()
-            reason = "isin_as_secid_fallback"
+            universe = fallback[["isin", "secid"]].drop_duplicates()
+            reason = "dohod_isin_as_secid_fallback"
 
         fallback_count = int(((universe["secid"] == universe["isin"]) & universe["isin"].notna()).sum()) if not universe.empty else 0
         self.logger.info(
@@ -91,9 +82,7 @@ class Pipeline:
             universe["secid"].dropna().astype(str).head(10).tolist() if not universe.empty else [],
         )
         if universe.empty:
-            self.logger.error(
-                "Bondization universe is empty. Possible reasons: missing moex norm_secid and missing norm_isin fallback after filters/intersection"
-            )
+            raise RuntimeError("Bondization universe is empty. Check moex_rates_norm.norm_secid parsing.")
 
         coupons_df, amort_df = load_bondization(
             universe,
@@ -131,7 +120,7 @@ class Pipeline:
         self.logger.info(
             "Self-check top ytm rows: %s",
             result.sort_values("ytm_calc", ascending=False, na_position="last")[
-                [c for c in ["isin", "moex_norm_name", "ytm_calc", "price_unit", "dirty_price_amt", "dohod_dohod_current_nominal", "target_date"] if c in result.columns]
+                [c for c in ["isin", "secid", "moex_norm_name", "ytm_calc", "dirty_price_amt", "nominal_used", "target_date", "ytm_method"] if c in result.columns]
             ].head(10).to_dict("records"),
         )
         self.logger.info(
@@ -140,6 +129,8 @@ class Pipeline:
             int(result.get("days_to_amort", pd.Series(dtype=object)).notna().sum()),
             int((result.get("floater_base", pd.Series(dtype=object)).fillna("UNKNOWN") != "UNKNOWN").sum()),
         )
+        if int(result.get("has_amortization", pd.Series(dtype=bool)).fillna(False).sum()) == 0 and len(result) > 0:
+            self.logger.warning("Self-check suspicious: has_amortization_true is 0 after non-empty bondization universe")
         self.logger.info(
             "Floater base distribution: %s",
             result.get("floater_base", pd.Series(dtype=object)).fillna("UNKNOWN").value_counts().to_dict(),
