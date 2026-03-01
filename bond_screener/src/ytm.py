@@ -43,6 +43,24 @@ def _safe_zero_coupon_yield(outstanding: float, dirty: float, years: float) -> f
         return None
 
 
+def normalize_price(clean_price_raw: float | None, nominal: float | None) -> tuple[float | None, str | None]:
+    if clean_price_raw is None or pd.isna(clean_price_raw):
+        return None, None
+    clean_price = float(clean_price_raw)
+    if nominal is not None and nominal > 0 and 0 < clean_price <= 200:
+        return (clean_price / 100.0) * nominal, "percent_of_nominal"
+    return clean_price, "currency"
+
+
+def _normalize_floater_base(*texts: str) -> str:
+    txt = " ".join(str(t or "") for t in texts).upper()
+    if "RUONIA" in txt:
+        return "RUONIA"
+    if any(x in txt for x in ["КБД", "ZCYC", "G-CURVE", "ОФЗ"]):
+        return "ZCYC"
+    return "UNKNOWN"
+
+
 def _bond_kind(row: pd.Series) -> str:
     txt = " ".join(
         str(coalesce(row.get("dohod_dohod_base_index"), ""))
@@ -90,6 +108,13 @@ def compute_ytm(
     out["yield_perpetual_compounded"] = None
     out["ytm_method"] = "unknown"
     out["warning_text"] = ""
+    out["warnings"] = ""
+    out["price_unit"] = None
+    out["clean_price_amt"] = None
+    out["nkd_amt"] = None
+    out["dirty_price_amt"] = None
+    out["ytm_is_outlier"] = False
+    out["floater_base"] = "UNKNOWN"
 
     for idx, row in out.iterrows():
         secid = row.get("secid")
@@ -104,24 +129,53 @@ def compute_ytm(
             continue
 
         clean = coalesce(row.get("dohod_dohod_price"), row.get("moex_moex_price"))
-        nkd = coalesce(row.get("dohod_dohod_nkd"), row.get("moex_moex_nkd"), 0.0)
+        nkd_raw = coalesce(row.get("dohod_dohod_nkd"), row.get("moex_moex_nkd"))
         warn = []
-        if clean is None:
+        if clean is None or pd.isna(clean):
             warn.append("missing price")
             out.at[idx, "warning_text"] = "; ".join(warn)
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
-        if row.get("dohod_dohod_nkd") is None and row.get("moex_moex_nkd") is None:
-            warn.append("nkd defaulted to zero")
 
-        dirty = float(clean) + float(nkd or 0.0)
-        if dirty <= 0:
-            warn.append("non-positive dirty price")
+        nominal_src = coalesce(row.get("dohod_dohod_current_nominal"), row.get("moex_norm_facevalue"))
+        nominal = float(nominal_src) if nominal_src is not None and pd.notna(nominal_src) else 1000.0
+        if nominal_src is None or pd.isna(nominal_src):
+            warn.append("nominal_defaulted_1000")
+
+        clean_amt, price_unit = normalize_price(float(clean), nominal)
+        if clean_amt is None:
+            warn.append("bad_clean_price")
             out.at[idx, "warning_text"] = "; ".join(warn)
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
 
-        nominal = float(coalesce(row.get("dohod_dohod_current_nominal"), row.get("moex_norm_facevalue"), 1000.0))
-        if row.get("dohod_dohod_current_nominal") is None and row.get("moex_norm_facevalue") is None:
-            warn.append("nominal defaulted to 1000")
+        if nkd_raw is None or pd.isna(nkd_raw):
+            nkd_amt = 0.0
+            warn.append("nkd_defaulted_zero")
+        else:
+            nkd_val = float(nkd_raw)
+            if nominal > 0 and 0 <= nkd_val <= 20 and float(clean) <= 200:
+                nkd_amt = (nkd_val / 100.0) * nominal
+                warn.append("nkd_assumed_percent")
+            else:
+                nkd_amt = nkd_val
+
+        dirty = float(clean_amt) + float(nkd_amt)
+        out.at[idx, "price_unit"] = price_unit
+        out.at[idx, "clean_price_amt"] = clean_amt
+        out.at[idx, "nkd_amt"] = nkd_amt
+        out.at[idx, "dirty_price_amt"] = dirty
+        if dirty <= 0:
+            warn.append("bad_dirty_price")
+            out.at[idx, "warning_text"] = "; ".join(warn)
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
+            continue
+
+        out.at[idx, "floater_base"] = _normalize_floater_base(
+            row.get("dohod_dohod_base_index"),
+            row.get("dohod_NAME"),
+            row.get("moex_norm_name"),
+        )
 
         cpn = coupons_df[coupons_df["secid"] == secid].copy() if not coupons_df.empty else pd.DataFrame(columns=["coupondate", "value", "rate"])
         amo = amort_df[amort_df["secid"] == secid].copy() if not amort_df.empty else pd.DataFrame(columns=["amortdate", "value"])
@@ -139,15 +193,19 @@ def compute_ytm(
             if coupon_rate is None:
                 out.at[idx, "warning_text"] = "perpetual without coupon rate"
                 out.at[idx, "ytm_method"] = "perpetual_compounded"
+                out.at[idx, "warnings"] = out.at[idx, "warning_text"]
                 continue
             periodic = (outstanding * float(coupon_rate) / 100.0 / ppy) / dirty
             out.at[idx, "yield_perpetual_compounded"] = (1 + periodic) ** ppy - 1
             out.at[idx, "ytm_method"] = "perpetual_compounded"
             out.at[idx, "warning_text"] = "; ".join(warn)
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
 
         if cpn.empty or cpn["value"].fillna(0).sum() == 0:
-            years = (horizon - today).days / 365.0
+            if outstanding <= 0:
+                warn.append("bad_redemption")
+            years = max((horizon - today).days / 365.0, 1.0 / 365.0)
             y = _safe_zero_coupon_yield(outstanding, dirty, years)
             if y is None:
                 warn.append("zero-coupon formula invalid or overflow")
@@ -155,6 +213,7 @@ def compute_ytm(
             out.at[idx, "ytm_calc"] = y
             out.at[idx, "ytm_method"] = "zero_coupon"
             out.at[idx, "warning_text"] = "; ".join(warn)
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
 
         if kind == "floater":
@@ -163,6 +222,7 @@ def compute_ytm(
                 warn.append("missing floater spread")
                 out.at[idx, "ytm_method"] = "floater_scenario"
                 out.at[idx, "warning_text"] = "; ".join(warn)
+                out.at[idx, "warnings"] = out.at[idx, "warning_text"]
                 continue
             spread = float(spread)
             future_dates = sorted([d for d in cpn["coupondate"].dropna() if d <= horizon and d > today])
@@ -194,6 +254,7 @@ def compute_ytm(
             out.at[idx, "ytm_calc"] = _xirr(flows, today)
             out.at[idx, "ytm_method"] = "floater_scenario"
             out.at[idx, "warning_text"] = "; ".join(warn)
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
 
         if kind == "linker":
@@ -213,6 +274,7 @@ def compute_ytm(
             out.at[idx, "ytm_calc"] = _xirr(flows, today) if len(flows) > 1 else None
             out.at[idx, "ytm_method"] = "linker_scenario"
             out.at[idx, "warning_text"] = "; ".join(warn)
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
 
         for _, r in cpn.iterrows():
@@ -229,5 +291,20 @@ def compute_ytm(
         out.at[idx, "ytm_calc"] = _xirr(flows, today)
         out.at[idx, "ytm_method"] = "fixed_cashflow"
         out.at[idx, "warning_text"] = "; ".join(warn)
+        out.at[idx, "warnings"] = out.at[idx, "warning_text"]
+
+        ytm_val = out.at[idx, "ytm_calc"]
+        if ytm_val is not None and pd.notna(ytm_val) and (ytm_val > 2.0 or ytm_val < -0.5):
+            out.at[idx, "ytm_is_outlier"] = True
+            extra = "ytm_outlier"
+            out.at[idx, "warning_text"] = "; ".join([w for w in [out.at[idx, "warning_text"], extra] if w])
+            out.at[idx, "warnings"] = out.at[idx, "warning_text"]
+
+    outlier_mask = out["ytm_calc"].notna() & ((out["ytm_calc"] > 2.0) | (out["ytm_calc"] < -0.5))
+    out.loc[outlier_mask, "ytm_is_outlier"] = True
+    out.loc[outlier_mask, "warning_text"] = out.loc[outlier_mask, "warning_text"].map(
+        lambda v: "; ".join([w for w in [str(v).strip("; "), "ytm_outlier"] if w and w != "nan"])
+    )
+    out.loc[outlier_mask, "warnings"] = out.loc[outlier_mask, "warning_text"]
 
     return out

@@ -61,3 +61,19 @@ python main.py
 - `perpetual_compounded`: капитализированная купонная доходность для perpetual/subord.
 
 `warning_text` заполняется для всех бумаг, если были fallback/пропуски данных.
+
+## Как понять, что единицы цены корректны
+
+Пайплайн теперь явно нормализует цену и НКД в валюту номинала перед расчетом YTM и сохраняет дебаг-колонки:
+
+- `price_unit`: как интерпретирована clean price (`percent_of_nominal` или `currency`).
+- `clean_price_amt`: clean price после перевода в сумму в валюте номинала.
+- `nkd_amt`: НКД в той же валюте (с эвристикой для редкого случая НКД в %).
+- `dirty_price_amt`: итоговая dirty price = `clean_price_amt + nkd_amt`.
+- `warnings` / `warning_text`: сообщения о fallback и эвристиках (`nominal_defaulted_1000`, `nkd_assumed_percent`, `ytm_outlier` и т.д.).
+
+Быстрая проверка в `logs/app.log`:
+
+1. Смотри блок `Self-check top ytm rows` — там топ-10 по `ytm_calc` вместе с `price_unit`, `dirty_price_amt` и номиналом.
+2. Если много `ytm_outlier`, проверь, не попали ли инструменты с ценой в % в ветку `currency` или наоборот.
+3. Для обычных рублевых облигаций `dirty_price_amt` чаще всего должен быть близок к номиналу (или его разумной доле), а не на порядки меньше/больше.
