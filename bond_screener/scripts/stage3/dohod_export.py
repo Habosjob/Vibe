@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html as html_lib
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -22,6 +24,25 @@ from net.http_client import HttpClient
 
 ISIN_RU_RE = re.compile(r"^RU[A-Z0-9]{10}$")
 
+
+
+FIELD_ALIASES: dict[str, list[str]] = {
+    "Название": ["name", "bond_name", "security_name", "shortname", "fullname", "title"],
+    "Статус": ["status", "bond_status", "state", "trade_status"],
+    "Валюта": ["currency", "currency_id", "curr", "face_unit", "valuta"],
+    "Дата размещения": ["issue_date", "issueDate", "issuedate", "placement_date", "start_date"],
+    "Дата погашения": ["maturity_date", "maturity", "maturityDate", "matdate", "redemption_date", "end_date"],
+    "Доходность": ["ytm", "yield", "yield_to_maturity", "effective_yield"],
+    "Цена": ["price", "price_last", "last_price", "close", "last"],
+    "НКД": ["nkd", "aci", "accrued_coupon_income"],
+    "Текущий номинал": ["current_nominal", "nominal", "facevalue", "face_value"],
+    "Частота купона": ["coupon_freq_per_year", "coupon_frequency", "coupons_per_year", "frequency"],
+    "Тип купона": ["coupon_type", "coupon_kind", "couponType"],
+    "Формула купона": ["coupon_formula", "coupon_formula_text", "formula"],
+    "Ближайшая выплата": ["next_coupon_date", "next_payment_date", "next_coupon", "coupon_date"],
+    "Внутренний рейтинг": ["internal_rating", "rating", "credit_rating"],
+    "Ликвидность": ["liquidity", "liquidity_score", "liq_score"],
+}
 
 @dataclass(frozen=True)
 class DohodStats:
@@ -51,12 +72,21 @@ class DohodExporter:
         self._init_checkpoint_rows(candidates)
 
         now_utc = datetime.now(timezone.utc)
+        checkpoint_map = self._load_checkpoint_map(candidates)
         eligible: list[str] = []
         skipped_no_isin = 0
         invalid_isin = 0
         skipped_fresh = 0
 
-        for isin in candidates:
+        for isin in tqdm(
+            candidates,
+            desc="Stage3/DOHOD prepare",
+            unit="isin",
+            dynamic_ncols=True,
+            position=max(0, self.cfg.progressbar_position),
+            leave=False,
+            mininterval=0.2,
+        ):
             if not isin:
                 skipped_no_isin += 1
                 self.logger.info("skip candidate without isin")
@@ -65,7 +95,7 @@ class DohodExporter:
                 invalid_isin += 1
                 self.logger.warning("skip invalid isin=%s", isin)
                 continue
-            if self._is_fresh_done(isin, now_utc):
+            if self._is_fresh_done(checkpoint_map.get(isin), now_utc):
                 skipped_fresh += 1
                 continue
             eligible.append(isin)
@@ -138,13 +168,30 @@ class DohodExporter:
                 payload,
             )
 
-    def _is_fresh_done(self, isin: str, now_utc: datetime) -> bool:
+    def _load_checkpoint_map(self, isins: list[str]) -> dict[str, dict[str, str | None]]:
+        isins_clean = [isin for isin in isins if isin]
+        if not isins_clean:
+            return {}
+
+        placeholders = ", ".join("?" for _ in isins_clean)
+        query = f"""
+            SELECT isin, status, fetched_at
+            FROM dohod_export_items
+            WHERE isin IN ({placeholders})
+        """
         with get_connection(self.settings.paths.db_file) as conn:
-            row = conn.execute("SELECT status, fetched_at FROM dohod_export_items WHERE isin = ?", (isin,)).fetchone()
-        if not row or row["status"] != "done" or not row["fetched_at"]:
+            rows = conn.execute(query, isins_clean).fetchall()
+        return {str(r["isin"]): {"status": r["status"], "fetched_at": r["fetched_at"]} for r in rows}
+
+    def _is_fresh_done(self, checkpoint: dict[str, str | None] | None, now_utc: datetime) -> bool:
+        if not checkpoint:
+            return False
+        status = checkpoint.get("status")
+        fetched_at_raw = checkpoint.get("fetched_at")
+        if status != "done" or not fetched_at_raw:
             return False
         try:
-            fetched_at = datetime.fromisoformat(row["fetched_at"])
+            fetched_at = datetime.fromisoformat(fetched_at_raw)
         except ValueError:
             return False
         return now_utc - fetched_at < timedelta(hours=max(0, self.cfg.ttl_hours))
@@ -242,6 +289,9 @@ class DohodExporter:
     def _parse_profile(self, isin: str, html: str) -> dict[str, Any]:
         soup = BeautifulSoup(html, "html.parser")
         text_map = self._extract_label_values(soup)
+        fallback_map = self._extract_structured_fallback(html)
+        for key, value in fallback_map.items():
+            text_map.setdefault(key, value)
         warnings: list[str] = []
 
         def pick(*keys: str) -> str | None:
@@ -271,6 +321,7 @@ class DohodExporter:
         fetched_at = utc_now_iso()
         source_hash = hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest()
         warning_text = "; ".join(dict.fromkeys(warnings)) if warnings else None
+        self._log_parse_diagnostics(isin, warnings, text_map, html)
 
         return {
             "isin": isin,
@@ -370,7 +421,12 @@ class DohodExporter:
             if len(cells) < 2:
                 continue
             key = self._normalize_label(cells[0].get_text(" ", strip=True))
-            val = cells[1].get_text(" ", strip=True)
+            val = ""
+            for cell in cells[1:]:
+                candidate = cell.get_text(" ", strip=True)
+                if candidate:
+                    val = candidate
+                    break
             if key and val and key not in mapping:
                 mapping[key] = val
 
@@ -439,6 +495,129 @@ class DohodExporter:
             return None
         match = re.search(r"-?\d+", value)
         return int(match.group(0)) if match else None
+
+
+    def _extract_structured_fallback(self, html: str) -> dict[str, str]:
+        raw = html_lib.unescape(html)
+        mapping: dict[str, str] = {}
+
+        script_json = self._extract_json_from_scripts(raw)
+        for label, aliases in FIELD_ALIASES.items():
+            for alias in aliases:
+                value = self._pick_from_json_obj(script_json, alias)
+                if value:
+                    mapping[self._normalize_label(label)] = value
+                    break
+
+        regex_map = self._extract_aliases_via_regex(raw)
+        for label, value in regex_map.items():
+            mapping.setdefault(label, value)
+
+        return mapping
+
+    def _extract_json_from_scripts(self, html: str) -> list[Any]:
+        out: list[Any] = []
+        for match in re.finditer(r"<script[^>]*>(.*?)</script>", html, flags=re.DOTALL | re.IGNORECASE):
+            body = match.group(1).strip()
+            if not body:
+                continue
+            for candidate in self._extract_json_candidates(body):
+                try:
+                    out.append(json.loads(candidate))
+                except json.JSONDecodeError:
+                    continue
+        return out
+
+    @staticmethod
+    def _extract_json_candidates(script_body: str) -> list[str]:
+        candidates: list[str] = []
+        stripped = script_body.strip().strip(";")
+        if stripped.startswith("{") or stripped.startswith("["):
+            candidates.append(stripped)
+
+        for regex in (
+            r"(?:window\.[A-Za-z0-9_$.]+|[A-Za-z0-9_$.]+)\s*=\s*(\{.*?\}|\[.*?\])\s*;",
+            r"JSON\.parse\((\".*?\")\)",
+        ):
+            for m in re.finditer(regex, script_body, flags=re.DOTALL):
+                payload = m.group(1)
+                if payload.startswith('"'):
+                    try:
+                        payload = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                candidates.append(payload.strip())
+        return candidates
+
+    def _pick_from_json_obj(self, objects: list[Any], alias: str) -> str | None:
+        alias_norm = alias.lower()
+        for obj in objects:
+            found = self._find_key_in_obj(obj, alias_norm)
+            if found not in (None, "", [], {}):
+                return self._value_to_text(found)
+        return None
+
+    def _find_key_in_obj(self, node: Any, alias_lower: str) -> Any:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                key = str(k).lower()
+                if key == alias_lower or key.endswith(f".{alias_lower}"):
+                    return v
+                found = self._find_key_in_obj(v, alias_lower)
+                if found not in (None, "", [], {}):
+                    return found
+        elif isinstance(node, list):
+            for item in node:
+                found = self._find_key_in_obj(item, alias_lower)
+                if found not in (None, "", [], {}):
+                    return found
+        return None
+
+    def _extract_aliases_via_regex(self, raw_html: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for label, aliases in FIELD_ALIASES.items():
+            for alias in aliases:
+                pattern = re.compile(
+                    rf'["\']{re.escape(alias)}["\']\s*:\s*(?:["\']([^"\']{{1,120}})["\']|(-?\d+(?:[.,]\d+)?))',
+                    flags=re.IGNORECASE,
+                )
+                m = pattern.search(raw_html)
+                if not m:
+                    continue
+                value = (m.group(1) or m.group(2) or "").strip()
+                if value:
+                    out[self._normalize_label(label)] = value
+                    break
+        return out
+
+    @staticmethod
+    def _value_to_text(value: Any) -> str:
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in ("value", "text", "name"):
+                v = value.get(key)
+                if isinstance(v, (str, int, float)) and str(v).strip():
+                    return str(v).strip()
+        return ""
+
+    def _log_parse_diagnostics(self, isin: str, warnings: list[str], text_map: dict[str, str], html: str) -> None:
+        threshold = max(0, self.cfg.parse_debug_missing_threshold)
+        if len(warnings) < threshold:
+            return
+
+        keys_preview = ", ".join(sorted(text_map.keys())[:15])
+        snippet_limit = max(200, self.cfg.parse_debug_html_snippet_chars)
+        snippet = re.sub(r"\s+", " ", html)[:snippet_limit]
+        self.logger.warning(
+            "DOHOD parse degraded isin=%s missing=%s extracted_keys=%s html_snippet=%s",
+            isin,
+            len(warnings),
+            keys_preview or "<empty>",
+            snippet,
+        )
 
     def _export_debug_if_needed(self) -> None:
         if not should_export(self.settings, "stage3"):

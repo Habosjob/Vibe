@@ -82,6 +82,8 @@ class Stage3DohodSettings:
     base_url: str
     user_agent: str
     use_playwright: bool
+    parse_debug_missing_threshold: int
+    parse_debug_html_snippet_chars: int
 
 
 @dataclass(frozen=True)
@@ -194,6 +196,8 @@ def load_settings(project_root: Path | None = None) -> AppSettings:
                     raw.get("stage3", {}).get("dohod", {}).get("user_agent", "Mozilla/5.0 (compatible; bond_screener/1.0)")
                 ),
                 use_playwright=bool(raw.get("stage3", {}).get("dohod", {}).get("use_playwright", False)),
+                parse_debug_missing_threshold=int(raw.get("stage3", {}).get("dohod", {}).get("parse_debug_missing_threshold", 5)),
+                parse_debug_html_snippet_chars=int(raw.get("stage3", {}).get("dohod", {}).get("parse_debug_html_snippet_chars", 1200)),
             ),
         ),
         paths=paths,

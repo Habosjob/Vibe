@@ -63,3 +63,5 @@ stage3:
     base_url: "https://analytics.dohod.ru/bond/{isin}"
     user_agent: "Mozilla/5.0 (compatible; bond_screener/1.0)"
     use_playwright: false
+    parse_debug_missing_threshold: 5
+    parse_debug_html_snippet_chars: 1200
