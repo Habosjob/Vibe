@@ -51,12 +51,21 @@ class DohodExporter:
         self._init_checkpoint_rows(candidates)
 
         now_utc = datetime.now(timezone.utc)
+        checkpoint_map = self._load_checkpoint_map(candidates)
         eligible: list[str] = []
         skipped_no_isin = 0
         invalid_isin = 0
         skipped_fresh = 0
 
-        for isin in candidates:
+        for isin in tqdm(
+            candidates,
+            desc="Stage3/DOHOD prepare",
+            unit="isin",
+            dynamic_ncols=True,
+            position=max(0, self.cfg.progressbar_position),
+            leave=False,
+            mininterval=0.2,
+        ):
             if not isin:
                 skipped_no_isin += 1
                 self.logger.info("skip candidate without isin")
@@ -65,7 +74,7 @@ class DohodExporter:
                 invalid_isin += 1
                 self.logger.warning("skip invalid isin=%s", isin)
                 continue
-            if self._is_fresh_done(isin, now_utc):
+            if self._is_fresh_done(checkpoint_map.get(isin), now_utc):
                 skipped_fresh += 1
                 continue
             eligible.append(isin)
@@ -138,13 +147,30 @@ class DohodExporter:
                 payload,
             )
 
-    def _is_fresh_done(self, isin: str, now_utc: datetime) -> bool:
+    def _load_checkpoint_map(self, isins: list[str]) -> dict[str, dict[str, str | None]]:
+        isins_clean = [isin for isin in isins if isin]
+        if not isins_clean:
+            return {}
+
+        placeholders = ", ".join("?" for _ in isins_clean)
+        query = f"""
+            SELECT isin, status, fetched_at
+            FROM dohod_export_items
+            WHERE isin IN ({placeholders})
+        """
         with get_connection(self.settings.paths.db_file) as conn:
-            row = conn.execute("SELECT status, fetched_at FROM dohod_export_items WHERE isin = ?", (isin,)).fetchone()
-        if not row or row["status"] != "done" or not row["fetched_at"]:
+            rows = conn.execute(query, isins_clean).fetchall()
+        return {str(r["isin"]): {"status": r["status"], "fetched_at": r["fetched_at"]} for r in rows}
+
+    def _is_fresh_done(self, checkpoint: dict[str, str | None] | None, now_utc: datetime) -> bool:
+        if not checkpoint:
+            return False
+        status = checkpoint.get("status")
+        fetched_at_raw = checkpoint.get("fetched_at")
+        if status != "done" or not fetched_at_raw:
             return False
         try:
-            fetched_at = datetime.fromisoformat(row["fetched_at"])
+            fetched_at = datetime.fromisoformat(fetched_at_raw)
         except ValueError:
             return False
         return now_utc - fetched_at < timedelta(hours=max(0, self.cfg.ttl_hours))
@@ -370,7 +396,12 @@ class DohodExporter:
             if len(cells) < 2:
                 continue
             key = self._normalize_label(cells[0].get_text(" ", strip=True))
-            val = cells[1].get_text(" ", strip=True)
+            val = ""
+            for cell in cells[1:]:
+                candidate = cell.get_text(" ", strip=True)
+                if candidate:
+                    val = candidate
+                    break
             if key and val and key not in mapping:
                 mapping[key] = val
 
