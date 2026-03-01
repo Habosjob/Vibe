@@ -180,7 +180,15 @@ class MoexExporter:
         client = HttpClient(self.settings, HttpCache(self.settings.paths.cache_http_dir))
         failed = 0
         try:
-            with tqdm(total=len(items), desc="Stage3/MOEX export", unit="sec", dynamic_ncols=True) as pbar:
+            with tqdm(
+                total=len(items),
+                desc="Stage3/MOEX export",
+                unit="sec",
+                dynamic_ncols=True,
+                position=max(0, self.cfg.moex.progressbar_position),
+                leave=True,
+                mininterval=0.2,
+            ) as pbar:
                 for start in range(0, len(items), max(1, self.cfg.batch_size)):
                     batch = items[start : start + max(1, self.cfg.batch_size)]
                     results = await asyncio.gather(*[self._process_one(client, sem, r) for r in batch], return_exceptions=True)

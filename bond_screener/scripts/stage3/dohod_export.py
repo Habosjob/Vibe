@@ -155,7 +155,15 @@ class DohodExporter:
         try:
             done = 0
             failed = 0
-            with tqdm(total=len(isins), desc="Stage3/DOHOD export", unit="isin", dynamic_ncols=True) as pbar:
+            with tqdm(
+                total=len(isins),
+                desc="Stage3/DOHOD export",
+                unit="isin",
+                dynamic_ncols=True,
+                position=max(0, self.cfg.progressbar_position),
+                leave=True,
+                mininterval=0.2,
+            ) as pbar:
                 results = await asyncio.gather(
                     *[self._process_one(client, semaphore, isin) for isin in isins],
                     return_exceptions=True,

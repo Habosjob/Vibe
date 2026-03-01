@@ -43,6 +43,7 @@ stage3:
     enabled: true
     ttl_hours: 6
     concurrency: 20
+    progressbar_position: 0
     engine: "stock"
     market: "bonds"
     boards: []
@@ -56,6 +57,7 @@ stage3:
     enabled: true
     ttl_hours: 6
     concurrency: 5
+    progressbar_position: 1
     min_delay_s: 0.3
     page_timeout_s: 30
     base_url: "https://analytics.dohod.ru/bond/{isin}"

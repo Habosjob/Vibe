@@ -63,6 +63,7 @@ class Stage3MoexSettings:
     enabled: bool
     ttl_hours: int
     concurrency: int
+    progressbar_position: int
     engine: str
     market: str
     boards: list[str]
@@ -75,6 +76,7 @@ class Stage3DohodSettings:
     enabled: bool
     ttl_hours: int
     concurrency: int
+    progressbar_position: int
     min_delay_s: float
     page_timeout_s: float
     base_url: str
@@ -168,6 +170,7 @@ def load_settings(project_root: Path | None = None) -> AppSettings:
                 enabled=bool(raw.get("stage3", {}).get("moex", {}).get("enabled", True)),
                 ttl_hours=int(raw.get("stage3", {}).get("moex", {}).get("ttl_hours", raw.get("stage3", {}).get("ttl_hours", 6))),
                 concurrency=int(raw.get("stage3", {}).get("moex", {}).get("concurrency", 20)),
+                progressbar_position=int(raw.get("stage3", {}).get("moex", {}).get("progressbar_position", 0)),
                 engine=str(raw.get("stage3", {}).get("moex", {}).get("engine", "stock")),
                 market=str(raw.get("stage3", {}).get("moex", {}).get("market", "bonds")),
                 boards=list(raw.get("stage3", {}).get("moex", {}).get("boards", [])),
@@ -183,6 +186,7 @@ def load_settings(project_root: Path | None = None) -> AppSettings:
                 enabled=bool(raw.get("stage3", {}).get("dohod", {}).get("enabled", True)),
                 ttl_hours=int(raw.get("stage3", {}).get("dohod", {}).get("ttl_hours", raw.get("stage3", {}).get("ttl_hours", 6))),
                 concurrency=int(raw.get("stage3", {}).get("dohod", {}).get("concurrency", 5)),
+                progressbar_position=int(raw.get("stage3", {}).get("dohod", {}).get("progressbar_position", 1)),
                 min_delay_s=float(raw.get("stage3", {}).get("dohod", {}).get("min_delay_s", 0.3)),
                 page_timeout_s=float(raw.get("stage3", {}).get("dohod", {}).get("page_timeout_s", 30)),
                 base_url=str(raw.get("stage3", {}).get("dohod", {}).get("base_url", "https://analytics.dohod.ru/bond/{isin}")),
