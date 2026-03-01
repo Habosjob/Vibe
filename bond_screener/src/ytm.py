@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 from typing import Dict, List, Tuple
 
@@ -27,6 +28,19 @@ def _xirr(flows: List[Tuple[date, float]], start: date) -> float | None:
         else:
             hi = mid
     return mid
+
+
+def _safe_zero_coupon_yield(outstanding: float, dirty: float, years: float) -> float | None:
+    if dirty <= 0 or outstanding <= 0:
+        return None
+    years = max(years, 1.0 / 365.0)
+    ratio = outstanding / dirty
+    if ratio <= 0:
+        return None
+    try:
+        return math.exp(math.log(ratio) / years) - 1.0
+    except (OverflowError, ValueError, ZeroDivisionError):
+        return None
 
 
 def _bond_kind(row: pd.Series) -> str:
@@ -57,7 +71,14 @@ def _payments_per_year(row: pd.Series, coupons: pd.DataFrame) -> float:
     return 2.0
 
 
-def compute_ytm(merged: pd.DataFrame, coupons_df: pd.DataFrame, amort_df: pd.DataFrame, market_ruonia: pd.DataFrame, market_zcyc: pd.DataFrame, config: Dict) -> pd.DataFrame:
+def compute_ytm(
+    merged: pd.DataFrame,
+    coupons_df: pd.DataFrame,
+    amort_df: pd.DataFrame,
+    market_ruonia: pd.DataFrame,
+    market_zcyc: pd.DataFrame,
+    config: Dict,
+) -> pd.DataFrame:
     today = date.today()
     ruonia_today = float(market_ruonia["ruonia_percent"].iloc[0]) if not market_ruonia.empty else None
     key_vals = config["scenario"]["key_rate_avg_percent"]
@@ -78,6 +99,9 @@ def compute_ytm(merged: pd.DataFrame, coupons_df: pd.DataFrame, amort_df: pd.Dat
             continue
         if isinstance(horizon, pd.Timestamp):
             horizon = horizon.date()
+        if horizon <= today:
+            out.at[idx, "warning_text"] = "target date is not in future"
+            continue
 
         clean = coalesce(row.get("dohod_dohod_price"), row.get("moex_moex_price"))
         nkd = coalesce(row.get("dohod_dohod_nkd"), row.get("moex_moex_nkd"), 0.0)
@@ -88,7 +112,12 @@ def compute_ytm(merged: pd.DataFrame, coupons_df: pd.DataFrame, amort_df: pd.Dat
             continue
         if row.get("dohod_dohod_nkd") is None and row.get("moex_moex_nkd") is None:
             warn.append("nkd defaulted to zero")
+
         dirty = float(clean) + float(nkd or 0.0)
+        if dirty <= 0:
+            warn.append("non-positive dirty price")
+            out.at[idx, "warning_text"] = "; ".join(warn)
+            continue
 
         nominal = float(coalesce(row.get("dohod_dohod_current_nominal"), row.get("moex_norm_facevalue"), 1000.0))
         if row.get("dohod_dohod_current_nominal") is None and row.get("moex_norm_facevalue") is None:
@@ -118,8 +147,10 @@ def compute_ytm(merged: pd.DataFrame, coupons_df: pd.DataFrame, amort_df: pd.Dat
             continue
 
         if cpn.empty or cpn["value"].fillna(0).sum() == 0:
-            years = max((horizon - today).days / 365.0, 1e-6)
-            y = (outstanding / dirty) ** (1 / years) - 1 if dirty > 0 else None
+            years = (horizon - today).days / 365.0
+            y = _safe_zero_coupon_yield(outstanding, dirty, years)
+            if y is None:
+                warn.append("zero-coupon formula invalid or overflow")
             out.at[idx, "ytm_zero_coupon"] = y
             out.at[idx, "ytm_calc"] = y
             out.at[idx, "ytm_method"] = "zero_coupon"
@@ -137,7 +168,7 @@ def compute_ytm(merged: pd.DataFrame, coupons_df: pd.DataFrame, amort_df: pd.Dat
             future_dates = sorted([d for d in cpn["coupondate"].dropna() if d <= horizon and d > today])
             if not future_dates:
                 ppy = _payments_per_year(row, cpn)
-                step = int(365 / ppy)
+                step = max(int(365 / ppy), 1)
                 d = today + timedelta(days=step)
                 while d <= horizon:
                     future_dates.append(d)

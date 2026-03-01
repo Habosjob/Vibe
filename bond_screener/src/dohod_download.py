@@ -4,7 +4,9 @@ import re
 import time
 from pathlib import Path
 from typing import Dict
+from urllib.parse import urljoin
 
+import httpx
 import pandas as pd
 from playwright.sync_api import TimeoutError as PWTimeoutError
 from playwright.sync_api import sync_playwright
@@ -16,6 +18,26 @@ def _fresh(path: Path, ttl_h: float) -> bool:
     return path.exists() and (time.time() - path.stat().st_mtime) / 3600 <= ttl_h
 
 
+def _download_dohod_excel_http_fallback(url: str, export_path: Path, timeout_s: int, logger) -> Path:
+    with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
+        page = client.get(url)
+        page.raise_for_status()
+        html = page.text
+
+        links = re.findall(r'href=["\']([^"\']+\.(?:xlsx?|XLSX?))(?:\?[^"\']*)?["\']', html)
+        if not links:
+            links = re.findall(r'["\'](https?://[^"\']+\.(?:xlsx?|XLSX?))(?:\?[^"\']*)?["\']', html)
+        if not links:
+            raise RuntimeError("DOHOD fallback: Excel link not found in page")
+
+        excel_url = urljoin(url, links[0])
+        resp = client.get(excel_url)
+        resp.raise_for_status()
+        export_path.write_bytes(resp.content)
+        logger.info("Downloaded DOHOD Excel via HTTP fallback: %s", excel_url)
+        return export_path
+
+
 def download_dohod_excel(config: Dict, export_path: Path, logger) -> Path:
     ttl = config["ttl_hours"]["dohod_excel"]
     if _fresh(export_path, ttl):
@@ -25,29 +47,40 @@ def download_dohod_excel(config: Dict, export_path: Path, logger) -> Path:
     export_path.parent.mkdir(parents=True, exist_ok=True)
     url = config["sources"]["dohod_url"]
     headless = config["dohod"]["headless"]
-    timeout_ms = int(config["dohod"]["timeout_s"] * 1000)
+    timeout_s = int(config["dohod"]["timeout_s"])
+    timeout_ms = timeout_s * 1000
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(accept_downloads=True)
-        page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless)
+            context = browser.new_context(accept_downloads=True)
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            try:
+                locator = page.get_by_role("button", name=re.compile("Скачать Excel", re.IGNORECASE))
+                if locator.count() == 0:
+                    locator = page.locator("text=Скачать Excel")
+                with page.expect_download(timeout=timeout_ms) as dl:
+                    locator.first.click()
+                download = dl.value
+                download.save_as(str(export_path))
+            except PWTimeoutError:
+                logger.exception("Failed to download DOHOD Excel via Playwright timeout")
+                raise
+            finally:
+                context.close()
+                browser.close()
+        logger.info("Downloaded DOHOD Excel to %s", export_path)
+        return export_path
+    except Exception as exc:
+        logger.warning("Playwright DOHOD download failed (%s), trying HTTP fallback", exc)
         try:
-            locator = page.get_by_role("button", name=re.compile("Скачать Excel", re.IGNORECASE))
-            if locator.count() == 0:
-                locator = page.locator("text=Скачать Excel")
-            with page.expect_download(timeout=timeout_ms) as dl:
-                locator.first.click()
-            download = dl.value
-            download.save_as(str(export_path))
-        except PWTimeoutError:
-            logger.exception("Failed to download DOHOD Excel")
+            return _download_dohod_excel_http_fallback(url, export_path, timeout_s=timeout_s, logger=logger)
+        except Exception as fallback_exc:
+            if export_path.exists():
+                logger.warning("HTTP fallback failed (%s), using stale DOHOD file: %s", fallback_exc, export_path)
+                return export_path
             raise
-        finally:
-            context.close()
-            browser.close()
-    logger.info("Downloaded DOHOD Excel to %s", export_path)
-    return export_path
 
 
 def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
