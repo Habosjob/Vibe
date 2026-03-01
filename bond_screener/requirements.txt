@@ -1,0 +1,8 @@
+pandas
+openpyxl
+httpx
+pyyaml
+tenacity
+tqdm
+playwright
+lxml
