@@ -10,6 +10,10 @@ from .cache import HTTPCache
 from .utils import parse_date, to_float
 
 
+def _format_ddmmyyyy(series: pd.Series) -> pd.Series:
+    return series.map(lambda d: d.strftime("%d.%m.%Y") if pd.notna(d) else None)
+
+
 def _read_tables(data: bytes) -> list[pd.DataFrame]:
     text = data.decode("utf-8", errors="ignore")
     return pd.read_html(StringIO(text))
@@ -29,12 +33,7 @@ def load_market_indices(config: Dict, cache: HTTPCache) -> tuple[pd.DataFrame, p
     ru["ruonia_percent"] = ru[val_col].map(to_float)
     ru = ru.dropna(subset=["date", "ruonia_percent"]).sort_values("date")
     ru_last = ru.tail(1)
-    market_ruonia = pd.DataFrame(
-        {
-            "date_ddmmyyyy": ru_last["date"].dt.strftime("%d.%m.%Y"),
-            "ruonia_percent": ru_last["ruonia_percent"],
-        }
-    )
+    market_ruonia = pd.DataFrame({"date_ddmmyyyy": _format_ddmmyyyy(ru_last["date"]), "ruonia_percent": ru_last["ruonia_percent"]})
 
     z_tables = _read_tables(zcyc_bytes)
     z = z_tables[0].copy()
@@ -50,7 +49,7 @@ def load_market_indices(config: Dict, cache: HTTPCache) -> tuple[pd.DataFrame, p
     z = z[z["date"] == latest_date]
     market_zcyc = pd.DataFrame(
         {
-            "date_ddmmyyyy": z["date"].dt.strftime("%d.%m.%Y"),
+            "date_ddmmyyyy": _format_ddmmyyyy(z["date"]),
             "tenor_years": z["tenor_years"],
             "yield_percent": z["yield_percent"],
         }
