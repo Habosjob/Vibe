@@ -60,6 +60,10 @@ class Stage3BondizationSettings:
 
 @dataclass(frozen=True)
 class Stage3MoexSettings:
+    enabled: bool
+    ttl_hours: int
+    concurrency: int
+    progressbar_position: int
     engine: str
     market: str
     boards: list[str]
@@ -68,12 +72,26 @@ class Stage3MoexSettings:
 
 
 @dataclass(frozen=True)
-class Stage3Settings:
+class Stage3DohodSettings:
     enabled: bool
     ttl_hours: int
-    batch_size: int
     concurrency: int
+    progressbar_position: int
+    min_delay_s: float
+    page_timeout_s: float
+    base_url: str
+    user_agent: str
+    use_playwright: bool
+
+
+@dataclass(frozen=True)
+class Stage3Settings:
+    enabled: bool
+    run_sources_in_parallel: bool
+    ttl_hours: int
+    batch_size: int
     moex: Stage3MoexSettings
+    dohod: Stage3DohodSettings
 
 
 @dataclass(frozen=True)
@@ -145,10 +163,14 @@ def load_settings(project_root: Path | None = None) -> AppSettings:
         ),
         stage3=Stage3Settings(
             enabled=bool(raw.get("stage3", {}).get("enabled", True)),
+            run_sources_in_parallel=bool(raw.get("stage3", {}).get("run_sources_in_parallel", True)),
             ttl_hours=int(raw.get("stage3", {}).get("ttl_hours", 6)),
             batch_size=int(raw.get("stage3", {}).get("batch_size", 200)),
-            concurrency=int(raw.get("stage3", {}).get("concurrency", 20)),
             moex=Stage3MoexSettings(
+                enabled=bool(raw.get("stage3", {}).get("moex", {}).get("enabled", True)),
+                ttl_hours=int(raw.get("stage3", {}).get("moex", {}).get("ttl_hours", raw.get("stage3", {}).get("ttl_hours", 6))),
+                concurrency=int(raw.get("stage3", {}).get("moex", {}).get("concurrency", 20)),
+                progressbar_position=int(raw.get("stage3", {}).get("moex", {}).get("progressbar_position", 0)),
                 engine=str(raw.get("stage3", {}).get("moex", {}).get("engine", "stock")),
                 market=str(raw.get("stage3", {}).get("moex", {}).get("market", "bonds")),
                 boards=list(raw.get("stage3", {}).get("moex", {}).get("boards", [])),
@@ -159,6 +181,19 @@ def load_settings(project_root: Path | None = None) -> AppSettings:
                     from_date=str(raw.get("stage3", {}).get("moex", {}).get("bondization", {}).get("from", "")),
                     till=str(raw.get("stage3", {}).get("moex", {}).get("bondization", {}).get("till", "")),
                 ),
+            ),
+            dohod=Stage3DohodSettings(
+                enabled=bool(raw.get("stage3", {}).get("dohod", {}).get("enabled", True)),
+                ttl_hours=int(raw.get("stage3", {}).get("dohod", {}).get("ttl_hours", raw.get("stage3", {}).get("ttl_hours", 6))),
+                concurrency=int(raw.get("stage3", {}).get("dohod", {}).get("concurrency", 5)),
+                progressbar_position=int(raw.get("stage3", {}).get("dohod", {}).get("progressbar_position", 1)),
+                min_delay_s=float(raw.get("stage3", {}).get("dohod", {}).get("min_delay_s", 0.3)),
+                page_timeout_s=float(raw.get("stage3", {}).get("dohod", {}).get("page_timeout_s", 30)),
+                base_url=str(raw.get("stage3", {}).get("dohod", {}).get("base_url", "https://analytics.dohod.ru/bond/{isin}")),
+                user_agent=str(
+                    raw.get("stage3", {}).get("dohod", {}).get("user_agent", "Mozilla/5.0 (compatible; bond_screener/1.0)")
+                ),
+                use_playwright=bool(raw.get("stage3", {}).get("dohod", {}).get("use_playwright", False)),
             ),
         ),
         paths=paths,

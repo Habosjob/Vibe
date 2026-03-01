@@ -36,10 +36,14 @@ stage2:
 
 stage3:
   enabled: true
+  run_sources_in_parallel: true
   ttl_hours: 6
   batch_size: 200
-  concurrency: 20
   moex:
+    enabled: true
+    ttl_hours: 6
+    concurrency: 20
+    progressbar_position: 0
     engine: "stock"
     market: "bonds"
     boards: []
@@ -49,3 +53,13 @@ stage3:
       include_offers: true
       from: ""
       till: ""
+  dohod:
+    enabled: true
+    ttl_hours: 6
+    concurrency: 5
+    progressbar_position: 1
+    min_delay_s: 0.3
+    page_timeout_s: 30
+    base_url: "https://analytics.dohod.ru/bond/{isin}"
+    user_agent: "Mozilla/5.0 (compatible; bond_screener/1.0)"
+    use_playwright: false
