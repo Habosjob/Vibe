@@ -76,8 +76,14 @@ def load_bondization(universe: pd.DataFrame, config: Dict, checkpoints: Checkpoi
                 logger.warning("bondization failed for %s: %s", secid, exc)
                 checkpoints.set(secid, {"status": "failed", "updated_at": datetime.utcnow().isoformat()})
 
-    coupons_df = pd.DataFrame(coupons_rows)
-    amort_df = pd.DataFrame(amort_rows)
+    coupons_df = pd.DataFrame(
+        coupons_rows,
+        columns=["secid", "coupondate", "value", "rate", "currencyid", "fetched_at"],
+    )
+    amort_df = pd.DataFrame(
+        amort_rows,
+        columns=["secid", "amortdate", "value", "currencyid", "fetched_at"],
+    )
     return coupons_df, amort_df
 
 
