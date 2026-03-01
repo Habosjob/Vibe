@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 
@@ -14,8 +15,11 @@ from .excel_export import export_screener
 from .logging_setup import setup_logging
 from .market_indices import load_market_indices
 from .merge import merge_all
-from .moex_bondization import build_amort_start, load_bondization
+from .moex_bondization import build_amort_agg, fetch_bondization_bulk
 from .moex_rates import load_moex_rates
+from .smartlab import fetch_smartlab
+from .sorter import apply_sorter_with_dropped
+from .writer_queue import AsyncWriter
 from .ytm import compute_ytm
 
 
@@ -25,35 +29,34 @@ class Pipeline:
         self.config = yaml.safe_load((root / "config" / "config.yaml").read_text(encoding="utf-8"))["v2"]
         self.logger = setup_logging(root / "logs" / "app.log")
         self.db = Database(root / "data" / "bonds.db")
+        self.db.ensure_source_tables()
         self.cache = HTTPCache(root / "cache" / "http")
-        self.checkpoints = CheckpointStore(root / "cache" / "checkpoints" / "bondization.json")
+        self.cp_bulk = CheckpointStore(root / "cache" / "checkpoints" / "moex_bondization_bulk.json")
+        self.cp_smartlab = CheckpointStore(root / "cache" / "checkpoints" / "smartlab_items.json")
+
+    async def _run_network_stage(self, universe: pd.DataFrame) -> dict:
+        writer = AsyncWriter(self.db, heartbeat_s=7)
+        writer_task = asyncio.create_task(writer.run(self.logger))
+
+        moex_task = asyncio.create_task(fetch_bondization_bulk(self.config, writer, self.cp_bulk, self.logger))
+        smart_task = asyncio.create_task(fetch_smartlab(universe, self.config, writer, self.cp_smartlab, self.logger))
+
+        moex_stats, smart_stats = await asyncio.gather(moex_task, smart_task)
+        await writer.stop()
+        await writer_task
+        return {"moex": moex_stats, "smartlab": smart_stats, "writer_rows": writer.total_rows}
 
     def run(self) -> None:
         t0 = time.time()
         self.logger.info("Pipeline started")
 
         moex_raw, moex_norm = load_moex_rates(self.config, self.cache, self.logger)
-        moex_sample_cols = [c for c in ["norm_isin", "norm_secid", "norm_name"] if c in moex_norm.columns]
-        self.logger.info(
-            "Loaded moex_rates_norm rows=%s isin_notnull=%s secid_notnull=%s sample=%s",
-            len(moex_norm),
-            int(moex_norm.get("norm_isin", pd.Series(dtype=object)).notna().sum()),
-            int(moex_norm.get("norm_secid", pd.Series(dtype=object)).notna().sum()),
-            moex_norm[moex_sample_cols].head(5).to_dict("records") if moex_sample_cols else [],
-        )
         self.db.write_df("moex_rates_raw", moex_raw)
         self.db.write_df("moex_rates_norm", moex_norm)
 
         dohod_file = download_dohod_excel(self.config, self.root / "source" / "dohod_export.xlsx", self.logger)
         dohod_raw = pd.read_excel(dohod_file)
         dohod_norm = normalize_dohod(dohod_raw)
-        dohod_sample_cols = [c for c in ["norm_isin", "dohod_price", "dohod_base_index"] if c in dohod_norm.columns]
-        self.logger.info(
-            "Loaded dohod_norm rows=%s isin_notnull=%s sample=%s",
-            len(dohod_norm),
-            int(dohod_norm.get("norm_isin", pd.Series(dtype=object)).notna().sum()),
-            dohod_norm[dohod_sample_cols].head(5).to_dict("records") if dohod_sample_cols else [],
-        )
         self.db.write_df("dohod_raw", dohod_raw)
         self.db.write_df("dohod_norm", dohod_norm)
 
@@ -61,79 +64,43 @@ class Pipeline:
         self.db.write_df("market_ruonia", m_ruonia)
         self.db.write_df("market_zcyc", m_zcyc)
 
-        universe_src = moex_norm[["norm_isin", "norm_secid"]].rename(columns={"norm_isin": "isin", "norm_secid": "secid"}).copy()
-        universe = universe_src[universe_src["secid"].notna() & (universe_src["secid"].astype(str).str.strip() != "")].drop_duplicates()
-        reason = "moex_norm_secid"
+        universe = moex_norm[["norm_isin", "norm_secid"]].rename(columns={"norm_isin": "isin", "norm_secid": "secid"}).drop_duplicates()
+        universe = universe[universe["secid"].notna()]
 
-        if universe.empty:
-            fallback = dohod_norm[["norm_isin"]].rename(columns={"norm_isin": "isin"}).copy()
-            fallback = fallback[fallback["isin"].notna() & (fallback["isin"].astype(str).str.strip() != "")]
-            fallback["secid"] = fallback["isin"]
-            universe = fallback[["isin", "secid"]].drop_duplicates()
-            reason = "dohod_isin_as_secid_fallback"
+        network_stats = asyncio.run(self._run_network_stage(universe))
 
-        fallback_count = int(((universe["secid"] == universe["isin"]) & universe["isin"].notna()).sum()) if not universe.empty else 0
-        self.logger.info(
-            "Before bondization universe_rows=%s reason=%s secid_count=%s fallback_isin_as_secid=%s secid_sample=%s",
-            len(universe),
-            reason,
-            int(universe["secid"].notna().sum()) if not universe.empty else 0,
-            fallback_count,
-            universe["secid"].dropna().astype(str).head(10).tolist() if not universe.empty else [],
-        )
-        if universe.empty:
-            raise RuntimeError("Bondization universe is empty. Check moex_rates_norm.norm_secid parsing.")
+        coupons_df = self.db.read_df("SELECT * FROM moex_coupons")
+        amort_df = self.db.read_df("SELECT * FROM moex_amortizations")
+        smartlab_df = self.db.read_df("SELECT * FROM smartlab_bond")
 
-        coupons_df, amort_df = load_bondization(
-            universe,
-            self.config,
-            self.checkpoints,
-            ttl_hours=self.config["ttl_hours"]["moex_bondization"],
-            logger=self.logger,
-        )
-        self.db.write_df("moex_coupons", coupons_df)
-        self.db.write_df("moex_amortizations", amort_df)
-        if amort_df.empty:
-            self.logger.error("Bondization returned empty moex_amortizations")
-        amort_start = build_amort_start(universe, amort_df)
-        self.db.write_df("moex_amort_start", amort_start)
+        amort_agg = build_amort_agg(amort_df)
+        if not amort_agg.empty:
+            self.db.upsert_many("moex_amort_agg", amort_agg.to_dict("records"))
 
-        merged = merge_all(moex_norm, dohod_norm, amort_start, self.config["filters"]["min_days_to_amort"])
+        merged = merge_all(moex_norm, dohod_norm, amort_agg, smartlab_df, self.config["filters"]["min_days_to_amort"])
         result = compute_ytm(merged, coupons_df, amort_df, m_ruonia, m_zcyc, self.config)
+        result["smartlab_status"] = network_stats["smartlab"]["status"]
+        result = apply_sorter_with_dropped(result, self.db, self.logger)
         self.db.write_df("merged_all", result)
 
         export_screener(result, self.root / "source" / "Screener.xlsx")
 
-        result = result.infer_objects(copy=False)
-
-        summary = {
-            "rows total": len(result),
-            "offer_count": int(result["dohod_offer_date"].notna().sum()) if "dohod_offer_date" in result else 0,
-            "has_amort_count": int(result["has_amortization"].fillna(False).sum()) if "has_amortization" in result else 0,
-            "filter_ok_count": int(result["filter_amort_ok"].fillna(False).sum()),
-            "ytm_calc_count": int(result["ytm_calc"].notna().sum()),
-            "zero_coupon_count": int((result["ytm_method"] == "zero_coupon").sum()),
-            "floater_count": int((result["ytm_method"] == "floater_scenario").sum()),
-            "perpetual_count": int((result["ytm_method"] == "perpetual_compounded").sum()),
-            "total_time": round(time.time() - t0, 2),
-        }
-        self.logger.info(
-            "Self-check top ytm rows: %s",
-            result.sort_values("ytm_calc", ascending=False, na_position="last")[
-                [c for c in ["isin", "secid", "moex_norm_name", "ytm_calc", "dirty_price_amt", "nominal_used", "target_date", "ytm_method"] if c in result.columns]
-            ].head(10).to_dict("records"),
+        dropped_stats = (
+            result[result["dropped_flag"]].groupby("dropped_reason_code").size().sort_values(ascending=False).head(10).to_dict()
+            if "dropped_reason_code" in result
+            else {}
         )
         self.logger.info(
-            "Self-check has_amortization_true=%s days_to_amort_notnull=%s floater_base_known=%s",
-            int(result.get("has_amortization", pd.Series(dtype=bool)).fillna(False).sum()),
-            int(result.get("days_to_amort", pd.Series(dtype=object)).notna().sum()),
-            int((result.get("floater_base", pd.Series(dtype=object)).fillna("UNKNOWN") != "UNKNOWN").sum()),
+            "Summary total_rows=%s bondization_bulk=%s smartlab_done=%s smartlab_failed=%s has_amort_count=%s amort_started_count=%s dropped=%s total_time=%ss",
+            len(result),
+            network_stats["moex"],
+            network_stats["smartlab"].get("done", 0),
+            network_stats["smartlab"].get("failed", 0),
+            int(result.get("has_amortization", pd.Series(dtype=float)).fillna(0).sum()),
+            int(result.get("amort_started_flag", pd.Series(dtype=bool)).fillna(False).sum()),
+            dropped_stats,
+            round(time.time() - t0, 2),
         )
-        if int(result.get("has_amortization", pd.Series(dtype=bool)).fillna(False).sum()) == 0 and len(result) > 0:
-            self.logger.warning("Self-check suspicious: has_amortization_true is 0 after non-empty bondization universe")
-        self.logger.info(
-            "Floater base distribution: %s",
-            result.get("floater_base", pd.Series(dtype=object)).fillna("UNKNOWN").value_counts().to_dict(),
-        )
-        self.logger.info("Summary: %s", summary)
+        top_cols = [c for c in ["isin", "secid", "ytm_calc", "ytm_method", "dirty_price_amt"] if c in result.columns]
+        self.logger.info("Top-10 ytm_calc: %s", result.sort_values("ytm_calc", ascending=False, na_position="last")[top_cols].head(10).to_dict("records"))
         self.db.close()
