@@ -164,16 +164,15 @@ class DohodExporter:
                 leave=True,
                 mininterval=0.2,
             ) as pbar:
-                results = await asyncio.gather(
-                    *[self._process_one(client, semaphore, isin) for isin in isins],
-                    return_exceptions=True,
-                )
-                for result in results:
+                tasks = [asyncio.create_task(self._process_one(client, semaphore, isin)) for isin in isins]
+                for task in asyncio.as_completed(tasks):
+                    result = await task
                     if result is True:
                         done += 1
                     else:
                         failed += 1
                     pbar.update(1)
+                    pbar.set_postfix(done=done, failed=failed, refresh=False)
             return done, failed
         finally:
             await client.aclose()
