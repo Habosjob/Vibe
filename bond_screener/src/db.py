@@ -82,38 +82,52 @@ class Database:
         )
         self.conn.commit()
 
-    def upsert_many(self, table: str, rows: list[dict], retries: int = 5) -> int:
-        if not rows:
-            return 0
-        cols = list(rows[0].keys())
+    def _build_upsert_sql(self, table: str, cols: list[str]) -> str:
         placeholders = ",".join(["?"] * len(cols))
         col_sql = ",".join(cols)
         if table == "smartlab_bond":
             update = ",".join([f"{c}=excluded.{c}" for c in cols if c != "secid"])
-            sql = f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(secid) DO UPDATE SET {update}"
-        elif table == "moex_amort_agg":
+            return f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(secid) DO UPDATE SET {update}"
+        if table == "moex_amort_agg":
             update = ",".join([f"{c}=excluded.{c}" for c in cols if c != "secid"])
-            sql = f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(secid) DO UPDATE SET {update}"
-        elif table == "dropped_bonds":
+            return f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders}) ON CONFLICT(secid) DO UPDATE SET {update}"
+        if table == "dropped_bonds":
             update = ",".join([f"{c}=excluded.{c}" for c in cols if c not in {"key", "key_type", "reason_code"}])
-            sql = (
+            return (
                 f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders}) "
                 "ON CONFLICT(key,key_type,reason_code) DO UPDATE SET " + update
             )
-        else:
-            sql = f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders})"
+        return f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders})"
+
+    def upsert_many(self, table: str, rows: list[dict], retries: int = 5, commit: bool = True) -> int:
+        if not rows:
+            return 0
+        cols = list(rows[0].keys())
+        sql = self._build_upsert_sql(table, cols)
         vals = [tuple(r.get(c) for c in cols) for r in rows]
         for i in range(retries):
             try:
                 self.conn.executemany(sql, vals)
-                self.conn.commit()
+                if commit:
+                    self.conn.commit()
                 return len(rows)
             except sqlite3.OperationalError as exc:
                 if "locked" in str(exc).lower() and i < retries - 1:
-                    time.sleep(0.2 * (i + 1))
+                    time.sleep(min(0.5, 0.05 * (2**i)))
                     continue
                 raise
         return 0
+
+    def commit(self, retries: int = 5) -> None:
+        for i in range(retries):
+            try:
+                self.conn.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and i < retries - 1:
+                    time.sleep(min(0.5, 0.05 * (2**i)))
+                    continue
+                raise
 
     def close(self) -> None:
         self.conn.close()

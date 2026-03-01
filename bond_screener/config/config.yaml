@@ -27,10 +27,23 @@ v2:
 
   smartlab:
     enabled: true
+    per_secid_enabled: true
     ttl_hours: 12
-    concurrency: 4
-    min_delay_s: 0.3
-    timeout_s: 30
+    concurrency: 25
+    max_connections: 60
+    max_keepalive: 20
+    timeout_s: 20
+    min_delay_s: 0.0
+    max_retries: 2
+    backoff_initial_s: 0.2
+    backoff_max_s: 2.0
+    rps_limit: 0
+    burst: 50
+    circuit_breaker:
+      enabled: true
+      trip_statuses: [403, 429]
+      trip_on_captcha_keywords: ["captcha", "cloudflare", "verify you are human"]
+      disable_for_run: true
 
   dohod:
     use_playwright: true

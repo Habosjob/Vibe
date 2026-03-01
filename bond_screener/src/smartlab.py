@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import time
 from datetime import datetime
 
 import httpx
@@ -15,6 +16,31 @@ from .writer_queue import AsyncWriter
 
 
 CAPTCHA_MARKERS = ["captcha", "cloudflare", "verify you are human"]
+
+
+class AsyncTokenBucket:
+    def __init__(self, rps_limit: float, burst: int):
+        self.enabled = rps_limit > 0
+        self.rate = float(rps_limit)
+        self.capacity = max(1.0, float(burst))
+        self.tokens = self.capacity
+        self.updated_at = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        if not self.enabled:
+            return
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                elapsed = now - self.updated_at
+                self.updated_at = now
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+                wait_s = max((1.0 - self.tokens) / self.rate, 0.01)
+            await asyncio.sleep(wait_s)
 
 
 def _extract_number(text: str) -> float | None:
@@ -43,7 +69,7 @@ def _parse_bond_page(secid: str, html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text("\n", strip=True)
     rating, rating_src = _extract_rating(text)
-    res = {
+    return {
         "secid": secid,
         "sl_price_rub": _extract_number(text[text.lower().find("цена") : text.lower().find("цена") + 80]) if "цена" in text.lower() else None,
         "sl_price_pct": _extract_number(text[text.lower().find("%") - 20 : text.lower().find("%") + 20]) if "%" in text else None,
@@ -60,7 +86,11 @@ def _parse_bond_page(secid: str, html: str) -> dict:
         "sl_rating_source": rating_src,
         "warning_text": "",
     }
-    return res
+
+
+def _is_blocked_response(resp: httpx.Response, trip_statuses: set[int], trip_keywords: list[str]) -> bool:
+    text = resp.text.lower()
+    return resp.status_code in trip_statuses or any(k in text for k in trip_keywords)
 
 
 async def _load_rating_map(client: httpx.AsyncClient) -> dict[str, tuple[str | None, str | None]]:
@@ -80,75 +110,113 @@ async def _load_rating_map(client: httpx.AsyncClient) -> dict[str, tuple[str | N
     return m
 
 
-async def fetch_smartlab(universe: pd.DataFrame, config: dict, writer: AsyncWriter, checkpoints: CheckpointStore, logger) -> dict[str, int | str]:
+async def fetch_smartlab(universe: pd.DataFrame, config: dict, writer: AsyncWriter, checkpoints: CheckpointStore, logger) -> dict[str, int | str | float]:
     cfg = config["smartlab"]
     if not cfg.get("enabled", True):
-        return {"done": 0, "failed": 0, "status": "disabled"}
+        return {"done": 0, "failed": 0, "skipped": 0, "status": "disabled", "avg_rps": 0.0}
+    if not cfg.get("per_secid_enabled", True):
+        return {"done": 0, "failed": 0, "skipped": 0, "status": "disabled_per_secid", "avg_rps": 0.0}
 
-    sem = asyncio.Semaphore(int(cfg.get("concurrency", 4)))
-    delay = float(cfg.get("min_delay_s", 0.3))
-    timeout_s = int(cfg.get("timeout_s", 30))
+    concurrency = int(cfg.get("concurrency", 4))
+    max_connections = max(int(cfg.get("max_connections", max(20, concurrency))), concurrency)
+    max_keepalive = int(cfg.get("max_keepalive", min(concurrency, 20)))
+    timeout_s = float(cfg.get("timeout_s", 30))
     ttl_h = float(cfg.get("ttl_hours", 12))
+    min_delay_s = float(cfg.get("min_delay_s", 0.0))
+    max_retries = int(cfg.get("max_retries", 2))
+    backoff_initial_s = float(cfg.get("backoff_initial_s", 0.2))
+    backoff_max_s = float(cfg.get("backoff_max_s", 2.0))
+
+    cb_cfg = cfg.get("circuit_breaker", {})
+    cb_enabled = bool(cb_cfg.get("enabled", True))
+    trip_statuses = set(cb_cfg.get("trip_statuses", [403, 429]))
+    trip_keywords = [str(v).lower() for v in cb_cfg.get("trip_on_captcha_keywords", CAPTCHA_MARKERS)]
+    disable_for_run = bool(cb_cfg.get("disable_for_run", True))
+
+    limiter = AsyncTokenBucket(float(cfg.get("rps_limit", 0)), int(cfg.get("burst", 1)))
+    sem = asyncio.Semaphore(concurrency)
     now = datetime.utcnow()
     secids = [str(s).upper() for s in universe["secid"].dropna().astype(str).unique()]
 
     state = checkpoints.state
     smartlab_disabled = False
     disabled_reason = ""
-    attempts = 0
     done = 0
     failed = 0
+    skipped = 0
+    t_start = time.monotonic()
 
-    async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+    limits = httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_keepalive)
+    timeout = httpx.Timeout(timeout_s)
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, limits=limits) as client:
         rating_map = await _load_rating_map(client)
 
         async def one(secid: str) -> None:
-            nonlocal smartlab_disabled, disabled_reason, attempts, done, failed
+            nonlocal smartlab_disabled, disabled_reason, done, failed, skipped
             st = state.get(secid, {})
             if st.get("status") == "done" and st.get("fetched_at"):
                 age = (now - datetime.fromisoformat(st["fetched_at"])).total_seconds() / 3600
                 if age <= ttl_h:
+                    skipped += 1
                     return
             if smartlab_disabled:
-                checkpoints.set(secid, {"status": "skipped", "last_error": disabled_reason, "fetched_at": now.isoformat()})
+                checkpoints.set(secid, {"status": "skipped", "last_error": "disabled_rate_limited", "fetched_at": now.isoformat()})
+                skipped += 1
                 return
+
             async with sem:
-                await asyncio.sleep(delay)
-                for i in range(2):
-                    attempts += 1
+                if min_delay_s > 0:
+                    await asyncio.sleep(min_delay_s)
+                for attempt in range(max_retries + 1):
+                    await limiter.acquire()
                     try:
                         resp = await client.get(f"https://smart-lab.ru/q/bonds/{secid}/")
-                        text = resp.text
-                        blocked = resp.status_code in (403, 429) or any(x in text.lower() for x in CAPTCHA_MARKERS)
-                        if blocked:
-                            smartlab_disabled = True
-                            disabled_reason = f"rate_limited_or_captcha status={resp.status_code} attempts={attempts}"
+                        if cb_enabled and _is_blocked_response(resp, trip_statuses, trip_keywords):
+                            if disable_for_run:
+                                smartlab_disabled = True
+                            disabled_reason = f"rate_limited_or_captcha status={resp.status_code}"
                             logger.warning("Smart-Lab disabled for run: %s", disabled_reason)
                             checkpoints.set(secid, {"status": "skipped", "last_error": disabled_reason, "fetched_at": datetime.utcnow().isoformat()})
+                            skipped += 1
                             return
                         resp.raise_for_status()
-                        parsed = _parse_bond_page(secid, text)
+
+                        parsed = _parse_bond_page(secid, resp.text)
                         if not parsed.get("sl_credit_rating") and secid in rating_map:
                             parsed["sl_credit_rating"], parsed["sl_rating_source"] = rating_map[secid]
                         if not parsed.get("sl_credit_rating"):
                             parsed["warning_text"] = "no_smartlab_rating"
                         parsed["fetched_at"] = datetime.utcnow().isoformat()
-                        parsed["source_hash"] = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+                        parsed["source_hash"] = hashlib.sha256(resp.text.encode("utf-8", errors="ignore")).hexdigest()
                         await writer.put("smartlab_bond", [parsed])
                         checkpoints.set(secid, {"status": "done", "last_error": "", "fetched_at": parsed["fetched_at"]})
                         done += 1
                         return
                     except Exception as exc:
-                        if i == 1:
+                        if attempt >= max_retries:
                             failed += 1
                             checkpoints.set(
                                 secid,
                                 {"status": "failed", "last_error": str(exc), "fetched_at": datetime.utcnow().isoformat()},
                             )
+                            return
+                        backoff = min(backoff_max_s, backoff_initial_s * (2**attempt))
+                        await asyncio.sleep(backoff)
 
         tasks = [asyncio.create_task(one(s)) for s in secids]
-        for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Smart-Lab"):
+        pbar = tqdm(total=len(tasks), desc="Smart-Lab", position=1, leave=False, dynamic_ncols=True)
+        for f in asyncio.as_completed(tasks):
             await f
+            pbar.update(1)
+        pbar.close()
 
+    elapsed = max(time.monotonic() - t_start, 1e-9)
     status = "disabled_rate_limited" if smartlab_disabled else ("ok" if failed == 0 else "partial")
-    return {"done": done, "failed": failed, "status": status}
+    return {
+        "done": done,
+        "failed": failed,
+        "skipped": skipped,
+        "status": status,
+        "avg_rps": round((done + failed) / elapsed, 3),
+    }
