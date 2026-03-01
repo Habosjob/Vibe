@@ -35,7 +35,7 @@ class Pipeline:
         self.cp_smartlab = CheckpointStore(root / "cache" / "checkpoints" / "smartlab_items.json")
 
     async def _run_network_stage(self, universe: pd.DataFrame) -> dict:
-        writer = AsyncWriter(self.db, heartbeat_s=7)
+        writer = AsyncWriter(self.db, heartbeat_s=7, commit_rows=2000, commit_every_s=2.0)
         writer_task = asyncio.create_task(writer.run(self.logger))
 
         moex_task = asyncio.create_task(fetch_bondization_bulk(self.config, writer, self.cp_bulk, self.logger))
@@ -78,7 +78,7 @@ class Pipeline:
             self.db.upsert_many("moex_amort_agg", amort_agg.to_dict("records"))
 
         merged = merge_all(moex_norm, dohod_norm, amort_agg, smartlab_df, self.config["filters"]["min_days_to_amort"])
-        result = compute_ytm(merged, coupons_df, amort_df, m_ruonia, m_zcyc, self.config)
+        result = compute_ytm(merged, coupons_df, amort_df, m_ruonia, m_zcyc, self.config, logger=self.logger)
         result["smartlab_status"] = network_stats["smartlab"]["status"]
         result = apply_sorter_with_dropped(result, self.db, self.logger)
         self.db.write_df("merged_all", result)
@@ -90,17 +90,39 @@ class Pipeline:
             if "dropped_reason_code" in result
             else {}
         )
+
+        ytm_nonnull = result["ytm_calc"].notna() if "ytm_calc" in result else pd.Series(dtype=bool)
+        metrics = {
+            "ytm_calc_count": int(ytm_nonnull.sum()) if len(ytm_nonnull) else 0,
+            "zero_coupon_count": int((result.get("ytm_method", pd.Series(dtype=str)) == "zero_coupon").sum()),
+            "floater_count": int((result.get("ytm_method", pd.Series(dtype=str)) == "floater_scenario").sum()),
+            "perpetual_count": int((result.get("ytm_method", pd.Series(dtype=str)) == "perpetual_compounded").sum()),
+        }
+
         self.logger.info(
-            "Summary total_rows=%s bondization_bulk=%s smartlab_done=%s smartlab_failed=%s has_amort_count=%s amort_started_count=%s dropped=%s total_time=%ss",
+            "Summary total_rows=%s bondization_bulk=%s smartlab_done=%s smartlab_failed=%s smartlab_skipped=%s smartlab_avg_rps=%s has_amort_count=%s amort_started_count=%s dropped=%s total_time=%ss",
             len(result),
             network_stats["moex"],
             network_stats["smartlab"].get("done", 0),
             network_stats["smartlab"].get("failed", 0),
+            network_stats["smartlab"].get("skipped", 0),
+            network_stats["smartlab"].get("avg_rps", 0),
             int(result.get("has_amortization", pd.Series(dtype=float)).fillna(0).sum()),
             int(result.get("amort_started_flag", pd.Series(dtype=bool)).fillna(False).sum()),
             dropped_stats,
             round(time.time() - t0, 2),
         )
-        top_cols = [c for c in ["isin", "secid", "ytm_calc", "ytm_method", "dirty_price_amt"] if c in result.columns]
+        self.logger.info("YTM counts: %s", metrics)
+        self.logger.info(
+            "Unparsable date counts: coupons=%s amortizations=%s",
+            int(result.get("unparsable_coupon_dates_count", pd.Series([0])).max()),
+            int(result.get("unparsable_amort_dates_count", pd.Series([0])).max()),
+        )
+
+        top_cols = [
+            c
+            for c in ["isin", "secid", "ytm_calc", "dirty_price_amt", "nominal_used", "horizon_date", "ytm_method"]
+            if c in result.columns
+        ]
         self.logger.info("Top-10 ytm_calc: %s", result.sort_values("ytm_calc", ascending=False, na_position="last")[top_cols].head(10).to_dict("records"))
         self.db.close()

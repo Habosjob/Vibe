@@ -81,12 +81,26 @@ def _payments_per_year(row: pd.Series, coupons: pd.DataFrame) -> float:
     if pd.notna(freq) and freq and float(freq) > 0:
         return float(freq)
     if len(coupons) >= 2:
-        dates = sorted(coupons["coupondate"].dropna())
+        date_col = "parsed_coupondate" if "parsed_coupondate" in coupons.columns else "coupondate"
+        dates = sorted(coupons[date_col].dropna())
         if len(dates) >= 2:
             avg_days = sum((dates[i] - dates[i - 1]).days for i in range(1, len(dates))) / (len(dates) - 1)
             if avg_days > 0:
                 return 365.0 / avg_days
     return 2.0
+
+
+def _normalize_to_date(value) -> date | None:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.date()
 
 
 def compute_ytm(
@@ -96,6 +110,7 @@ def compute_ytm(
     market_ruonia: pd.DataFrame,
     market_zcyc: pd.DataFrame,
     config: Dict,
+    logger=None,
 ) -> pd.DataFrame:
     today = date.today()
     ruonia_today = float(market_ruonia["ruonia_percent"].iloc[0]) if not market_ruonia.empty else None
@@ -117,20 +132,36 @@ def compute_ytm(
     out["ytm_is_outlier"] = False
     out["floater_base"] = "UNKNOWN"
 
+    cpn_all = coupons_df.copy() if not coupons_df.empty else pd.DataFrame(columns=["secid", "coupondate", "value", "rate"])
+    amo_all = amort_df.copy() if not amort_df.empty else pd.DataFrame(columns=["secid", "amortdate", "value"])
+    cpn_all["parsed_coupondate"] = pd.to_datetime(cpn_all.get("coupondate"), dayfirst=True, errors="coerce").dt.date
+    amo_all["parsed_amortdate"] = pd.to_datetime(amo_all.get("amortdate"), dayfirst=True, errors="coerce").dt.date
+
+    unparsable_coupon = int((cpn_all.get("coupondate").notna() & cpn_all["parsed_coupondate"].isna()).sum()) if not cpn_all.empty else 0
+    unparsable_amort = int((amo_all.get("amortdate").notna() & amo_all["parsed_amortdate"].isna()).sum()) if not amo_all.empty else 0
+    if logger and (unparsable_coupon > 0 or unparsable_amort > 0):
+        logger.warning(
+            "Unparsable dates detected before YTM export: coupons=%s amortizations=%s",
+            unparsable_coupon,
+            unparsable_amort,
+        )
+
+    out["unparsable_coupon_dates_count"] = unparsable_coupon
+    out["unparsable_amort_dates_count"] = unparsable_amort
+
     for idx, row in out.iterrows():
         secid = row.get("secid")
-        horizon = row.get("target_date")
+        horizon = _normalize_to_date(row.get("target_date"))
         warn: list[str] = []
 
-        if pd.isna(horizon):
-            warn.append("missing target date")
+        if horizon is None:
+            warn.append("no_horizon_date")
             out.at[idx, "warning_text"] = "; ".join(warn)
             out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
-        if isinstance(horizon, pd.Timestamp):
-            horizon = horizon.date()
+        out.at[idx, "horizon_date"] = horizon.isoformat()
         if horizon <= today:
-            warn.append("target date is not in future")
+            warn.append("horizon_in_past")
             out.at[idx, "warning_text"] = "; ".join(warn)
             out.at[idx, "warnings"] = out.at[idx, "warning_text"]
             continue
@@ -185,10 +216,10 @@ def compute_ytm(
             row.get("moex_norm_name"),
         )
 
-        cpn = coupons_df[coupons_df["secid"] == secid].copy() if not coupons_df.empty else pd.DataFrame(columns=["coupondate", "value", "rate"])
-        amo = amort_df[amort_df["secid"] == secid].copy() if not amort_df.empty else pd.DataFrame(columns=["amortdate", "value"])
+        cpn = cpn_all[cpn_all["secid"] == secid].copy() if not cpn_all.empty else pd.DataFrame(columns=["parsed_coupondate", "value", "rate"])
+        amo = amo_all[amo_all["secid"] == secid].copy() if not amo_all.empty else pd.DataFrame(columns=["parsed_amortdate", "value"])
 
-        outstanding = nominal - amo[(amo["amortdate"].notna()) & (amo["amortdate"] < horizon)]["value"].fillna(0).sum()
+        outstanding = nominal - amo[(amo["parsed_amortdate"].notna()) & (amo["parsed_amortdate"] < horizon)]["value"].fillna(0).sum()
         if outstanding < 0:
             outstanding = 0.0
 
@@ -234,7 +265,7 @@ def compute_ytm(
                 out.at[idx, "warnings"] = out.at[idx, "warning_text"]
                 continue
             spread = float(spread)
-            future_dates = sorted([d for d in cpn["coupondate"].dropna() if d <= horizon and d > today])
+            future_dates = sorted([d for d in cpn["parsed_coupondate"].dropna() if d is not None and d > today and d <= horizon])
             if not future_dates:
                 ppy = _payments_per_year(row, cpn)
                 step = max(int(365 / ppy), 1)
@@ -269,11 +300,11 @@ def compute_ytm(
         if kind == "linker":
             infl_vals = config["scenario"]["linker_inflation_percent"]
             prev = today
-            for d in sorted([d for d in cpn["coupondate"].dropna() if d <= horizon and d > today]):
+            for d in sorted([d for d in cpn["parsed_coupondate"].dropna() if d is not None and d > today and d <= horizon]):
                 infl = rolling_value(infl_vals, d, today) / 100.0
                 years = max((d - today).days / 365.0, 0)
                 indexed = outstanding * ((1 + infl) ** years)
-                cpn_rate = coalesce(row.get("dohod_dohod_coupon_rate"), cpn[cpn["coupondate"] == d]["rate"].iloc[0], 0.0)
+                cpn_rate = coalesce(row.get("dohod_dohod_coupon_rate"), cpn[cpn["parsed_coupondate"] == d]["rate"].iloc[0], 0.0)
                 cf = indexed * float(cpn_rate) / 100.0 * max((d - prev).days, 1) / 365.0
                 flows.append((d, cf))
                 prev = d
@@ -287,14 +318,14 @@ def compute_ytm(
             continue
 
         for _, r in cpn.iterrows():
-            d = r.get("coupondate")
+            d = r.get("parsed_coupondate")
             v = r.get("value")
-            if pd.notna(d) and pd.notna(v) and d > today and d <= horizon:
+            if d is not None and pd.notna(v) and d > today and d <= horizon:
                 flows.append((d, float(v)))
         for _, r in amo.iterrows():
-            d = r.get("amortdate")
+            d = r.get("parsed_amortdate")
             v = r.get("value")
-            if pd.notna(d) and pd.notna(v) and d > today and d <= horizon:
+            if d is not None and pd.notna(v) and d > today and d <= horizon:
                 flows.append((d, float(v)))
         flows.append((horizon, outstanding))
         out.at[idx, "ytm_calc"] = _xirr(flows, today)

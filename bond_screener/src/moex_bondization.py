@@ -31,7 +31,7 @@ async def fetch_bondization_bulk(config: dict, writer: AsyncWriter, checkpoints:
     first_secid_seen = None
 
     async with httpx.AsyncClient(timeout=45) as client:
-        pbar = tqdm(total=max_pages, desc="MOEX bondization bulk")
+        pbar = tqdm(total=max_pages, desc="MOEX bondization bulk", position=0, leave=False, dynamic_ncols=True)
         for _ in range(max_pages):
             params = {
                 "from": from_d,

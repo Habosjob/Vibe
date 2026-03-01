@@ -3,6 +3,17 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from tqdm import tqdm
+
+
+class TqdmLoggingHandler(logging.StreamHandler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            tqdm.write(msg)
+        except Exception:
+            self.handleError(record)
+
 
 def setup_logging(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -16,7 +27,7 @@ def setup_logging(log_path: Path) -> logging.Logger:
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
-    sh = logging.StreamHandler()
+    sh = TqdmLoggingHandler()
     sh.setFormatter(formatter)
     logger.addHandler(sh)
     return logger

@@ -11,8 +11,9 @@
 - MOEX bondization переведен на bulk endpoint с пагинацией, anti-loop и checkpoint `cache/checkpoints/moex_bondization_bulk.json`.
 - Smart-Lab источник по SECID + кредитный рейтинг, включая fallback на общую таблицу `/q/bonds/`.
 - Smart-Lab circuit breaker: при 403/429/captcha источник выключается до конца запуска, в Excel ставится `smartlab_status=disabled_rate_limited`.
-- Параллельный запуск MOEX bulk и Smart-Lab + единый writer queue в SQLite (WAL, retry на lock, heartbeat).
+- Параллельный запуск MOEX bulk и Smart-Lab + единый writer queue в SQLite (WAL, retry на lock, heartbeat через `tqdm.write`).
 - Инкрементальность по `fetched_at` и TTL/checkpoints.
+- Fix dates: все даты купонов/амортизаций/горизонта приводятся к `datetime.date` до любых сравнений.
 
 ## SORTER / dropped
 
@@ -38,12 +39,22 @@
 - Парсятся котировки/даты/признаки/рейтинг.
 - Если рейтинг не найден, применяется fallback mapping из общей таблицы `/q/bonds/`.
 - Чекпоинт: `cache/checkpoints/smartlab_items.json`.
+- Производительность по умолчанию: `concurrency=25`, `max_connections=60`, `min_delay_s=0.0`.
+- Как ускорить/замедлить:
+  - увеличить/уменьшить `v2.smartlab.concurrency`;
+  - держать `max_connections >= concurrency`;
+  - при необходимости ограничить скорость через `rps_limit`/`burst`.
+- Что делать при 429/403:
+  - circuit breaker автоматически ставит статус `disabled_rate_limited` до конца текущего запуска;
+  - снизить `concurrency` и/или включить `rps_limit` (например 5-10), затем перезапустить.
 
 ## Writer queue + WAL
 
 - SQLite: `PRAGMA journal_mode=WAL`.
 - Один writer (`asyncio.Queue`) делает `executemany`/upsert.
+- Commit: каждые 2000 строк или каждые 2 секунды.
 - Heartbeat в логах каждые ~7 секунд: сколько строк записано и размер очереди.
+- Retry на `database is locked` с backoff 0.05..0.5s.
 
 ## Проверка результата
 
