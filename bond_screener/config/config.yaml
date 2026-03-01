@@ -1,0 +1,28 @@
+v2:
+  enabled: true
+  export_all_columns: true
+
+  sources:
+    moex_rates_csv_url: "https://iss.moex.com/iss/apps/infogrid/emission/rates.csv?sec_type=stock_ofz_bond,stock_cb_bond,stock_subfederal_bond,stock_municipal_bond,stock_corporate_bond,stock_exchange_bond&iss.dp=comma&iss.df=%25d.%25m.%25Y&iss.tf=%25H:%25M:%25S&iss.dtf=%25d.%25m.%25Y%20%25H:%25M:%25S&iss.only=rates&limit=unlimited&lang=ru"
+    dohod_url: "https://www.dohod.ru/analytic/bonds"
+
+  ttl_hours:
+    moex_rates: 12
+    dohod_excel: 12
+    moex_bondization: 72
+
+  moex:
+    concurrency: 15
+
+  dohod:
+    use_playwright: true
+    headless: true
+    timeout_s: 60
+
+  scenario:
+    # rolling horizon относительно today: y0/y1/y2, далее = y2
+    key_rate_avg_percent: [14.0, 8.5, 8.0]
+    linker_inflation_percent: [5.0, 4.0, 4.0]
+
+  filters:
+    min_days_to_amort: 365
