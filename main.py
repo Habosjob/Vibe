@@ -27,9 +27,15 @@ def main() -> int:
     try:
         db = Database(config.get_db_path())
         summary = asyncio.run(run_pipeline(db))
+    except KeyboardInterrupt:
+        logger.warning("Скрипт остановлен пользователем (Ctrl+C)")
+        print("\nСкрипт остановлен пользователем. Проверьте logs/app.log для деталей этапа.")
+        logging.shutdown()
+        return 130
     except Exception as exc:
         logger.exception("Критическая ошибка: %s", exc)
         print("Произошла критическая ошибка. Подробности смотрите в логах.")
+        logging.shutdown()
         return 1
     finally:
         if db is not None:
@@ -50,6 +56,7 @@ def main() -> int:
     print(f"Взято из кэша/инкрементально: {summary.from_cache_count}")
 
     logger.info("Скрипт завершен успешно")
+    logging.shutdown()
     return 0
 
 

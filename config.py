@@ -3,8 +3,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
 # Пути к рабочим папкам проекта.
-# Все папки создаются автоматически при запуске.
-# При желании можно поменять пути на абсолютные или относительные.
+# Все пути задаются через pathlib.Path для корректной работы на Windows.
+# При запуске скрипта эти директории будут созданы автоматически.
 DOCS_DIR = BASE_DIR / "docs"
 CACHE_DIR = BASE_DIR / "cache"
 DB_DIR = BASE_DIR / "db"
@@ -12,64 +12,64 @@ OUTPUT_DIR = BASE_DIR / "output"
 RAW_DIR = BASE_DIR / "raw"
 LOGS_DIR = BASE_DIR / "logs"
 
-# Имя SQLite-базы с рабочими данными по облигациям.
-# Файл будет создан внутри папки DB_DIR.
+# Имя SQLite-базы данных.
+# В базе хранится снимок прошлых цен по SECID, чтобы считать динамику между выгрузками.
 DB_FILE_NAME = "bonds.sqlite3"
 
 # Имя файла состояния (чекпоинтов).
-# В этот файл сохраняется прогресс, чтобы можно было продолжить после сбоя.
+# Здесь сохраняется прогресс обработки; при сбое можно продолжить с последнего этапа.
 STATE_FILE_NAME = "state.json"
 
-# Имя файла кэша метаданных.
-# Здесь можно хранить промежуточные ответы API или результаты парсинга.
+# Имя файла кэша.
+# В текущей реализации файл зарезервирован под расширение кэша API-ответов.
 CACHE_FILE_NAME = "bonds_cache.json"
 
-# Имя итогового Excel-файла.
-# В текущем скелете сохраняется демонстрационный отчет.
-OUTPUT_FILE_NAME = "bonds_screening_result.xlsx"
+# Режим отладки выгрузки Excel.
+# True  — всегда использовать один и тот же файл MoexBonds.xlsx (перезапись).
+# False — можно переключить на альтернативное имя/логику версионирования в будущем.
+DEBUG_SINGLE_EXCEL_FILE = True
+
+# Имя итогового Excel-файла в режиме отладки.
+# По требованию пользователя файл всегда один и тот же.
+OUTPUT_FILE_NAME_DEBUG = "MoexBonds.xlsx"
+
+# Имя итогового Excel-файла в неотладочном режиме.
+# Оставлено на будущее, когда потребуется отказаться от постоянной перезаписи.
+OUTPUT_FILE_NAME_RELEASE = "MoexBonds_latest.xlsx"
 
 # Настройки логирования.
-# LOG_FILE_NAME — файл логов внутри папки LOGS_DIR.
-# LOG_LEVEL — уровень детализации: DEBUG, INFO, WARNING, ERROR.
-# LOG_MAX_BYTES — размер одного лог-файла до ротации (в байтах).
-# LOG_BACKUP_COUNT — сколько архивных логов хранить.
+# LOG_FILE_NAME      — основной файл логов.
+# LOG_LEVEL          — уровень логов: DEBUG, INFO, WARNING, ERROR.
+# LOG_MAX_BYTES      — максимальный размер одного файла перед ротацией.
+# LOG_BACKUP_COUNT   — количество архивных файлов логов.
 LOG_FILE_NAME = "app.log"
 LOG_LEVEL = "INFO"
 LOG_MAX_BYTES = 1_000_000
 LOG_BACKUP_COUNT = 5
 
-# Настройки сетевых операций.
-# REQUEST_CONNECT_TIMEOUT_SEC — таймаут подключения к серверу.
-# REQUEST_READ_TIMEOUT_SEC — таймаут чтения ответа.
-# REQUEST_RETRIES — число повторных попыток при временных сбоях.
-# REQUEST_BACKOFF_SEC — базовая задержка перед повтором; далее применяется экспоненциальный рост.
-REQUEST_CONNECT_TIMEOUT_SEC = 5
-REQUEST_READ_TIMEOUT_SEC = 20
-REQUEST_RETRIES = 3
-REQUEST_BACKOFF_SEC = 1.0
+# Настройки HTTP-запросов к MOEX ISS API.
+# REQUEST_CONNECT_TIMEOUT_SEC — таймаут на установку соединения (сек).
+# REQUEST_READ_TIMEOUT_SEC    — таймаут чтения ответа (сек).
+# REQUEST_RETRIES             — количество попыток при временных ошибках.
+# REQUEST_BACKOFF_SEC         — базовая задержка между повторами (экспоненциальный рост).
+REQUEST_CONNECT_TIMEOUT_SEC = 7
+REQUEST_READ_TIMEOUT_SEC = 35
+REQUEST_RETRIES = 4
+REQUEST_BACKOFF_SEC = 1.2
 
-# Параллельность для I/O-операций.
-# MAX_CONCURRENT_TASKS ограничивает число одновременных задач,
-# чтобы не перегружать сеть/диск.
-MAX_CONCURRENT_TASKS = 5
+# Ограничение параллельности.
+# Позволяет ускорить сбор данных, но не перегружать API MOEX.
+MAX_CONCURRENT_TASKS = 12
 
 # TTL кэша в секундах.
-# Если кэш старше этого значения, он считается устаревшим и перезаписывается.
+# Если кэш старше этого времени, он должен считаться устаревшим.
 CACHE_TTL_SEC = 60 * 60 * 24
 
-# Размер пачки записей в БД.
-# Чем больше BATCH_SIZE, тем реже коммиты и выше скорость,
-# но больше нагрузка на память.
-BATCH_SIZE = 100
+# Размер батча для потенциальных пакетных операций записи в БД.
+BATCH_SIZE = 200
 
-# Демонстрационные параметры отбора облигаций.
-# Это заглушка под будущие реальные правила скрининга.
-MIN_COUPON_RATE = 0.0
-MAX_MATURITY_YEARS = 30
-MIN_RATING = "B-"
-
-# Имя листа в Excel.
-EXCEL_SHEET_NAME = "Screening"
+# Название листа в Excel.
+EXCEL_SHEET_NAME = "MoexBonds"
 
 
 def get_db_path() -> Path:
@@ -85,7 +85,8 @@ def get_cache_file_path() -> Path:
 
 
 def get_output_file_path() -> Path:
-    return OUTPUT_DIR / OUTPUT_FILE_NAME
+    file_name = OUTPUT_FILE_NAME_DEBUG if DEBUG_SINGLE_EXCEL_FILE else OUTPUT_FILE_NAME_RELEASE
+    return OUTPUT_DIR / file_name
 
 
 def get_log_file_path() -> Path:
