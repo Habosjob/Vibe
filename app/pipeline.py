@@ -13,9 +13,10 @@ from typing import Any
 
 import aiohttp
 from aiohttp import ClientResponseError
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.worksheet.datavalidation import DataValidation
 from tqdm import tqdm
 
 import config
@@ -39,6 +40,8 @@ class RunSummary:
     moex_output_path: Path | None
     corpbonds_output_path: Path | None
     merged_output_path: Path | None
+    emitents_output_path: Path | None
+    screener_output_path: Path | None
 
 
 @dataclass
@@ -857,6 +860,225 @@ def _save_merged_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBondRo
     return len(moex_rows)
 
 
+def _read_existing_emitents_scores(path: Path) -> dict[tuple[str, str], tuple[str, str]]:
+    if not path.exists():
+        return {}
+    wb = load_workbook(path)
+    if config.EMITENTS_EXCEL_SHEET_NAME not in wb.sheetnames:
+        return {}
+    ws = wb[config.EMITENTS_EXCEL_SHEET_NAME]
+    headers = [str(cell.value or "").strip() for cell in ws[1]]
+    indexes = {name: idx for idx, name in enumerate(headers)}
+    required = ["Наименование Эмитента", "ИНН эмитента", "ScoreList", "DateScoreList"]
+    if any(name not in indexes for name in required):
+        return {}
+    result: dict[tuple[str, str], tuple[str, str]] = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        emitter = str(row[indexes["Наименование Эмитента"]] or "").strip()
+        inn = str(row[indexes["ИНН эмитента"]] or "").strip()
+        score = str(row[indexes["ScoreList"]] or "").strip()
+        score_date = str(row[indexes["DateScoreList"]] or "").strip()
+        if emitter or inn:
+            result[(emitter, inn)] = (score, score_date)
+    return result
+
+
+def _save_emitents_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBondRow], output_path: Path) -> int:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = config.EMITENTS_EXCEL_SHEET_NAME
+
+    headers = ["Наименование Эмитента", "ИНН эмитента", "Рейтинг", "ScoreList", "DateScoreList"]
+    ws.append(headers)
+
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    for cell in ws[1]:
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    existing_scores = _read_existing_emitents_scores(output_path)
+    rating_by_secid = {row.secid: row.credit_rating for row in corpbonds_rows}
+    grouped: dict[tuple[str, str], set[str]] = {}
+    for row in moex_rows:
+        key = (row.emitter_name.strip(), row.emitter_inn.strip())
+        rating = rating_by_secid.get(row.secid, "").strip()
+        grouped.setdefault(key, set())
+        if rating:
+            grouped[key].add(rating)
+
+    today = datetime.now().date().isoformat()
+    for emitter_key in sorted(grouped.keys()):
+        emitter_name, emitter_inn = emitter_key
+        ratings = "; ".join(sorted(grouped[emitter_key]))
+        old_score, old_date = existing_scores.get(emitter_key, ("", ""))
+        score_value = old_score if old_score in config.SCORE_LIST_ALLOWED_VALUES else ""
+        date_value = old_date
+        if score_value and not date_value:
+            date_value = today
+        ws.append([emitter_name, emitter_inn, ratings, score_value, date_value])
+
+    if ws.max_row >= 2:
+        score_column = "D"
+        dv = DataValidation(
+            type="list",
+            formula1='"' + ",".join(config.SCORE_LIST_ALLOWED_VALUES) + '"',
+            allow_blank=True,
+            showErrorMessage=True,
+        )
+        dv.errorTitle = "Недопустимое значение"
+        dv.error = "Выберите значение из списка: GreenList, YellowList, RedList"
+        ws.add_data_validation(dv)
+        dv.add(f"{score_column}2:{score_column}{ws.max_row}")
+
+        date_column_index = 5
+        for row_idx in range(2, ws.max_row + 1):
+            score = str(ws.cell(row=row_idx, column=4).value or "").strip()
+            date_cell = ws.cell(row=row_idx, column=date_column_index)
+            if score and not date_cell.value:
+                date_cell.value = today
+
+    _format_ws_base(ws)
+    wb.save(output_path)
+    return max(0, ws.max_row - 1)
+
+
+def _days_to(target: date | None, today: date) -> int | None:
+    if target is None:
+        return None
+    return (target - today).days
+
+
+def _filter_bonds_for_screener(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    filters = config.SCREENER_FILTERS
+    today = datetime.now().date()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        amort_days = _days_to(_as_date(row.get("Дата начала амортизации")), today)
+        maturity_days = _days_to(_as_date(row.get("Дата погашения")), today)
+        offer_days = _days_to(_as_date(row.get("Дата оферты")), today)
+
+        exclude = False
+        amort_filter = filters.get("exclude_amortization_started_or_soon", {})
+        if amort_filter.get("enabled", False) and amort_days is not None and amort_days <= int(amort_filter.get("days", 365)):
+            exclude = True
+
+        structural_filter = filters.get("exclude_structural_bonds", {})
+        if structural_filter.get("enabled", False) and str(row.get("BOND_TYPE") or "").strip() == "Структурная облигация":
+            exclude = True
+
+        default_filter = filters.get("exclude_defaults", {})
+        if default_filter.get("enabled", False) and str(row.get("Дефолт") or "").strip() == "Да":
+            exclude = True
+
+        maturity_filter = filters.get("exclude_maturity_soon", {})
+        if maturity_filter.get("enabled", False) and maturity_days is not None and maturity_days < int(maturity_filter.get("days", 365)):
+            exclude = True
+
+        offer_filter = filters.get("exclude_offer_soon", {})
+        if offer_filter.get("enabled", False) and offer_days is not None and offer_days < int(offer_filter.get("days", 365)):
+            exclude = True
+
+        qualified_filter = filters.get("exclude_qualified_investors", {})
+        if qualified_filter.get("enabled", False) and str(row.get("Квалифицированный инвестор") or "").strip() == "Да":
+            exclude = True
+
+        if not exclude:
+            result.append(row)
+    return result
+
+
+def _save_screener_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBondRow], output_path: Path, emitents_path: Path) -> int:
+    corpbonds_by_secid = {row.secid: row for row in corpbonds_rows}
+    emitent_scores = _read_existing_emitents_scores(emitents_path)
+
+    merged_rows: list[dict[str, Any]] = []
+    for row in moex_rows:
+        corp = corpbonds_by_secid.get(row.secid)
+        corp_offer_date = _as_date(corp.nearest_offer_date) if corp else None
+        merged_offer_date = row.offer_date if row.offer_date is not None else corp_offer_date
+        emitter_key = (row.emitter_name.strip(), row.emitter_inn.strip())
+        score, score_date = emitent_scores.get(emitter_key, ("", ""))
+        merged_rows.append(
+            {
+                "Secid": row.secid,
+                "ISIN": row.isin,
+                "Короткое название": row.short_name,
+                "Наименование Эмитента": row.emitter_name,
+                "ИНН эмитента": row.emitter_inn,
+                "Актуальная Цена сейчас": row.current_price,
+                "Предыдущая цена выгрузки": row.previous_price,
+                "Динамика цены, %": row.price_change_percent,
+                "Объем сделок по бумаге": row.volume_today,
+                "Объем сделок за 20 дней": row.volume_20d,
+                "Дата погашения": row.maturity_date,
+                "Дата оферты": merged_offer_date,
+                "Дата начала амортизации": row.amortization_start,
+                "Квалифицированный инвестор": row.qualified_investor,
+                "Дефолт": row.default_flag,
+                "Технический дефолт": row.technical_default_flag,
+                "BOND_TYPE": row.bond_type,
+                "SECSUBTYPE": row.sec_sub_type,
+                "Купонный период": row.coupon_period,
+                "НКД": row.accrued_int,
+                "% купона": row.coupon_percent,
+                "YTM, %": row.ytm,
+                "Цена CorpBonds": corp.price if corp else "",
+                "Рейтинг": corp.credit_rating if corp else "",
+                "Тип купона": corp.coupon_type if corp else "",
+                "Формула купона": corp.coupon_formula if corp else "",
+                "Купон лесенкой": corp.ladder_coupon if corp else "",
+                "ScoreList": score,
+                "DateScoreList": score_date,
+            }
+        )
+
+    filtered_rows = _filter_bonds_for_screener(merged_rows)
+    default_headers = list(merged_rows[0].keys()) if merged_rows else []
+    headers = config.SCREENER_INCLUDE_COLUMNS[:] if config.SCREENER_INCLUDE_COLUMNS else default_headers
+    headers = [col for col in headers if col not in set(config.SCREENER_EXCLUDE_COLUMNS)]
+
+    grouped = {"Green": [], "Yellow": [], "Red": [], "Unsorted": []}
+    for row in filtered_rows:
+        score = str(row.get("ScoreList") or "").strip()
+        if score == "GreenList":
+            grouped["Green"].append(row)
+        elif score == "YellowList":
+            grouped["Yellow"].append(row)
+        elif score == "RedList":
+            grouped["Red"].append(row)
+        else:
+            grouped["Unsorted"].append(row)
+
+    wb = Workbook()
+    first_sheet = True
+    for sheet_name in ("Green", "Yellow", "Red", "Unsorted"):
+        ws = wb.active if first_sheet else wb.create_sheet(title=sheet_name)
+        first_sheet = False
+        ws.title = sheet_name
+        ws.append(headers)
+        header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        for cell in ws[1]:
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        for row in grouped[sheet_name]:
+            ws.append([row.get(h) for h in headers])
+
+        date_columns = [idx + 1 for idx, h in enumerate(headers) if h in {"Дата погашения", "Дата оферты", "Дата начала амортизации"}]
+        for row_idx in range(2, ws.max_row + 1):
+            for col_idx in date_columns:
+                cell = ws.cell(row=row_idx, column=col_idx)
+                if isinstance(cell.value, date):
+                    cell.number_format = "yyyy-mm-dd"
+        _format_ws_base(ws)
+
+    wb.save(output_path)
+    return len(filtered_rows)
+
+
+
 async def run_pipeline(db: Database) -> RunSummary:
     total_start = time.perf_counter()
     state = load_state()
@@ -1017,6 +1239,8 @@ async def run_pipeline(db: Database) -> RunSummary:
     moex_output_path: Path | None = None
     corpbonds_output_path: Path | None = None
     merged_output_path: Path | None = None
+    emitents_output_path: Path | None = None
+    screener_output_path: Path | None = None
 
     if config.EXPORT_MOEX_TO_EXCEL:
         moex_output_path = config.get_moex_output_file_path()
@@ -1027,6 +1251,12 @@ async def run_pipeline(db: Database) -> RunSummary:
     if config.EXPORT_MOEX_TO_EXCEL and config.EXPORT_CORPBONDS_TO_EXCEL:
         merged_output_path = config.get_merged_output_file_path()
         _save_merged_excel(prepared_rows, corpbonds_rows, merged_output_path)
+
+    emitents_output_path = config.get_emitents_output_file_path()
+    _save_emitents_excel(prepared_rows, corpbonds_rows, emitents_output_path)
+
+    screener_output_path = config.get_screener_output_file_path()
+    saved_count = _save_screener_excel(prepared_rows, corpbonds_rows, screener_output_path, emitents_output_path)
 
     save_state({"processed_ids": [x.secid for x in prepared_rows], "last_stage": "done"})
     duration_save = time.perf_counter() - save_start
@@ -1044,4 +1274,6 @@ async def run_pipeline(db: Database) -> RunSummary:
         moex_output_path=moex_output_path,
         corpbonds_output_path=corpbonds_output_path,
         merged_output_path=merged_output_path,
+        emitents_output_path=emitents_output_path,
+        screener_output_path=screener_output_path,
     )
