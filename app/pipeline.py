@@ -133,17 +133,20 @@ def _pick_price(row: dict[str, Any]) -> float | None:
 
 def _extract_rating(desc: dict[str, Any]) -> tuple[str, date | None, str]:
     rating_keys = (
+        "__RATING_VALUE",
         "CREDIT_RATING",
         "EMITTER_CREDIT_RATING",
         "RATING",
         "CREDITRATING",
     )
     rating_date_keys = (
+        "__RATING_DATE",
         "CREDIT_RATING_DATE",
         "RATING_DATE",
         "EMITTER_RATING_DATE",
     )
     rating_desc_keys = (
+        "__RATING_DESCRIPTION",
         "RATING_DESCRIPTION",
         "RATING_DISCRIPTION",
         "RATING_DESC",
@@ -253,15 +256,55 @@ async def _fetch_descriptions_with_cache(
 ) -> tuple[dict[str, dict[str, Any]], int, int]:
     min_ts = int(time.time()) - config.CACHE_TTL_SEC
     cached_raw, missing = db.get_cached_descriptions(secids, min_ts)
-    result = {secid: json.loads(payload) for secid, payload in cached_raw.items()}
+    result: dict[str, dict[str, Any]] = {}
+    for secid, payload in cached_raw.items():
+        parsed = json.loads(payload)
+        result[secid] = parsed
+        has_rating_markers = any(key in parsed for key in ("__RATING_VALUE", "__RATING_DATE", "__RATING_DESCRIPTION"))
+        if not has_rating_markers:
+            missing.append(secid)
+            result.pop(secid, None)
 
     async def fetch_one(secid: str) -> tuple[str, dict[str, Any]]:
         async with semaphore:
             url = f"https://iss.moex.com/iss/securities/{secid}.json?iss.meta=off&iss.only=description"
             payload = await client.get_json(url)
             cols = payload["description"]["columns"]
-            values = {row[0]: dict(zip(cols, row)).get("value") for row in payload["description"]["data"]}
+            values: dict[str, Any] = {}
+            rating_value = ""
+            rating_date = ""
+            rating_description = ""
+            for row in payload["description"]["data"]:
+                item = dict(zip(cols, row))
+                key = str(item.get("name") or "")
+                title = str(item.get("title") or "").lower()
+                value = item.get("value")
+                if key:
+                    values[key] = value
+                if value in (None, ""):
+                    continue
+                value_text = str(value).strip()
+                if not value_text:
+                    continue
+                if ("рейтинг" in title or "rating" in title) and "дата" not in title and "date" not in title:
+                    if "опис" in title or "коммент" in title or "прогноз" in title or "outlook" in title:
+                        if not rating_description:
+                            rating_description = value_text
+                    elif not rating_value:
+                        rating_value = value_text
+                if ("рейтинг" in title or "rating" in title) and ("дата" in title or "date" in title):
+                    if not rating_date:
+                        rating_date = value_text
+            if rating_value:
+                values["__RATING_VALUE"] = rating_value
+            if rating_date:
+                values["__RATING_DATE"] = rating_date
+            if rating_description:
+                values["__RATING_DESCRIPTION"] = rating_description
             return secid, values
+
+    missing = list(dict.fromkeys(missing))
+    cache_hits = len(result)
 
     upserts: list[tuple[str, str, int]] = []
     errors = 0
@@ -278,7 +321,7 @@ async def _fetch_descriptions_with_cache(
         progress.update(1)
     progress.close()
     db.upsert_descriptions(upserts)
-    return result, len(cached_raw), errors
+    return result, cache_hits, errors
 
 
 async def _fetch_emitters_with_cache(
@@ -378,7 +421,7 @@ async def _fetch_amortizations_with_cache(
         progress.update(1)
     progress.close()
     db.upsert_amortizations(upserts)
-    return result, len(cached_raw), errors
+    return result, cache_hits, errors
 
 
 def _save_excel(rows: list[BondRow], output_path: Path) -> int:
