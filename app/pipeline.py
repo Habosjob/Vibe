@@ -216,6 +216,13 @@ def _select_last_price(moex_price: float | None, corp_price: str) -> float | Non
     return _parse_corp_price(corp_price)
 
 
+def _is_rub_currency(currency: Any) -> bool:
+    if currency is None:
+        return False
+    normalized = str(currency).strip().upper()
+    return normalized in {"RUB", "RUR", "SUR", "RUBLES", "РОССИЙСКИЙ РУБЛЬ", "РУБ"}
+
+
 def _forecast_value(forecast: dict[int, float], years_ahead: int) -> float:
     if years_ahead <= 0:
         return float(forecast[0])
@@ -465,7 +472,7 @@ async def _fetch_all_traded_bonds(client: MoexClient) -> list[dict[str, Any]]:
         "?iss.meta=off&is_traded=1"
         "&iss.only=securities,marketdata"
         "&securities.columns=SECID,ISIN,SHORTNAME,SECNAME,MATDATE,OFFERDATE,COUPONPERIOD,ACCRUEDINT,"
-        "COUPONPERCENT,BONDTYPE,BONDSUBTYPE,PREVPRICE,FACEVALUE"
+        "COUPONPERCENT,BONDTYPE,BONDSUBTYPE,PREVPRICE,FACEVALUE,FACEUNIT,CURRENCYID"
         "&marketdata.columns=SECID,LAST,LCURRENTPRICE,LCLOSEPRICE,PREVPRICE,VOLTODAY,VALTODAY,YIELD"
     )
     payload = await client.get_json(url)
@@ -1324,20 +1331,25 @@ async def run_pipeline(db: Database) -> RunSummary:
         accrued_int = float(bond.get("ACCRUEDINT")) if bond.get("ACCRUEDINT") is not None else None
         coupon_percent = float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None
 
-        ytm_value = _calc_ytm_percent(
-            clean_price=_select_last_price(current_price, corp.get("price", "")),
-            accrued_int=accrued_int,
-            face_value=_parse_float(bond.get("FACEVALUE")),
-            cashflow_schedule=bond_cashflows.get(secid, []),
-            coupon_type=corp.get("coupon_type", ""),
-            coupon_formula=corp.get("coupon_formula", ""),
-            secid=secid,
-            end_date=_as_date(bond.get("OFFERDATE")) or _as_date(corp.get("nearest_offer_date")) or _as_date(bond.get("MATDATE")),
-            key_rate=key_rate,
-            ruonia=ruonia,
-            gcurve_5y=gcurve_5y,
-            gcurve_7y=gcurve_7y,
-        )
+        currency = desc.get("FACEUNIT") or desc.get("CURRENCYID") or bond.get("FACEUNIT") or bond.get("CURRENCYID")
+        is_rub_bond = _is_rub_currency(currency)
+
+        ytm_value: float | None = None
+        if is_rub_bond:
+            ytm_value = _calc_ytm_percent(
+                clean_price=_select_last_price(current_price, corp.get("price", "")),
+                accrued_int=accrued_int,
+                face_value=_parse_float(bond.get("FACEVALUE")),
+                cashflow_schedule=bond_cashflows.get(secid, []),
+                coupon_type=corp.get("coupon_type", ""),
+                coupon_formula=corp.get("coupon_formula", ""),
+                secid=secid,
+                end_date=_as_date(bond.get("OFFERDATE")) or _as_date(corp.get("nearest_offer_date")) or _as_date(bond.get("MATDATE")),
+                key_rate=key_rate,
+                ruonia=ruonia,
+                gcurve_5y=gcurve_5y,
+                gcurve_7y=gcurve_7y,
+            )
         ytm_from_moex = False
         if ytm_value is None:
             moex_ytm = _parse_float(bond.get("marketdata", {}).get("YIELD"))
