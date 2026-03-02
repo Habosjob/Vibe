@@ -24,6 +24,8 @@ python main.py
    - ранее выставленные `ScoreList`/`DateScoreList` сохраняются и не затираются.
 4. Пропускает облигации через сортер (все фильтры отключаются в `config.py`).
 5. Формирует `Screener.xlsx` в корне проекта с листами `Green`, `Yellow`, `Red`, `Unsorted`.
+6. Если расчётный YTM недоступен, подставляет `YTM` с MOEX и подсвечивает такую ячейку жёлтым в `Screener.xlsx`.
+7. Использует `DroppedBonds.xlsx` для ручного исключения бумаг по `ISIN` (файл создаётся автоматически при первом запуске).
 
 ## Где менять настройки
 
@@ -31,7 +33,7 @@ python main.py
 
 - фильтры сортера: `SCREENER_FILTERS`;
 - значения ручного скоринга: `SCORE_LIST_ALLOWED_VALUES`;
-- набор колонок в Screener: `SCREENER_INCLUDE_COLUMNS`, `SCREENER_EXCLUDE_COLUMNS`;
+- набор колонок в Screener: `SCREENER_INCLUDE_COLUMNS`, `SCREENER_EXCLUDE_COLUMNS` (по умолчанию оставлены только пользовательские колонки);
 - пути, таймауты, ретраи, параллельность, TTL кэша, имена файлов.
 
 ## Выходные файлы
@@ -41,6 +43,7 @@ python main.py
 - `output/MergeBonds.xlsx`
 - `output/Emitents.xlsx`
 - `Screener.xlsx` (в корне проекта)
+- `DroppedBonds.xlsx` (в корне проекта, для ручного исключения бумаг из Screener)
 
 ## Папки проекта
 

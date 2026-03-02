@@ -51,6 +51,11 @@ MERGED_OUTPUT_FILE_NAME_DEBUG = "MergeBonds.xlsx"
 # Имя итогового объединенного Excel-файла (MOEX + CorpBonds) в неотладочном режиме.
 MERGED_OUTPUT_FILE_NAME_RELEASE = "MergeBonds_latest.xlsx"
 
+# Имя Excel-файла для ручного исключения бумаг из Screener.
+# Файл содержит две колонки: ISIN и комментарий.
+# Если файла нет, он будет создан автоматически при запуске.
+DROPPED_BONDS_FILE_NAME = "DroppedBonds.xlsx"
+
 # Имя Excel-файла со справочником эмитентов.
 # Файл создается в output и используется для ручной расстановки ScoreList.
 EMITENTS_OUTPUT_FILE_NAME = "Emitents.xlsx"
@@ -118,7 +123,24 @@ SCORE_LIST_ALLOWED_VALUES = ["GreenList", "YellowList", "RedList"]
 
 # Названия колонок итогового Screener по умолчанию.
 # Если список пустой, используются все колонки из MergeBonds + ScoreList + DateScoreList.
-SCREENER_INCLUDE_COLUMNS: list[str] = []
+SCREENER_INCLUDE_COLUMNS: list[str] = [
+    "ISIN",
+    "Короткое название",
+    "Наименование Эмитента",
+    "Актуальная Цена сейчас",
+    "Предыдущая цена выгрузки",
+    "Динамика цены, %",
+    "Объем сделок по бумаге",
+    "Объем сделок за 20 дней",
+    "Дата погашения",
+    "Дата оферты",
+    "Дата начала амортизации",
+    "Купонный период",
+    "% купона",
+    "YTM, %",
+    "Тип купона",
+    "Формула купона",
+]
 
 # Колонки, которые нужно удалить из итогового Screener.
 # Применяются после SCREENER_INCLUDE_COLUMNS.
@@ -207,6 +229,10 @@ def get_merged_output_file_path() -> Path:
 
 def get_emitents_output_file_path() -> Path:
     return OUTPUT_DIR / EMITENTS_OUTPUT_FILE_NAME
+
+
+def get_dropped_bonds_output_file_path() -> Path:
+    return BASE_DIR / DROPPED_BONDS_FILE_NAME
 
 
 def get_screener_output_file_path() -> Path:
