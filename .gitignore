@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+cache/*
+!cache/.gitkeep
+db/*
+!db/.gitkeep
+raw/*
+!raw/.gitkeep
+logs/*
+!logs/.gitkeep
+output/*
+!output/.gitkeep
