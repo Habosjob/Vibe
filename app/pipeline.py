@@ -391,6 +391,12 @@ def _calc_ytm_percent(
                 annual_rate = parsed
         return max(face_value * (annual_rate / 100.0) * (period_days / 365.0), 0.0)
 
+    def _baseline_coupon_amount(payment_day: int, period_days: int) -> float:
+        if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
+            return _projected_coupon_amount(payment_day, period_days)
+        fixed_rate = coupon_percent or 0.0
+        return max(face_value * (fixed_rate / 100.0) * (period_days / 365.0), 0.0)
+
     filtered_schedule: list[tuple[date, float]] = []
     for payment_date, amount in cashflow_schedule:
         if payment_date <= today or amount <= 0:
@@ -424,11 +430,10 @@ def _calc_ytm_percent(
     adjusted_flows: list[tuple[int, float]] = []
     for payment_day, amount in normalized_flows:
         adjusted_amount = float(amount)
-        if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
-            period_days = coupon_period if coupon_period is not None and coupon_period > 0 else 91
-            min_expected_coupon = _projected_coupon_amount(payment_day, period_days)
-            if min_expected_coupon > 0:
-                adjusted_amount = max(adjusted_amount, min_expected_coupon)
+        period_days = coupon_period if coupon_period is not None and coupon_period > 0 else 91
+        min_expected_coupon = _baseline_coupon_amount(payment_day, period_days)
+        if min_expected_coupon > 0 and adjusted_amount < (min_expected_coupon * 0.5):
+            adjusted_amount = min_expected_coupon
         adjusted_flows.append((payment_day, adjusted_amount))
 
     if not adjusted_flows:
