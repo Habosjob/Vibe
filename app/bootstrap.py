@@ -73,6 +73,21 @@ def validate_config() -> list[str]:
     if not isinstance(config.EXPORT_CORPBONDS_TO_EXCEL, bool):
         errors.append("EXPORT_CORPBONDS_TO_EXCEL должен быть True/False")
 
+    for name, mapping in (
+        ("YTM_KEY_RATE_FORECAST", config.YTM_KEY_RATE_FORECAST),
+        ("YTM_INFLATION_FORECAST", config.YTM_INFLATION_FORECAST),
+    ):
+        if not isinstance(mapping, dict) or not mapping:
+            errors.append(f"{name} должен быть непустым словарём")
+            continue
+        for key, value in mapping.items():
+            if not isinstance(key, int) or key < 0:
+                errors.append(f"{name}: ключи должны быть целыми >= 0")
+                break
+            if not isinstance(value, (int, float)):
+                errors.append(f"{name}: значения должны быть числами")
+                break
+
     path_fields = (
         ("DOCS_DIR", config.DOCS_DIR),
         ("CACHE_DIR", config.CACHE_DIR),

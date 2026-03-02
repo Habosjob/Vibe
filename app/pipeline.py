@@ -6,6 +6,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+import re
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,7 @@ class BondRow:
     coupon_period: int | None
     accrued_int: float | None
     coupon_percent: float | None
+    ytm: float | None
 
 
 @dataclass
@@ -86,7 +88,10 @@ class MoexClient:
             connect=config.REQUEST_CONNECT_TIMEOUT_SEC,
             sock_read=config.REQUEST_READ_TIMEOUT_SEC,
         )
-        connector = aiohttp.TCPConnector(limit=max(16, config.MAX_CONCURRENT_TASKS * 2), ttl_dns_cache=300)
+        connector = aiohttp.TCPConnector(
+            limit=max(32, config.CORPBONDS_MAX_CONCURRENT_TASKS * 2, config.MAX_CONCURRENT_TASKS * 2),
+            ttl_dns_cache=300,
+        )
         self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self
 
@@ -178,6 +183,167 @@ def _normalize_text(value: str) -> str:
     if compact.lower() == "нет данных":
         return ""
     return compact
+
+
+def _parse_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace(" ", "").replace("%", "")
+    if not text:
+        return None
+    text = text.replace(",", ".")
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def _parse_corp_price(value: str) -> float | None:
+    if not value:
+        return None
+    candidate = value.split()[0].replace("\xa0", " ")
+    return _parse_float(candidate)
+
+
+def _select_last_price(moex_price: float | None, corp_price: str) -> float | None:
+    if moex_price is not None:
+        return moex_price
+    return _parse_corp_price(corp_price)
+
+
+def _forecast_value(forecast: dict[int, float], years_ahead: int) -> float:
+    if years_ahead <= 0:
+        return float(forecast[0])
+    if years_ahead in forecast:
+        return float(forecast[years_ahead])
+    return float(forecast[max(forecast.keys())])
+
+
+def _extract_formula_rate(
+    formula: str,
+    key_rate: float,
+    ruonia: float,
+    gcurve_5y: float,
+    gcurve_7y: float,
+) -> float | None:
+    if not formula:
+        return None
+    normalized = formula.upper().replace(" ", "").replace(",", ".")
+    numbers = [float(x) for x in re.findall(r"[+-]?\d+(?:\.\d+)?", normalized)]
+    spread = numbers[-1] if numbers else 0.0
+    base = None
+    if "RUONIA" in normalized:
+        base = ruonia
+    elif "G-CURVE7Y" in normalized or "G-CURVE7" in normalized:
+        base = gcurve_7y
+    elif "G-CURVE5Y" in normalized or "G-CURVE5" in normalized:
+        base = gcurve_5y
+    elif "КС" in normalized or "KC" in normalized:
+        base = key_rate
+    if base is None:
+        return None
+    rate = base + spread
+    max_match = re.search(r"MAX\(?([\d.]+)%?\)?", normalized)
+    if max_match:
+        try:
+            rate = min(rate, float(max_match.group(1)))
+        except Exception:
+            pass
+    return rate
+
+
+async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, float]:
+    urls = {
+        "key": "https://cbr.ru/hd_base/KeyRate/",
+        "ruonia": "https://cbr.ru/hd_base/ruonia/",
+        "zcyc": "https://cbr.ru/hd_base/zcyc_params/",
+    }
+    pages = await asyncio.gather(*(client.get_text(url) for url in urls.values()), return_exceptions=True)
+    key_rate = config.YTM_KEY_RATE_FORECAST[0]
+    ruonia = key_rate
+    gcurve_5y = key_rate
+    gcurve_7y = key_rate
+
+    try:
+        key_text = str(pages[0])
+        key_values = [float(v.replace(",", ".")) for v in re.findall(r"(\d+[,.]\d+)", key_text)]
+        if key_values:
+            key_rate = key_values[-1]
+    except Exception:
+        LOGGER.warning("Не удалось распарсить ключевую ставку ЦБ, используем прогноз Year0")
+
+    try:
+        ruonia_text = str(pages[1])
+        ruonia_values = [float(v.replace(",", ".")) for v in re.findall(r"(\d+[,.]\d+)", ruonia_text)]
+        if ruonia_values:
+            ruonia = ruonia_values[-1]
+    except Exception:
+        LOGGER.warning("Не удалось распарсить RUONIA, используем спред к КС")
+
+    try:
+        zcyc_text = str(pages[2])
+        row_match = re.findall(r"<tr>\s*<td[^>]*>[^<]*</td>(.*?)</tr>", zcyc_text, flags=re.S)
+        if row_match:
+            last_row = row_match[-1]
+            values = [float(v.replace(",", ".")) for v in re.findall(r"(\d+[,.]\d+)", last_row)]
+            if len(values) >= 7:
+                gcurve_5y = values[4]
+                gcurve_7y = values[6]
+    except Exception:
+        LOGGER.warning("Не удалось распарсить КБД ОФЗ, используем КС")
+
+    if isinstance(pages[1], Exception):
+        ruonia = key_rate - 1.0
+    if isinstance(pages[2], Exception):
+        gcurve_5y = key_rate - 0.5
+        gcurve_7y = key_rate - 0.3
+
+    return key_rate, ruonia, gcurve_5y, gcurve_7y
+
+
+def _calc_ytm_percent(
+    clean_price: float | None,
+    accrued_int: float | None,
+    coupon_percent: float | None,
+    coupon_type: str,
+    coupon_formula: str,
+    secid: str,
+    end_date: date | None,
+    key_rate: float,
+    ruonia: float,
+    gcurve_5y: float,
+    gcurve_7y: float,
+) -> float | None:
+    if clean_price is None or end_date is None:
+        return None
+    today = date.today()
+    if end_date <= today:
+        return None
+    years = max((end_date - today).days / 365.0, 0.01)
+    dirty_price = clean_price + max(accrued_int or 0.0, 0.0)
+    if dirty_price <= 0:
+        return None
+    lower_coupon_type = coupon_type.lower()
+
+    annual_coupon_rate = coupon_percent if coupon_percent is not None else 0.0
+    if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
+        projected_key = _forecast_value(config.YTM_KEY_RATE_FORECAST, min(int(years), 2))
+        projected_infl = _forecast_value(config.YTM_INFLATION_FORECAST, min(int(years), 2))
+        spread_ruonia = ruonia - key_rate
+        spread_g5 = gcurve_5y - key_rate
+        spread_g7 = gcurve_7y - key_rate
+        projected_ruonia = projected_key + spread_ruonia
+        projected_g5 = projected_key + spread_g5
+        projected_g7 = projected_key + spread_g7
+        if secid.startswith("SU50"):
+            annual_coupon_rate = projected_infl
+        parsed = _extract_formula_rate(coupon_formula, projected_key, projected_ruonia, projected_g5, projected_g7)
+        if parsed is not None:
+            annual_coupon_rate = parsed
+
+    annual_coupon_money = 100.0 * (annual_coupon_rate / 100.0)
+    ytm = (annual_coupon_money + (100.0 - dirty_price) / years) / ((100.0 + dirty_price) / 2.0) * 100.0
+    return round(ytm, 4)
 
 
 def _parse_corpbonds_html(html: str) -> dict[str, str]:
@@ -617,6 +783,7 @@ def _save_merged_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBondRo
         "Купонный период",
         "НКД",
         "% купона",
+        "YTM, %",
         "Цена CorpBonds",
         "Рейтинг",
         "Тип купона",
@@ -658,6 +825,7 @@ def _save_merged_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBondRo
                 row.coupon_period,
                 row.accrued_int,
                 row.coupon_percent,
+                row.ytm,
                 corp.price if corp else "",
                 corp.credit_rating if corp else "",
                 corp.coupon_type if corp else "",
@@ -696,6 +864,10 @@ async def run_pipeline(db: Database) -> RunSummary:
     emitters: dict[int, dict[str, str]] = {}
     amortizations: dict[str, date | None] = {}
     corpbonds_data: dict[str, dict[str, str]] = {}
+    key_rate = config.YTM_KEY_RATE_FORECAST[0]
+    ruonia = key_rate
+    gcurve_5y = key_rate
+    gcurve_7y = key_rate
 
     async with MoexClient() as client:
         LOGGER.info("Этап 1/5: загрузка списка облигаций")
@@ -736,6 +908,9 @@ async def run_pipeline(db: Database) -> RunSummary:
         from_cache_count += cache_corp_count
         errors_count += corp_errors
 
+        LOGGER.info("Загрузка индикаторов ЦБ для YTM")
+        key_rate, ruonia, gcurve_5y, gcurve_7y = await _fetch_cbr_curve(client)
+
     duration_load = time.perf_counter() - load_start
 
     calc_start = time.perf_counter()
@@ -766,6 +941,10 @@ async def run_pipeline(db: Database) -> RunSummary:
         else:
             price_change = None
 
+        corp = corpbonds_data.get(secid, {})
+        accrued_int = float(bond.get("ACCRUEDINT")) if bond.get("ACCRUEDINT") is not None else None
+        coupon_percent = float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None
+
         prepared_rows.append(
             BondRow(
                 secid=secid,
@@ -787,12 +966,24 @@ async def run_pipeline(db: Database) -> RunSummary:
                 bond_type=str(desc.get("BOND_TYPE") or bond.get("BONDTYPE") or ""),
                 sec_sub_type=str(desc.get("BOND_SUBTYPE") or bond.get("BONDSUBTYPE") or ""),
                 coupon_period=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
-                accrued_int=float(bond.get("ACCRUEDINT")) if bond.get("ACCRUEDINT") is not None else None,
-                coupon_percent=float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None,
+                accrued_int=accrued_int,
+                coupon_percent=coupon_percent,
+                ytm=_calc_ytm_percent(
+                    clean_price=_select_last_price(current_price, corp.get("price", "")),
+                    accrued_int=accrued_int,
+                    coupon_percent=coupon_percent,
+                    coupon_type=corp.get("coupon_type", ""),
+                    coupon_formula=corp.get("coupon_formula", ""),
+                    secid=secid,
+                    end_date=_as_date(bond.get("OFFERDATE")) or _as_date(corp.get("nearest_offer_date")) or _as_date(bond.get("MATDATE")),
+                    key_rate=key_rate,
+                    ruonia=ruonia,
+                    gcurve_5y=gcurve_5y,
+                    gcurve_7y=gcurve_7y,
+                ),
             )
         )
 
-        corp = corpbonds_data.get(secid, {})
         corpbonds_rows.append(
             CorpBondRow(
                 secid=secid,
