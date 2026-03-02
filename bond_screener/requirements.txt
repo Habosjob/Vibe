@@ -1,9 +1,0 @@
-pandas
-openpyxl
-httpx
-pyyaml
-tenacity
-tqdm
-playwright
-lxml
-beautifulsoup4
