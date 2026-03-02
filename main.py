@@ -413,12 +413,15 @@ class MoexClient:
 
     async def fetch_traded_bonds(self) -> list[dict[str, Any]]:
         all_rows: list[dict[str, Any]] = []
+        seen_secids: set[str] = set()
         start = 0
+        page_limit = 100
         while True:
             params = {
                 "iss.meta": "off",
                 "start": start,
-                "securities.columns": "SECID,ISIN,SHORTNAME,MATDATE,OFFERDATE,IS_QUALIFIED_INVESTORS,BOND_TYPE,SECSUBTYPE,FACEUNIT",
+                "limit": page_limit,
+                "securities.columns": "SECID,ISIN,SHORTNAME,MATDATE,OFFERDATE,IS_TRADED,IS_QUALIFIED_INVESTORS,BOND_TYPE,SECSUBTYPE,FACEUNIT",
             }
             payload = await self.get_json("/iss/engines/stock/markets/bonds/securities.json", params=params)
             if not payload:
@@ -427,11 +430,32 @@ class MoexClient:
             if not rows:
                 break
             filtered = [r for r in rows if str(r.get("IS_TRADED", 1)) in {"1", "True", "true"} or r.get("IS_TRADED") is None]
-            all_rows.extend(filtered)
-            self.logger.info("Загружено бумаг: %s", len(all_rows))
-            if len(rows) < 100:
+            before_len = len(all_rows)
+            for row in filtered:
+                secid = str(row.get("SECID") or "").strip()
+                if not secid or secid in seen_secids:
+                    continue
+                seen_secids.add(secid)
+                all_rows.append(row)
+            new_unique = len(all_rows) - before_len
+            self.logger.info("Загружено бумаг: %s (новых на странице: %s)", len(all_rows), new_unique)
+            cursor_rows = self.parse_block(payload, "securities.cursor")
+            if cursor_rows:
+                cursor = cursor_rows[0]
+                cursor_index = int(cursor.get("INDEX") or start)
+                cursor_page_size = int(cursor.get("PAGESIZE") or len(rows))
+                cursor_total = int(cursor.get("TOTAL") or 0)
+                next_start = cursor_index + cursor_page_size
+                if cursor_total and next_start >= cursor_total:
+                    break
+                if next_start <= start:
+                    self.logger.warning("Пагинация ISS не продвинулась (start=%s, next_start=%s), остановка.", start, next_start)
+                    break
+                start = next_start
+                continue
+            if len(rows) < page_limit or new_unique == 0:
                 break
-            start += 100
+            start += page_limit
         return all_rows
 
 
