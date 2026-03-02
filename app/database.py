@@ -6,23 +6,19 @@ from pathlib import Path
 
 class Database:
     def __init__(self, db_path: Path) -> None:
-        self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self.conn.execute("PRAGMA temp_store=MEMORY;")
-        self._create_schema()
+        self.conn.row_factory = sqlite3.Row
+        self._create_tables()
 
-    def _create_schema(self) -> None:
+    def _create_tables(self) -> None:
         self.conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS bonds (
+            CREATE TABLE IF NOT EXISTS bonds_snapshot (
                 secid TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                coupon_rate REAL NOT NULL,
-                maturity_years INTEGER NOT NULL,
-                rating TEXT NOT NULL,
-                source_hash TEXT NOT NULL,
+                last_price REAL,
                 updated_at TEXT NOT NULL
             );
             """
@@ -43,34 +39,25 @@ class Database:
         )
         self.conn.commit()
 
-    def upsert_bonds(self, rows: list[tuple[str, str, float, int, str, str, str]]) -> int:
+    def fetch_previous_prices(self) -> dict[str, float]:
+        rows = self.conn.execute("SELECT secid, last_price FROM bonds_snapshot;").fetchall()
+        return {str(row["secid"]): float(row["last_price"]) for row in rows if row["last_price"] is not None}
+
+    def upsert_snapshot(self, rows: list[tuple[str, float | None, str]]) -> int:
         if not rows:
             return 0
         with self.conn:
             self.conn.executemany(
                 """
-                INSERT INTO bonds (secid, name, coupon_rate, maturity_years, rating, source_hash, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO bonds_snapshot (secid, last_price, updated_at)
+                VALUES (?, ?, ?)
                 ON CONFLICT(secid) DO UPDATE SET
-                    name=excluded.name,
-                    coupon_rate=excluded.coupon_rate,
-                    maturity_years=excluded.maturity_years,
-                    rating=excluded.rating,
-                    source_hash=excluded.source_hash,
+                    last_price=excluded.last_price,
                     updated_at=excluded.updated_at;
                 """,
                 rows,
             )
         return len(rows)
-
-    def fetch_selected(self) -> list[tuple[str, str, float, int, str]]:
-        return self.conn.execute(
-            """
-            SELECT secid, name, coupon_rate, maturity_years, rating
-            FROM bonds
-            ORDER BY secid;
-            """
-        ).fetchall()
 
     def close(self) -> None:
         self.conn.close()
