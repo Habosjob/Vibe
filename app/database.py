@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 
 class Database:
@@ -20,6 +21,34 @@ class Database:
                 secid TEXT PRIMARY KEY,
                 last_price REAL,
                 updated_at TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bond_description_cache (
+                secid TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bond_amortization_cache (
+                secid TEXT PRIMARY KEY,
+                amortization_start TEXT,
+                updated_at INTEGER NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS emitter_cache (
+                emitter_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                inn TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
             );
             """
         )
@@ -53,6 +82,101 @@ class Database:
                 VALUES (?, ?, ?)
                 ON CONFLICT(secid) DO UPDATE SET
                     last_price=excluded.last_price,
+                    updated_at=excluded.updated_at;
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def get_cached_descriptions(self, secids: list[str], min_ts: int) -> tuple[dict[str, str], list[str]]:
+        if not secids:
+            return {}, []
+        placeholders = ",".join("?" for _ in secids)
+        rows = self.conn.execute(
+            f"SELECT secid, payload_json, updated_at FROM bond_description_cache WHERE secid IN ({placeholders});",
+            secids,
+        ).fetchall()
+        cached: dict[str, str] = {}
+        for row in rows:
+            if int(row["updated_at"]) >= min_ts:
+                cached[str(row["secid"])] = str(row["payload_json"])
+        missing = [secid for secid in secids if secid not in cached]
+        return cached, missing
+
+    def upsert_descriptions(self, rows: list[tuple[str, str, int]]) -> int:
+        if not rows:
+            return 0
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO bond_description_cache (secid, payload_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(secid) DO UPDATE SET
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at;
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def get_cached_amortizations(self, secids: list[str], min_ts: int) -> tuple[dict[str, str], list[str]]:
+        if not secids:
+            return {}, []
+        placeholders = ",".join("?" for _ in secids)
+        rows = self.conn.execute(
+            f"SELECT secid, amortization_start, updated_at FROM bond_amortization_cache WHERE secid IN ({placeholders});",
+            secids,
+        ).fetchall()
+        cached: dict[str, str] = {}
+        for row in rows:
+            if int(row["updated_at"]) >= min_ts:
+                cached[str(row["secid"])] = str(row["amortization_start"] or "")
+        missing = [secid for secid in secids if secid not in cached]
+        return cached, missing
+
+    def upsert_amortizations(self, rows: list[tuple[str, str, int]]) -> int:
+        if not rows:
+            return 0
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO bond_amortization_cache (secid, amortization_start, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(secid) DO UPDATE SET
+                    amortization_start=excluded.amortization_start,
+                    updated_at=excluded.updated_at;
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def get_cached_emitters(self, emitter_ids: list[int], min_ts: int) -> tuple[dict[int, dict[str, str]], list[int]]:
+        if not emitter_ids:
+            return {}, []
+        placeholders = ",".join("?" for _ in emitter_ids)
+        rows = self.conn.execute(
+            f"SELECT emitter_id, name, inn, updated_at FROM emitter_cache WHERE emitter_id IN ({placeholders});",
+            emitter_ids,
+        ).fetchall()
+        cached: dict[int, dict[str, str]] = {}
+        for row in rows:
+            emitter_id = int(row["emitter_id"])
+            if int(row["updated_at"]) >= min_ts:
+                cached[emitter_id] = {"name": str(row["name"]), "inn": str(row["inn"])}
+        missing = [emitter_id for emitter_id in emitter_ids if emitter_id not in cached]
+        return cached, missing
+
+    def upsert_emitters(self, rows: list[tuple[int, str, str, int]]) -> int:
+        if not rows:
+            return 0
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO emitter_cache (emitter_id, name, inn, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(emitter_id) DO UPDATE SET
+                    name=excluded.name,
+                    inn=excluded.inn,
                     updated_at=excluded.updated_at;
                 """,
                 rows,
