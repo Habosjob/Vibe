@@ -305,7 +305,6 @@ async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, flo
 
 
 def _calc_ytm_percent(
-    moex_ytm: float | None,
     clean_price: float | None,
     accrued_int: float | None,
     coupon_percent: float | None,
@@ -318,8 +317,6 @@ def _calc_ytm_percent(
     gcurve_5y: float,
     gcurve_7y: float,
 ) -> float | None:
-    if moex_ytm is not None and -30.0 <= moex_ytm <= 200.0:
-        return round(moex_ytm, 4)
     if clean_price is None or end_date is None:
         return None
     today = date.today()
@@ -1198,7 +1195,6 @@ async def run_pipeline(db: Database) -> RunSummary:
                 accrued_int=accrued_int,
                 coupon_percent=coupon_percent,
                 ytm=_calc_ytm_percent(
-                    moex_ytm=_parse_float(bond.get("marketdata", {}).get("YIELD")),
                     clean_price=_select_last_price(current_price, corp.get("price", "")),
                     accrued_int=accrued_int,
                     coupon_percent=coupon_percent,
