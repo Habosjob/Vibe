@@ -364,39 +364,6 @@ def _calc_ytm_percent(
     if dirty_price <= 0:
         return None
 
-    filtered_schedule: list[tuple[date, float]] = []
-    for payment_date, amount in cashflow_schedule:
-        if payment_date <= today or amount <= 0:
-            continue
-        if horizon is not None and payment_date > horizon:
-            continue
-        filtered_schedule.append((payment_date, float(amount)))
-
-    if not filtered_schedule:
-        if horizon is None or coupon_period is None or coupon_period <= 0:
-            return None
-        lower_coupon_type = coupon_type.lower()
-        annual_rate = coupon_percent or 0.0
-        if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
-            floater_rate = _extract_formula_rate(coupon_formula, key_rate, ruonia, gcurve_5y, gcurve_7y)
-            if floater_rate is not None:
-                annual_rate = floater_rate
-        estimated_coupon = face_value * (annual_rate / 100.0) * (coupon_period / 365.0)
-        cursor = today + timedelta(days=coupon_period)
-        while cursor < horizon:
-            filtered_schedule.append((cursor, max(estimated_coupon, 0.0)))
-            cursor += timedelta(days=coupon_period)
-        filtered_schedule.append((horizon, face_value + max(estimated_coupon, 0.0)))
-
-    if horizon is not None:
-        has_redemption_on_horizon = any(abs((payment_date - horizon).days) <= 1 for payment_date, _ in filtered_schedule)
-        if not has_redemption_on_horizon:
-            filtered_schedule.append((horizon, face_value))
-
-    normalized_flows = [(max((dt - today).days, 0), amount) for dt, amount in sorted(filtered_schedule, key=lambda i: i[0])]
-    if not normalized_flows:
-        return None
-
     lower_coupon_type = coupon_type.lower()
     spread_key_ruonia = key_rate - ruonia
     if abs(spread_key_ruonia) > config.YTM_MAX_ABS_SPREAD_SANITY:
@@ -408,21 +375,58 @@ def _calc_ytm_percent(
     if abs(spread_g7) > config.YTM_MAX_ABS_SPREAD_SANITY:
         spread_g7 = 0.0
 
+    def _projected_coupon_amount(payment_day: int, period_days: int) -> float:
+        year_index = max(payment_day - 1, 0) // 365
+        projected_key = _forecast_value(config.YTM_KEY_RATE_FORECAST, year_index)
+        projected_infl = _forecast_value(config.YTM_INFLATION_FORECAST, year_index)
+        projected_ruonia = projected_key - spread_key_ruonia
+        projected_g5 = projected_key + spread_g5
+        projected_g7 = projected_key + spread_g7
+        annual_rate = coupon_percent or 0.0
+        if secid.startswith("SU50"):
+            annual_rate = projected_infl
+        if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
+            parsed = _extract_formula_rate(coupon_formula, projected_key, projected_ruonia, projected_g5, projected_g7)
+            if parsed is not None:
+                annual_rate = parsed
+        return max(face_value * (annual_rate / 100.0) * (period_days / 365.0), 0.0)
+
+    filtered_schedule: list[tuple[date, float]] = []
+    for payment_date, amount in cashflow_schedule:
+        if payment_date <= today or amount <= 0:
+            continue
+        if horizon is not None and payment_date > horizon:
+            continue
+        filtered_schedule.append((payment_date, float(amount)))
+
+    if not filtered_schedule:
+        if horizon is None or coupon_period is None or coupon_period <= 0:
+            return None
+        cursor = today + timedelta(days=coupon_period)
+        while cursor < horizon:
+            payment_day = max((cursor - today).days, 0)
+            estimated_coupon = _projected_coupon_amount(payment_day, coupon_period)
+            filtered_schedule.append((cursor, estimated_coupon))
+            cursor += timedelta(days=coupon_period)
+        horizon_day = max((horizon - today).days, 0)
+        estimated_coupon = _projected_coupon_amount(horizon_day, coupon_period)
+        filtered_schedule.append((horizon, face_value + estimated_coupon))
+
+    if horizon is not None:
+        has_redemption_on_horizon = any(abs((payment_date - horizon).days) <= 1 for payment_date, _ in filtered_schedule)
+        if not has_redemption_on_horizon:
+            filtered_schedule.append((horizon, face_value))
+
+    normalized_flows = [(max((dt - today).days, 0), amount) for dt, amount in sorted(filtered_schedule, key=lambda i: i[0])]
+    if not normalized_flows:
+        return None
+
     adjusted_flows: list[tuple[int, float]] = []
     for payment_day, amount in normalized_flows:
         adjusted_amount = float(amount)
         if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
-            year_index = max(payment_day - 1, 0) // 365
-            projected_key = _forecast_value(config.YTM_KEY_RATE_FORECAST, year_index)
-            projected_infl = _forecast_value(config.YTM_INFLATION_FORECAST, year_index)
-            projected_ruonia = projected_key - spread_key_ruonia
-            projected_g5 = projected_key + spread_g5
-            projected_g7 = projected_key + spread_g7
-            annual_rate = projected_infl if secid.startswith("SU50") else 0.0
-            parsed = _extract_formula_rate(coupon_formula, projected_key, projected_ruonia, projected_g5, projected_g7)
-            if parsed is not None:
-                annual_rate = parsed
-            min_expected_coupon = face_value * (annual_rate / 100.0) * 7.0 / 365.0
+            period_days = coupon_period if coupon_period is not None and coupon_period > 0 else 91
+            min_expected_coupon = _projected_coupon_amount(payment_day, period_days)
             if min_expected_coupon > 0:
                 adjusted_amount = max(adjusted_amount, min_expected_coupon)
         adjusted_flows.append((payment_day, adjusted_amount))
