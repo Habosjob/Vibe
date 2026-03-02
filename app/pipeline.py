@@ -179,6 +179,15 @@ async def _fetch_bond_description(client: MoexClient, secid: str, semaphore: asy
         values = {row[0]: dict(zip(cols, row)).get("value") for row in payload["description"]["data"]}
         return secid, values
 
+    tasks = [asyncio.create_task(fetch_one(secid)) for secid in secids]
+    if tasks:
+        for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Амортизация", unit="обл", dynamic_ncols=True):
+            try:
+                secid, amort = await task
+                result[secid] = amort
+            except Exception as exc:
+                LOGGER.warning("Не удалось загрузить амортизацию: %s", exc)
+    return result
 
 async def _fetch_emitters(client: MoexClient, emitter_ids: set[int], semaphore: asyncio.Semaphore) -> dict[int, dict[str, str]]:
     result: dict[int, dict[str, str]] = {}
@@ -255,7 +264,8 @@ async def _fetch_amortizations(client: MoexClient, secids: list[str], semaphore:
 
 
 def _to_yes_no(value: Any) -> str:
-    return "Да" if str(value) in {"1", "true", "True"} else "Нет"
+    normalized = str(value).strip().lower()
+    return "Да" if normalized in {"1", "true"} else "Нет"
 
 
 def _format_date(value: Any) -> str:
@@ -266,48 +276,6 @@ def _format_date(value: Any) -> str:
         return datetime.fromisoformat(text).strftime("%d.%m.%Y")
     except Exception:
         return text
-
-            earliest: date | None = None
-            for row in rows:
-                data = dict(zip(cols, row))
-                amort_date_raw = data.get("amortdate")
-                face_value = data.get("facevalue")
-                initial_face_value = data.get("initialfacevalue")
-                value_prc = data.get("valueprc")
-                if not amort_date_raw:
-                    continue
-                has_amort = False
-                if face_value is not None and initial_face_value is not None:
-                    try:
-                        has_amort = float(face_value) < float(initial_face_value)
-                    except Exception:
-                        has_amort = False
-                if not has_amort and value_prc is not None:
-                    try:
-                        has_amort = float(value_prc) < 100.0
-                    except Exception:
-                        has_amort = False
-                if not has_amort:
-                    continue
-                parsed = datetime.fromisoformat(str(amort_date_raw)).date()
-                if earliest is None or parsed < earliest:
-                    earliest = parsed
-            return secid, earliest.strftime("%d.%m.%Y") if earliest else ""
-
-    tasks = [asyncio.create_task(fetch_one(secid)) for secid in secids]
-    if tasks:
-        for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Амортизация", unit="обл", dynamic_ncols=True):
-            try:
-                secid, amort = await task
-                result[secid] = amort
-            except Exception as exc:
-                LOGGER.warning("Не удалось загрузить амортизацию: %s", exc)
-    return result
-
-
-def _to_yes_no(value: Any) -> str:
-    return "Да" if str(value) in {"1", "true", "True"} else "Нет"
-
 
 def _format_date(value: Any) -> str:
     if not value:
