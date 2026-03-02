@@ -95,6 +95,7 @@ async def _fetch_all_traded_bonds(client: MoexClient) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     start = 0
     page_size = 100
+    progress = tqdm(desc="Список облигаций MOEX", unit="стр", dynamic_ncols=True)
     while True:
         url = (
             "https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json"
@@ -115,9 +116,13 @@ async def _fetch_all_traded_bonds(client: MoexClient) -> list[dict[str, Any]]:
         for row in sec_data:
             row["marketdata"] = md_data.get(row["SECID"], {})
         records.extend(sec_data)
+        progress.update(len(sec_data))
+        progress.set_postfix_str(f"страниц: {start // page_size + 1}")
         start += len(sec_data)
         if len(sec_data) < page_size:
             break
+    progress.close()
+
     uniq: dict[str, dict[str, Any]] = {}
     for row in records:
         secid = str(row.get("SECID") or "")
@@ -139,12 +144,13 @@ async def _fetch_volume_20d(client: MoexClient) -> dict[str, float]:
     aggregated: dict[str, float] = {}
     start = 0
     page_size = 100
+    progress = tqdm(desc="История объема 20д", unit="стр", dynamic_ncols=True)
     while True:
         url = (
             "https://iss.moex.com/iss/history/engines/stock/markets/bonds/securities.json"
             f"?iss.meta=off&iss.only=history&from={start_dt}&till={end_dt}"
-            "&history.columns=SECID,VOLUME&start="
-            f"{start}"
+            "&history.columns=SECID,VOLUME"
+            f"&start={start}"
         )
         payload = await client.get_json(url)
         cols = payload["history"]["columns"]
@@ -154,12 +160,13 @@ async def _fetch_volume_20d(client: MoexClient) -> dict[str, float]:
         for row in rows:
             data = dict(zip(cols, row))
             secid = str(data.get("SECID") or "")
-            if not secid:
-                continue
-            aggregated[secid] = aggregated.get(secid, 0.0) + float(data.get("VOLUME") or 0.0)
+            if secid:
+                aggregated[secid] = aggregated.get(secid, 0.0) + float(data.get("VOLUME") or 0.0)
+        progress.update(len(rows))
         start += len(rows)
         if len(rows) < page_size:
             break
+    progress.close()
     return aggregated
 
 
@@ -173,35 +180,34 @@ def _pick_price(row: dict[str, Any]) -> float | None:
     return float(prev) if prev is not None else None
 
 
-async def _fetch_bond_description(client: MoexClient, secid: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
+async def _fetch_bond_description(client: MoexClient, secid: str, semaphore: asyncio.Semaphore) -> tuple[str, dict[str, Any]]:
     async with semaphore:
         url = f"https://iss.moex.com/iss/securities/{secid}.json?iss.meta=off&iss.only=description"
         payload = await client.get_json(url)
         cols = payload["description"]["columns"]
-        return {row[0]: dict(zip(cols, row)).get("value") for row in payload["description"]["data"]}
+        values = {row[0]: dict(zip(cols, row)).get("value") for row in payload["description"]["data"]}
+        return secid, values
 
 
 async def _fetch_emitters(client: MoexClient, emitter_ids: set[int], semaphore: asyncio.Semaphore) -> dict[int, dict[str, str]]:
     result: dict[int, dict[str, str]] = {}
 
-    async def fetch_one(emitter_id: int) -> None:
+    async def fetch_one(emitter_id: int) -> tuple[int, dict[str, str]]:
         async with semaphore:
             payload = await client.get_json(f"https://iss.moex.com/iss/emitters/{emitter_id}.json?iss.meta=off")
             cols = payload["emitter"]["columns"]
             data_rows = payload["emitter"]["data"]
             if not data_rows:
-                return
+                return emitter_id, {"name": "", "inn": ""}
             data = dict(zip(cols, data_rows[0]))
-            result[emitter_id] = {
-                "name": str(data.get("TITLE") or ""),
-                "inn": str(data.get("INN") or ""),
-            }
+            return emitter_id, {"name": str(data.get("TITLE") or ""), "inn": str(data.get("INN") or "")}
 
-    tasks = [fetch_one(emitter_id) for emitter_id in sorted(emitter_ids)]
+    tasks = [asyncio.create_task(fetch_one(emitter_id)) for emitter_id in sorted(emitter_ids)]
     if tasks:
-        for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Загрузка эмитентов", unit="эмит"):
+        for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Загрузка эмитентов", unit="эмит", dynamic_ncols=True):
             try:
-                await task
+                emitter_id, emitter_data = await task
+                result[emitter_id] = emitter_data
             except Exception as exc:
                 LOGGER.warning("Не удалось загрузить эмитента: %s", exc)
     return result
@@ -210,15 +216,15 @@ async def _fetch_emitters(client: MoexClient, emitter_ids: set[int], semaphore: 
 async def _fetch_amortizations(client: MoexClient, secids: list[str], semaphore: asyncio.Semaphore) -> dict[str, str]:
     result: dict[str, str] = {}
 
-    async def fetch_one(secid: str) -> None:
+    async def fetch_one(secid: str) -> tuple[str, str]:
         async with semaphore:
             url = f"https://iss.moex.com/iss/securities/{secid}/bondization.json?iss.meta=off&iss.only=amortizations"
             payload = await client.get_json(url)
             rows = payload.get("amortizations", {}).get("data", [])
             cols = payload.get("amortizations", {}).get("columns", [])
             if not rows or not cols:
-                result[secid] = ""
-                return
+                return secid, ""
+
             earliest: date | None = None
             for row in rows:
                 data = dict(zip(cols, row))
@@ -244,13 +250,14 @@ async def _fetch_amortizations(client: MoexClient, secids: list[str], semaphore:
                 parsed = datetime.fromisoformat(str(amort_date_raw)).date()
                 if earliest is None or parsed < earliest:
                     earliest = parsed
-            result[secid] = earliest.strftime("%d.%m.%Y") if earliest else ""
+            return secid, earliest.strftime("%d.%m.%Y") if earliest else ""
 
-    tasks = [fetch_one(secid) for secid in secids]
+    tasks = [asyncio.create_task(fetch_one(secid)) for secid in secids]
     if tasks:
-        for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Амортизация", unit="обл"):
+        for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Амортизация", unit="обл", dynamic_ncols=True):
             try:
-                await task
+                secid, amort = await task
+                result[secid] = amort
             except Exception as exc:
                 LOGGER.warning("Не удалось загрузить амортизацию: %s", exc)
     return result
@@ -376,33 +383,37 @@ async def run_pipeline(db: Database) -> RunSummary:
 
     client = MoexClient()
     semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_TASKS)
+    bonds: list[dict[str, Any]] = []
+    descriptions: dict[str, dict[str, Any]] = {}
+    emitters: dict[int, dict[str, str]] = {}
+    amortizations: dict[str, str] = {}
+    volume_20d: dict[str, float] = {}
 
     try:
+        LOGGER.info("Этап 1/4: загрузка списка облигаций")
         bonds = await _fetch_all_traded_bonds(client)
+        LOGGER.info("Получено строк после дедупликации: %s", len(bonds))
+
+        LOGGER.info("Этап 2/4: загрузка истории объемов")
         volume_20d = await _fetch_volume_20d(client)
 
         processed_ids: list[str] = list(state.get("processed_ids", []))
-        descriptions: dict[str, dict[str, Any]] = {}
-        tasks = []
-        for bond in bonds:
-            secid = str(bond.get("SECID") or "")
-            if not secid:
-                continue
-            tasks.append((secid, _fetch_bond_description(client, secid, semaphore)))
-
-        progress = tqdm(total=len(tasks), desc="Описание облигаций", unit="обл")
-        for secid, task in tasks:
+        secids = [str(bond.get("SECID")) for bond in bonds if bond.get("SECID")]
+        desc_tasks = [asyncio.create_task(_fetch_bond_description(client, secid, semaphore)) for secid in secids]
+        progress = tqdm(total=len(desc_tasks), desc="Описание облигаций", unit="обл", dynamic_ncols=True)
+        for task in asyncio.as_completed(desc_tasks):
             try:
-                desc = await task
+                secid, desc = await task
                 descriptions[secid] = desc
                 processed_ids.append(secid)
                 save_state({"processed_ids": processed_ids, "last_stage": "description"})
             except Exception as exc:
                 errors_count += 1
-                LOGGER.warning("Ошибка описания %s: %s", secid, exc)
+                LOGGER.warning("Ошибка загрузки описания: %s", exc)
             progress.update(1)
         progress.close()
 
+        LOGGER.info("Этап 3/4: загрузка карточек эмитентов")
         emitter_ids: set[int] = set()
         for desc in descriptions.values():
             emitter_id = desc.get("EMITTER_ID")
@@ -412,9 +423,10 @@ async def run_pipeline(db: Database) -> RunSummary:
                 emitter_ids.add(int(emitter_id))
             except Exception:
                 continue
-
         emitters = await _fetch_emitters(client, emitter_ids, semaphore)
-        amortizations = await _fetch_amortizations(client, [str(b.get("SECID")) for b in bonds if b.get("SECID")], semaphore)
+
+        LOGGER.info("Этап 4/4: загрузка амортизаций")
+        amortizations = await _fetch_amortizations(client, secids, semaphore)
 
     finally:
         await client.close()
@@ -425,9 +437,11 @@ async def run_pipeline(db: Database) -> RunSummary:
     previous_prices = db.fetch_previous_prices()
     prepared_rows: list[BondRow] = []
 
+    progress_calc = tqdm(total=len(bonds), desc="Подготовка строк", unit="обл", dynamic_ncols=True)
     for bond in bonds:
         secid = str(bond.get("SECID") or "")
         if not secid:
+            progress_calc.update(1)
             continue
         desc = descriptions.get(secid, {})
         emitter_id_raw = desc.get("EMITTER_ID")
@@ -445,40 +459,40 @@ async def run_pipeline(db: Database) -> RunSummary:
         else:
             price_change = None
 
-        row = BondRow(
-            secid=secid,
-            isin=str(bond.get("ISIN") or ""),
-            short_name=str(bond.get("SHORTNAME") or ""),
-            emitter_name=emitter_info["name"],
-            emitter_inn=emitter_info["inn"],
-            credit_rating="",
-            rating_date="",
-            rating_description="",
-            current_price=current_price,
-            previous_price=previous_price,
-            price_change_percent=round(price_change, 4) if price_change is not None else None,
-            volume_today=float(bond.get("marketdata", {}).get("VOLTODAY") or 0.0),
-            volume_20d=round(volume_20d.get(secid, 0.0), 2),
-            maturity_date=_format_date(bond.get("MATDATE")),
-            offer_date=_format_date(bond.get("OFFERDATE")),
-            amortization_start=amortizations.get(secid, ""),
-            qualified_investor=_to_yes_no(desc.get("ISQUALIFIEDINVESTORS")),
-            default_flag=_to_yes_no(desc.get("HASDEFAULT")),
-            technical_default_flag=_to_yes_no(desc.get("HASTECHNICALDEFAULT")),
-            bond_type=str(desc.get("BOND_TYPE") or bond.get("BONDTYPE") or ""),
-            sec_sub_type=str(desc.get("BOND_SUBTYPE") or bond.get("BONDSUBTYPE") or ""),
-            coupon_period=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
-            accrued_int=float(bond.get("ACCRUEDINT")) if bond.get("ACCRUEDINT") is not None else None,
-            coupon_percent=float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None,
+        prepared_rows.append(
+            BondRow(
+                secid=secid,
+                isin=str(bond.get("ISIN") or ""),
+                short_name=str(bond.get("SHORTNAME") or ""),
+                emitter_name=emitter_info["name"],
+                emitter_inn=emitter_info["inn"],
+                credit_rating="",
+                rating_date="",
+                rating_description="",
+                current_price=current_price,
+                previous_price=previous_price,
+                price_change_percent=round(price_change, 4) if price_change is not None else None,
+                volume_today=float(bond.get("marketdata", {}).get("VOLTODAY") or 0.0),
+                volume_20d=round(volume_20d.get(secid, 0.0), 2),
+                maturity_date=_format_date(bond.get("MATDATE")),
+                offer_date=_format_date(bond.get("OFFERDATE")),
+                amortization_start=amortizations.get(secid, ""),
+                qualified_investor=_to_yes_no(desc.get("ISQUALIFIEDINVESTORS")),
+                default_flag=_to_yes_no(desc.get("HASDEFAULT")),
+                technical_default_flag=_to_yes_no(desc.get("HASTECHNICALDEFAULT")),
+                bond_type=str(desc.get("BOND_TYPE") or bond.get("BONDTYPE") or ""),
+                sec_sub_type=str(desc.get("BOND_SUBTYPE") or bond.get("BONDSUBTYPE") or ""),
+                coupon_period=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
+                accrued_int=float(bond.get("ACCRUEDINT")) if bond.get("ACCRUEDINT") is not None else None,
+                coupon_percent=float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None,
+            )
         )
-        prepared_rows.append(row)
+        progress_calc.update(1)
+    progress_calc.close()
 
     prepared_rows.sort(key=lambda x: x.secid)
 
-    snapshot_rows = [
-        (row.secid, row.current_price, datetime.now(timezone.utc).isoformat())
-        for row in prepared_rows
-    ]
+    snapshot_rows = [(row.secid, row.current_price, datetime.now(timezone.utc).isoformat()) for row in prepared_rows]
     db.upsert_snapshot(snapshot_rows)
     save_state({"processed_ids": [x.secid for x in prepared_rows], "last_stage": "calc"})
     duration_calc = time.perf_counter() - calc_start
