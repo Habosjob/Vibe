@@ -219,8 +219,13 @@ def _select_last_price(moex_price: float | None, corp_price: str) -> float | Non
 def _is_rub_currency(currency: Any) -> bool:
     if currency is None:
         return False
-    normalized = str(currency).strip().upper()
-    return normalized in {"RUB", "RUR", "SUR", "RUBLES", "РОССИЙСКИЙ РУБЛЬ", "РУБ"}
+    normalized = str(currency).strip().upper().replace("\xa0", " ")
+    compact = re.sub(r"[^A-ZА-ЯЁ]", "", normalized)
+    rub_markers = {"RUB", "RUR", "SUR", "RUBLE", "RUBLES", "РУБ", "РУБЛЬ", "РУБЛЕЙ", "РОССИЙСКИЙРУБЛЬ"}
+    if compact in rub_markers:
+        return True
+    tokens = re.findall(r"[A-ZА-ЯЁ]+", normalized)
+    return any(token in rub_markers for token in tokens)
 
 
 def _forecast_value(forecast: dict[int, float], years_ahead: int) -> float:
@@ -394,8 +399,8 @@ def _calc_ytm_percent(
             if parsed is not None:
                 annual_rate = parsed
             min_expected_coupon = face_value * (annual_rate / 100.0) * 7.0 / 365.0
-            if adjusted_amount < min_expected_coupon * 0.3:
-                continue
+            if min_expected_coupon > 0:
+                adjusted_amount = max(adjusted_amount, min_expected_coupon)
         adjusted_flows.append((payment_day, adjusted_amount))
 
     if not adjusted_flows:
@@ -623,7 +628,7 @@ def _parse_bondization_cashflow_payload(payload: dict[str, Any]) -> tuple[list[t
         amount = _parse_float(data.get("value_rub"))
         if amount is None:
             amount = _parse_float(data.get("value"))
-        if amount is None or amount <= 0:
+        if amount is None:
             continue
         schedule[payment_date] = schedule.get(payment_date, 0.0) + amount
 
