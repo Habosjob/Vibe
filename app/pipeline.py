@@ -308,6 +308,7 @@ def _calc_ytm_percent(
     clean_price: float | None,
     accrued_int: float | None,
     coupon_percent: float | None,
+    coupon_period_days: int | None,
     coupon_type: str,
     coupon_formula: str,
     secid: str,
@@ -322,35 +323,88 @@ def _calc_ytm_percent(
     today = date.today()
     if end_date <= today:
         return None
-    years = max((end_date - today).days / 365.0, 0.01)
+    total_days = (end_date - today).days
+    years = max(total_days / 365.0, 0.01)
     dirty_price = clean_price + max(accrued_int or 0.0, 0.0)
     if dirty_price <= 0:
         return None
+    if coupon_period_days is None or coupon_period_days <= 0:
+        coupon_period_days = 182
     lower_coupon_type = coupon_type.lower()
 
-    annual_coupon_rate = coupon_percent if coupon_percent is not None else 0.0
-    if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
-        projected_key = _forecast_value(config.YTM_KEY_RATE_FORECAST, min(int(years), 2))
-        projected_infl = _forecast_value(config.YTM_INFLATION_FORECAST, min(int(years), 2))
-        spread_ruonia = ruonia - key_rate
-        spread_g5 = gcurve_5y - key_rate
-        spread_g7 = gcurve_7y - key_rate
-        projected_ruonia = projected_key + spread_ruonia
-        projected_g5 = projected_key + spread_g5
-        projected_g7 = projected_key + spread_g7
-        if secid.startswith("SU50"):
-            annual_coupon_rate = projected_infl
-        parsed = _extract_formula_rate(coupon_formula, projected_key, projected_ruonia, projected_g5, projected_g7)
-        if parsed is not None:
-            annual_coupon_rate = parsed
-
-    annual_coupon_money = 100.0 * (annual_coupon_rate / 100.0)
     if not (20.0 <= dirty_price <= 200.0):
         return None
-    ytm = (annual_coupon_money + (100.0 - dirty_price) / years) / ((100.0 + dirty_price) / 2.0) * 100.0
+
+    spread_key_ruonia = key_rate - ruonia
+    spread_g5 = gcurve_5y - key_rate
+    spread_g7 = gcurve_7y - key_rate
+
+    def resolve_annual_coupon_rate(days_from_today: int) -> float:
+        year_index = max(days_from_today - 1, 0) // 365
+        annual_rate = coupon_percent if coupon_percent is not None else 0.0
+        if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
+            projected_key = _forecast_value(config.YTM_KEY_RATE_FORECAST, year_index)
+            projected_infl = _forecast_value(config.YTM_INFLATION_FORECAST, year_index)
+            projected_ruonia = projected_key - spread_key_ruonia
+            projected_g5 = projected_key + spread_g5
+            projected_g7 = projected_key + spread_g7
+            if secid.startswith("SU50"):
+                annual_rate = projected_infl
+            parsed = _extract_formula_rate(coupon_formula, projected_key, projected_ruonia, projected_g5, projected_g7)
+            if parsed is not None:
+                annual_rate = parsed
+        return annual_rate
+
+    payment_days: list[int] = []
+    elapsed = coupon_period_days
+    while elapsed < total_days:
+        payment_days.append(elapsed)
+        elapsed += coupon_period_days
+    payment_days.append(total_days)
+
+    cashflows: list[tuple[int, float]] = []
+    previous_day = 0
+    for payment_day in payment_days:
+        period_days = payment_day - previous_day
+        annual_coupon_rate = resolve_annual_coupon_rate(payment_day)
+        coupon_cash = 100.0 * (annual_coupon_rate / 100.0) * (period_days / 365.0)
+        principal_cash = 100.0 if payment_day == total_days else 0.0
+        cashflows.append((payment_day, coupon_cash + principal_cash))
+        previous_day = payment_day
+
+    def npv(rate: float) -> float:
+        total = -dirty_price
+        for payment_day, amount in cashflows:
+            discount = (1.0 + rate) ** (payment_day / 365.0)
+            total += amount / discount
+        return total
+
+    left, right = -0.95, 3.0
+    npv_left = npv(left)
+    npv_right = npv(right)
+    while npv_left * npv_right > 0 and right < 20.0:
+        right *= 2.0
+        npv_right = npv(right)
+    if npv_left * npv_right > 0:
+        return None
+
+    for _ in range(120):
+        mid = (left + right) / 2.0
+        npv_mid = npv(mid)
+        if abs(npv_mid) < 1e-10:
+            left = right = mid
+            break
+        if npv_left * npv_mid <= 0:
+            right = mid
+            npv_right = npv_mid
+        else:
+            left = mid
+            npv_left = npv_mid
+
+    ytm = ((left + right) / 2.0) * 100.0
     if ytm < -95.0 or ytm > 250.0:
         return None
-    return round(ytm, 4)
+    return round(ytm, 2)
 
 
 def _parse_corpbonds_html(page_html: str) -> dict[str, str]:
@@ -1198,6 +1252,7 @@ async def run_pipeline(db: Database) -> RunSummary:
                     clean_price=_select_last_price(current_price, corp.get("price", "")),
                     accrued_int=accrued_int,
                     coupon_percent=coupon_percent,
+                    coupon_period_days=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
                     coupon_type=corp.get("coupon_type", ""),
                     coupon_formula=corp.get("coupon_formula", ""),
                     secid=secid,
