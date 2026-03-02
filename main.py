@@ -54,6 +54,8 @@ def main() -> int:
     print(f"Итоговый файл MOEX: {summary.moex_output_path if summary.moex_output_path else 'выгрузка отключена'}")
     print(f"Итоговый файл CorpBonds: {summary.corpbonds_output_path if summary.corpbonds_output_path else 'выгрузка отключена'}")
     print(f"Итоговый файл MergeBonds: {summary.merged_output_path if summary.merged_output_path else 'выгрузка отключена'}")
+    print(f"Справочник эмитентов: {summary.emitents_output_path if summary.emitents_output_path else 'не сформирован'}")
+    print(f"Итоговый файл Screener: {summary.screener_output_path if summary.screener_output_path else 'не сформирован'}")
     print(f"Лог-файл: {log_path}")
     print(f"Взято из кэша/инкрементально: {summary.from_cache_count}")
 

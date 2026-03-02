@@ -51,6 +51,14 @@ MERGED_OUTPUT_FILE_NAME_DEBUG = "MergeBonds.xlsx"
 # Имя итогового объединенного Excel-файла (MOEX + CorpBonds) в неотладочном режиме.
 MERGED_OUTPUT_FILE_NAME_RELEASE = "MergeBonds_latest.xlsx"
 
+# Имя Excel-файла со справочником эмитентов.
+# Файл создается в output и используется для ручной расстановки ScoreList.
+EMITENTS_OUTPUT_FILE_NAME = "Emitents.xlsx"
+
+# Имя итогового Excel-файла скринера.
+# В файле будут листы Green/Yellow/Red/Unsorted.
+SCREENER_OUTPUT_FILE_NAME = "Screener.xlsx"
+
 # Настройки логирования.
 # LOG_FILE_NAME      — основной файл логов.
 # LOG_LEVEL          — уровень логов: DEBUG, INFO, WARNING, ERROR.
@@ -100,6 +108,34 @@ CORPBONDS_EXCEL_SHEET_NAME = "CorpBonds"
 
 # Название листа в Excel MergeBonds.
 MERGED_EXCEL_SHEET_NAME = "MergeBonds"
+
+# Название листа в Excel справочника эмитентов.
+EMITENTS_EXCEL_SHEET_NAME = "Emitents"
+
+# Разрешенные значения для ручного скоринга эмитентов.
+# Значения используются как выпадающий список в Emitents.xlsx.
+SCORE_LIST_ALLOWED_VALUES = ["GreenList", "YellowList", "RedList"]
+
+# Названия колонок итогового Screener по умолчанию.
+# Если список пустой, используются все колонки из MergeBonds + ScoreList + DateScoreList.
+SCREENER_INCLUDE_COLUMNS: list[str] = []
+
+# Колонки, которые нужно удалить из итогового Screener.
+# Применяются после SCREENER_INCLUDE_COLUMNS.
+SCREENER_EXCLUDE_COLUMNS: list[str] = []
+
+# Настройки фильтров сортера перед формированием Screener.
+# enabled=True  — фильтр включен.
+# enabled=False — фильтр отключен.
+# days — порог в днях (для датных фильтров).
+SCREENER_FILTERS = {
+    "exclude_amortization_started_or_soon": {"enabled": True, "days": 365},
+    "exclude_structural_bonds": {"enabled": True},
+    "exclude_defaults": {"enabled": True},
+    "exclude_maturity_soon": {"enabled": True, "days": 365},
+    "exclude_offer_soon": {"enabled": True, "days": 365},
+    "exclude_qualified_investors": {"enabled": True},
+}
 
 # Базовый URL карточки облигации на CorpBonds (работает по SECID).
 CORPBONDS_BOND_URL_TEMPLATE = "https://corpbonds.ru/bond/{secid}"
@@ -157,3 +193,11 @@ def get_log_file_path() -> Path:
 def get_merged_output_file_path() -> Path:
     file_name = MERGED_OUTPUT_FILE_NAME_DEBUG if DEBUG_SINGLE_EXCEL_FILE else MERGED_OUTPUT_FILE_NAME_RELEASE
     return OUTPUT_DIR / file_name
+
+
+def get_emitents_output_file_path() -> Path:
+    return OUTPUT_DIR / EMITENTS_OUTPUT_FILE_NAME
+
+
+def get_screener_output_file_path() -> Path:
+    return BASE_DIR / SCREENER_OUTPUT_FILE_NAME

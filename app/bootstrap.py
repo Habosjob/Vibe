@@ -72,6 +72,39 @@ def validate_config() -> list[str]:
         errors.append("EXPORT_MOEX_TO_EXCEL должен быть True/False")
     if not isinstance(config.EXPORT_CORPBONDS_TO_EXCEL, bool):
         errors.append("EXPORT_CORPBONDS_TO_EXCEL должен быть True/False")
+    if not isinstance(config.SCORE_LIST_ALLOWED_VALUES, list) or not config.SCORE_LIST_ALLOWED_VALUES:
+        errors.append("SCORE_LIST_ALLOWED_VALUES должен быть непустым списком")
+    else:
+        for item in config.SCORE_LIST_ALLOWED_VALUES:
+            if not isinstance(item, str) or not item.strip():
+                errors.append("SCORE_LIST_ALLOWED_VALUES должен содержать непустые строки")
+                break
+
+    for name, value in (
+        ("SCREENER_INCLUDE_COLUMNS", config.SCREENER_INCLUDE_COLUMNS),
+        ("SCREENER_EXCLUDE_COLUMNS", config.SCREENER_EXCLUDE_COLUMNS),
+    ):
+        if not isinstance(value, list):
+            errors.append(f"{name} должен быть списком")
+            continue
+        for item in value:
+            if not isinstance(item, str):
+                errors.append(f"{name} должен содержать только строки")
+                break
+
+    if not isinstance(config.SCREENER_FILTERS, dict) or not config.SCREENER_FILTERS:
+        errors.append("SCREENER_FILTERS должен быть непустым словарем")
+    else:
+        for filter_name, filter_data in config.SCREENER_FILTERS.items():
+            if not isinstance(filter_data, dict):
+                errors.append(f"SCREENER_FILTERS[{filter_name}] должен быть словарем")
+                continue
+            if not isinstance(filter_data.get("enabled"), bool):
+                errors.append(f"SCREENER_FILTERS[{filter_name}]['enabled'] должен быть True/False")
+            if "days" in filter_data:
+                days = filter_data["days"]
+                if not isinstance(days, int) or days < 0:
+                    errors.append(f"SCREENER_FILTERS[{filter_name}]['days'] должен быть целым >= 0")
 
     for name, mapping in (
         ("YTM_KEY_RATE_FORECAST", config.YTM_KEY_RATE_FORECAST),
