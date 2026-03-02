@@ -322,8 +322,8 @@ async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, flo
 def _calc_ytm_percent(
     clean_price: float | None,
     accrued_int: float | None,
-    coupon_percent: float | None,
-    coupon_period_days: int | None,
+    face_value: float | None,
+    cashflow_schedule: list[tuple[date, float]],
     coupon_type: str,
     coupon_formula: str,
     secid: str,
@@ -333,23 +333,35 @@ def _calc_ytm_percent(
     gcurve_5y: float,
     gcurve_7y: float,
 ) -> float | None:
-    if clean_price is None or end_date is None:
+    if clean_price is None or face_value is None or face_value <= 0:
         return None
     today = date.today()
-    if end_date <= today:
-        return None
-    total_days = (end_date - today).days
-    years = max(total_days / 365.0, 0.01)
-    dirty_price = clean_price + max(accrued_int or 0.0, 0.0)
+    horizon = end_date if end_date and end_date > today else None
+    dirty_price = (clean_price / 100.0) * face_value + max(accrued_int or 0.0, 0.0)
     if dirty_price <= 0:
         return None
-    if coupon_period_days is None or coupon_period_days <= 0:
-        coupon_period_days = 182
-    lower_coupon_type = coupon_type.lower()
 
-    if not (20.0 <= dirty_price <= 200.0):
+    filtered_schedule: list[tuple[date, float]] = []
+    for payment_date, amount in cashflow_schedule:
+        if payment_date <= today or amount <= 0:
+            continue
+        if horizon is not None and payment_date > horizon:
+            continue
+        filtered_schedule.append((payment_date, float(amount)))
+
+    if not filtered_schedule:
         return None
 
+    if horizon is not None:
+        has_redemption_on_horizon = any(abs((payment_date - horizon).days) <= 1 for payment_date, _ in filtered_schedule)
+        if not has_redemption_on_horizon:
+            filtered_schedule.append((horizon, face_value))
+
+    normalized_flows = [(max((dt - today).days, 0), amount) for dt, amount in sorted(filtered_schedule, key=lambda i: i[0])]
+    if not normalized_flows:
+        return None
+
+    lower_coupon_type = coupon_type.lower()
     spread_key_ruonia = key_rate - ruonia
     if abs(spread_key_ruonia) > config.YTM_MAX_ABS_SPREAD_SANITY:
         spread_key_ruonia = config.YTM_RUONIA_KEY_SPREAD_DEFAULT
@@ -360,44 +372,32 @@ def _calc_ytm_percent(
     if abs(spread_g7) > config.YTM_MAX_ABS_SPREAD_SANITY:
         spread_g7 = 0.0
 
-    def resolve_annual_coupon_rate(days_from_today: int) -> float:
-        year_index = max(days_from_today - 1, 0) // 365
-        annual_rate = coupon_percent if coupon_percent is not None else 0.0
+    adjusted_flows: list[tuple[int, float]] = []
+    for payment_day, amount in normalized_flows:
+        adjusted_amount = float(amount)
         if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
+            year_index = max(payment_day - 1, 0) // 365
             projected_key = _forecast_value(config.YTM_KEY_RATE_FORECAST, year_index)
             projected_infl = _forecast_value(config.YTM_INFLATION_FORECAST, year_index)
             projected_ruonia = projected_key - spread_key_ruonia
             projected_g5 = projected_key + spread_g5
             projected_g7 = projected_key + spread_g7
-            if secid.startswith("SU50"):
-                annual_rate = projected_infl
+            annual_rate = projected_infl if secid.startswith("SU50") else 0.0
             parsed = _extract_formula_rate(coupon_formula, projected_key, projected_ruonia, projected_g5, projected_g7)
             if parsed is not None:
                 annual_rate = parsed
-        return annual_rate
+            min_expected_coupon = face_value * (annual_rate / 100.0) * 7.0 / 365.0
+            if adjusted_amount < min_expected_coupon * 0.3:
+                continue
+        adjusted_flows.append((payment_day, adjusted_amount))
 
-    payment_days: list[int] = []
-    elapsed = coupon_period_days
-    while elapsed < total_days:
-        payment_days.append(elapsed)
-        elapsed += coupon_period_days
-    payment_days.append(total_days)
-
-    cashflows: list[tuple[int, float]] = []
-    previous_day = 0
-    for payment_day in payment_days:
-        period_days = payment_day - previous_day
-        annual_coupon_rate = resolve_annual_coupon_rate(payment_day)
-        coupon_cash = 100.0 * (annual_coupon_rate / 100.0) * (period_days / 365.0)
-        principal_cash = 100.0 if payment_day == total_days else 0.0
-        cashflows.append((payment_day, coupon_cash + principal_cash))
-        previous_day = payment_day
+    if not adjusted_flows:
+        return None
 
     def npv(rate: float) -> float:
         total = -dirty_price
-        for payment_day, amount in cashflows:
-            discount = (1.0 + rate) ** (payment_day / 365.0)
-            total += amount / discount
+        for payment_day, amount in adjusted_flows:
+            total += amount / ((1.0 + rate) ** (payment_day / 365.0))
         return total
 
     left, right = -0.95, 3.0
@@ -465,7 +465,7 @@ async def _fetch_all_traded_bonds(client: MoexClient) -> list[dict[str, Any]]:
         "?iss.meta=off&is_traded=1"
         "&iss.only=securities,marketdata"
         "&securities.columns=SECID,ISIN,SHORTNAME,SECNAME,MATDATE,OFFERDATE,COUPONPERIOD,ACCRUEDINT,"
-        "COUPONPERCENT,BONDTYPE,BONDSUBTYPE,PREVPRICE"
+        "COUPONPERCENT,BONDTYPE,BONDSUBTYPE,PREVPRICE,FACEVALUE"
         "&marketdata.columns=SECID,LAST,LCURRENTPRICE,LCLOSEPRICE,PREVPRICE,VOLTODAY,VALTODAY,YIELD"
     )
     payload = await client.get_json(url)
@@ -601,48 +601,70 @@ async def _fetch_emitters_with_cache(
     return result, len(cached), errors
 
 
+def _parse_bondization_cashflow_payload(payload: dict[str, Any]) -> tuple[list[tuple[date, float]], date | None]:
+    schedule: dict[date, float] = {}
+    amortization_start: date | None = None
+
+    coupons = payload.get("coupons", {})
+    coupon_rows = coupons.get("data", [])
+    coupon_cols = coupons.get("columns", [])
+    for row in coupon_rows:
+        data = dict(zip(coupon_cols, row))
+        payment_date = _as_date(data.get("coupondate"))
+        if payment_date is None:
+            continue
+        amount = _parse_float(data.get("value_rub"))
+        if amount is None:
+            amount = _parse_float(data.get("value"))
+        if amount is None or amount <= 0:
+            continue
+        schedule[payment_date] = schedule.get(payment_date, 0.0) + amount
+
+    amortizations = payload.get("amortizations", {})
+    amort_rows = amortizations.get("data", [])
+    amort_cols = amortizations.get("columns", [])
+    for row in amort_rows:
+        data = dict(zip(amort_cols, row))
+        payment_date = _as_date(data.get("amortdate"))
+        if payment_date is None:
+            continue
+        amount = _parse_float(data.get("value_rub"))
+        if amount is None:
+            amount = _parse_float(data.get("value"))
+        if amount is None or amount <= 0:
+            continue
+        schedule[payment_date] = schedule.get(payment_date, 0.0) + amount
+        if amortization_start is None or payment_date < amortization_start:
+            amortization_start = payment_date
+
+    sorted_schedule = sorted(schedule.items(), key=lambda item: item[0])
+    return sorted_schedule, amortization_start
+
+
 async def _fetch_amortizations_with_cache(
     client: MoexClient,
     db: Database,
     secids: list[str],
     semaphore: asyncio.Semaphore,
-) -> tuple[dict[str, date | None], int, int]:
+) -> tuple[dict[str, date | None], dict[str, list[tuple[date, float]]], int, int]:
     min_ts = int(time.time()) - config.CACHE_TTL_SEC
-    cached_raw, missing = db.get_cached_amortizations(secids, min_ts)
-    result: dict[str, date | None] = {secid: _as_date(value) for secid, value in cached_raw.items()}
-    cache_hits = len(result)
+    cached_raw, missing = db.get_cached_bondization_cashflows(secids, min_ts)
 
-    async def fetch_one(secid: str) -> tuple[str, str]:
+    amortization_dates: dict[str, date | None] = {}
+    schedules: dict[str, list[tuple[date, float]]] = {}
+    for secid, payload_raw in cached_raw.items():
+        payload = json.loads(payload_raw)
+        schedule, amort_start = _parse_bondization_cashflow_payload(payload)
+        schedules[secid] = schedule
+        amortization_dates[secid] = amort_start
+
+    cache_hits = len(cached_raw)
+
+    async def fetch_one(secid: str) -> tuple[str, dict[str, Any]]:
         async with semaphore:
-            url = f"https://iss.moex.com/iss/securities/{secid}/bondization.json?iss.meta=off&iss.only=amortizations"
+            url = f"https://iss.moex.com/iss/securities/{secid}/bondization.json?iss.meta=off"
             payload = await client.get_json(url)
-            rows = payload.get("amortizations", {}).get("data", [])
-            cols = payload.get("amortizations", {}).get("columns", [])
-            if not rows or not cols:
-                return secid, ""
-            earliest: date | None = None
-            for row in rows:
-                data = dict(zip(cols, row))
-                parsed = _as_date(data.get("amortdate"))
-                if parsed is None:
-                    continue
-                has_amort = False
-                face_value = data.get("facevalue")
-                initial_face_value = data.get("initialfacevalue")
-                value_prc = data.get("valueprc")
-                if face_value is not None and initial_face_value is not None:
-                    try:
-                        has_amort = float(face_value) < float(initial_face_value)
-                    except Exception:
-                        has_amort = False
-                if not has_amort and value_prc is not None:
-                    try:
-                        has_amort = float(value_prc) < 100.0
-                    except Exception:
-                        has_amort = False
-                if has_amort and (earliest is None or parsed < earliest):
-                    earliest = parsed
-            return secid, earliest.isoformat() if earliest else ""
+            return secid, payload
 
     tasks = [asyncio.create_task(fetch_one(secid)) for secid in missing]
     upserts: list[tuple[str, str, int]] = []
@@ -650,16 +672,18 @@ async def _fetch_amortizations_with_cache(
     progress = tqdm(total=len(tasks), desc="Амортизация", unit="обл", dynamic_ncols=True)
     for task in asyncio.as_completed(tasks):
         try:
-            secid, amort = await task
-            result[secid] = _as_date(amort)
-            upserts.append((secid, amort, int(time.time())))
+            secid, payload = await task
+            schedule, amort_start = _parse_bondization_cashflow_payload(payload)
+            schedules[secid] = schedule
+            amortization_dates[secid] = amort_start
+            upserts.append((secid, json.dumps(payload, ensure_ascii=False), int(time.time())))
         except Exception as exc:
             errors += 1
-            LOGGER.warning("Не удалось загрузить амортизацию: %s", exc)
+            LOGGER.warning("Не удалось загрузить график выплат: %s", exc)
         progress.update(1)
     progress.close()
-    db.upsert_amortizations(upserts)
-    return result, cache_hits, errors
+    db.upsert_bondization_cashflows(upserts)
+    return amortization_dates, schedules, cache_hits, errors
 
 
 async def _fetch_corpbonds_with_cache(
@@ -1217,6 +1241,7 @@ async def run_pipeline(db: Database) -> RunSummary:
     descriptions: dict[str, dict[str, Any]] = {}
     emitters: dict[int, dict[str, str]] = {}
     amortizations: dict[str, date | None] = {}
+    bond_cashflows: dict[str, list[tuple[date, float]]] = {}
     corpbonds_data: dict[str, dict[str, str]] = {}
     key_rate = config.YTM_KEY_RATE_FORECAST[0]
     ruonia = key_rate
@@ -1251,7 +1276,7 @@ async def run_pipeline(db: Database) -> RunSummary:
         save_state({"processed_ids": list(descriptions.keys()), "last_stage": "description"})
 
         LOGGER.info("Этап 4/5: загрузка амортизаций")
-        amortizations, cache_amort_count, amort_errors = await _fetch_amortizations_with_cache(client, db, secids, semaphore)
+        amortizations, bond_cashflows, cache_amort_count, amort_errors = await _fetch_amortizations_with_cache(client, db, secids, semaphore)
         from_cache_count += cache_amort_count
         errors_count += amort_errors
 
@@ -1302,8 +1327,8 @@ async def run_pipeline(db: Database) -> RunSummary:
         ytm_value = _calc_ytm_percent(
             clean_price=_select_last_price(current_price, corp.get("price", "")),
             accrued_int=accrued_int,
-            coupon_percent=coupon_percent,
-            coupon_period_days=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
+            face_value=_parse_float(bond.get("FACEVALUE")),
+            cashflow_schedule=bond_cashflows.get(secid, []),
             coupon_type=corp.get("coupon_type", ""),
             coupon_formula=corp.get("coupon_formula", ""),
             secid=secid,
