@@ -177,10 +177,16 @@ def _pick_price(row: dict[str, Any]) -> float | None:
     md = row.get("marketdata", {})
     for key in ("LAST", "LCURRENTPRICE", "LCLOSEPRICE", "PREVPRICE"):
         value = md.get(key)
-        if value is not None:
-            return float(value)
+        if value is None:
+            continue
+        numeric = float(value)
+        if numeric > 0:
+            return numeric
     prev = row.get("PREVPRICE")
-    return float(prev) if prev is not None else None
+    if prev is None:
+        return None
+    numeric_prev = float(prev)
+    return numeric_prev if numeric_prev > 0 else None
 
 
 def _normalize_text(value: str) -> str:
@@ -211,9 +217,12 @@ def _parse_corp_price(value: str) -> float | None:
 
 
 def _select_last_price(moex_price: float | None, corp_price: str) -> float | None:
-    if moex_price is not None:
+    if moex_price is not None and moex_price > 0:
         return moex_price
-    return _parse_corp_price(corp_price)
+    corp_numeric = _parse_corp_price(corp_price)
+    if corp_numeric is not None and corp_numeric > 0:
+        return corp_numeric
+    return None
 
 
 def _is_rub_currency(currency: Any) -> bool:
@@ -340,6 +349,8 @@ def _calc_ytm_percent(
     coupon_formula: str,
     secid: str,
     end_date: date | None,
+    coupon_period: int | None,
+    coupon_percent: float | None,
     key_rate: float,
     ruonia: float,
     gcurve_5y: float,
@@ -362,7 +373,20 @@ def _calc_ytm_percent(
         filtered_schedule.append((payment_date, float(amount)))
 
     if not filtered_schedule:
-        return None
+        if horizon is None or coupon_period is None or coupon_period <= 0:
+            return None
+        lower_coupon_type = coupon_type.lower()
+        annual_rate = coupon_percent or 0.0
+        if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
+            floater_rate = _extract_formula_rate(coupon_formula, key_rate, ruonia, gcurve_5y, gcurve_7y)
+            if floater_rate is not None:
+                annual_rate = floater_rate
+        estimated_coupon = face_value * (annual_rate / 100.0) * (coupon_period / 365.0)
+        cursor = today + timedelta(days=coupon_period)
+        while cursor < horizon:
+            filtered_schedule.append((cursor, max(estimated_coupon, 0.0)))
+            cursor += timedelta(days=coupon_period)
+        filtered_schedule.append((horizon, face_value + max(estimated_coupon, 0.0)))
 
     if horizon is not None:
         has_redemption_on_horizon = any(abs((payment_date - horizon).days) <= 1 for payment_date, _ in filtered_schedule)
@@ -1350,6 +1374,8 @@ async def run_pipeline(db: Database) -> RunSummary:
                 coupon_formula=corp.get("coupon_formula", ""),
                 secid=secid,
                 end_date=_as_date(bond.get("OFFERDATE")) or _as_date(corp.get("nearest_offer_date")) or _as_date(bond.get("MATDATE")),
+                coupon_period=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
+                coupon_percent=coupon_percent,
                 key_rate=key_rate,
                 ruonia=ruonia,
                 gcurve_5y=gcurve_5y,
