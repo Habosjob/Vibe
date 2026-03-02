@@ -372,6 +372,7 @@ async def _fetch_amortizations_with_cache(
     min_ts = int(time.time()) - config.CACHE_TTL_SEC
     cached_raw, missing = db.get_cached_amortizations(secids, min_ts)
     result: dict[str, date | None] = {secid: _as_date(value) for secid, value in cached_raw.items()}
+    cache_hits = len(result)
 
     async def fetch_one(secid: str) -> tuple[str, str]:
         async with semaphore:
