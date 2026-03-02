@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import sqlite3
+import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -59,6 +60,52 @@ class StateStore:
         processed = set(self.data.get("processed_secids", []))
         processed.add(secid)
         self.data["processed_secids"] = sorted(processed)
+
+
+class ProgressReporter:
+    def __init__(self, total: int, logger: logging.Logger) -> None:
+        self.total = total
+        self.logger = logger
+        self.current = 0
+        self.started_at = time.perf_counter()
+        self.last_report_at = self.started_at
+        self._use_tqdm = bool(config.SHOW_PROGRESS_BAR and total > 0 and sys.stdout.isatty())
+        self._bar: tqdm | None = None
+        if self._use_tqdm:
+            self._bar = tqdm(
+                total=total,
+                desc="Обработка облигаций",
+                unit="bond",
+                dynamic_ncols=True,
+                leave=True,
+                file=sys.stdout,
+            )
+        elif total > 0:
+            print(f"Обработка облигаций: 0/{total} (0%)")
+
+    def update(self, amount: int = 1) -> None:
+        self.current += amount
+        if self._bar:
+            self._bar.update(amount)
+            return
+        if self.total <= 0:
+            return
+        now = time.perf_counter()
+        should_print = self.current >= self.total or (now - self.last_report_at) >= config.PROGRESS_FALLBACK_INTERVAL_SEC
+        if not should_print:
+            return
+        elapsed = max(now - self.started_at, 0.001)
+        per_item = elapsed / max(self.current, 1)
+        eta = max(self.total - self.current, 0) * per_item
+        percent = (self.current / self.total) * 100
+        print(f"Обработка облигаций: {self.current}/{self.total} ({percent:.1f}%), ETA {eta:.1f} сек")
+        self.last_report_at = now
+
+    def close(self) -> None:
+        if self._bar:
+            self._bar.close()
+        elif self.total > 0 and self.current < self.total:
+            print(f"Обработка облигаций: {self.total}/{self.total} (100.0%), ETA 0.0 сек")
 
 
 class DB:
@@ -289,6 +336,8 @@ def validate_config() -> None:
         raise ValueError("LOOKBACK_TRADING_DAYS должен быть >= 1")
     if config.LIQUIDITY_LOOKBACK_CALENDAR_DAYS < config.LOOKBACK_TRADING_DAYS:
         raise ValueError("LIQUIDITY_LOOKBACK_CALENDAR_DAYS должен быть >= LOOKBACK_TRADING_DAYS")
+    if config.PROGRESS_FALLBACK_INTERVAL_SEC <= 0:
+        raise ValueError("PROGRESS_FALLBACK_INTERVAL_SEC должен быть > 0")
 
 
 class MoexClient:
@@ -711,7 +760,7 @@ async def async_main() -> int:
         t_stage = time.perf_counter()
         rows_for_excel: list[dict[str, Any]] = []
         batch_counter = 0
-        pbar = tqdm(total=len(bonds), desc="Обработка облигаций", unit="bond")
+        progress = ProgressReporter(total=len(bonds), logger=logger)
         for item in bonds:
             secid = str(item.get("SECID") or "")
             try:
@@ -735,8 +784,8 @@ async def async_main() -> int:
             except Exception as exc:
                 summary.errors_total += 1
                 logger.exception("Ошибка обработки secid=%s: %s", secid, exc)
-            pbar.update(1)
-        pbar.close()
+            progress.update(1)
+        progress.close()
         db.commit()
         state.save()
         stage_times["Загрузка/обработка деталей"] = time.perf_counter() - t_stage
