@@ -18,6 +18,7 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from tqdm import tqdm
+from bs4 import BeautifulSoup
 
 import config
 from app.bootstrap import load_state, save_state
@@ -255,6 +256,23 @@ def _extract_formula_rate(
     return rate
 
 
+def _extract_last_row_numbers(page_html: str) -> list[float]:
+    soup = BeautifulSoup(page_html, "html.parser")
+    rows = soup.find_all("tr")
+    for row in reversed(rows):
+        cells = row.find_all("td")
+        if not cells:
+            continue
+        numbers: list[float] = []
+        for cell in cells:
+            match = re.search(r"-?\d+[,.]\d+", cell.get_text(" ", strip=True))
+            if match:
+                numbers.append(float(match.group(0).replace(",", ".")))
+        if numbers:
+            return numbers
+    return []
+
+
 async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, float]:
     urls = {
         "key": "https://cbr.ru/hd_base/KeyRate/",
@@ -263,43 +281,39 @@ async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, flo
     }
     pages = await asyncio.gather(*(client.get_text(url) for url in urls.values()), return_exceptions=True)
     key_rate = config.YTM_KEY_RATE_FORECAST[0]
-    ruonia = key_rate
+    ruonia = key_rate - config.YTM_RUONIA_KEY_SPREAD_DEFAULT
     gcurve_5y = key_rate
     gcurve_7y = key_rate
 
-    try:
-        key_text = str(pages[0])
-        key_values = [float(v.replace(",", ".")) for v in re.findall(r"(\d+[,.]\d+)", key_text)]
-        if key_values:
-            key_rate = key_values[-1]
-    except Exception:
-        LOGGER.warning("Не удалось распарсить ключевую ставку ЦБ, используем прогноз Year0")
+    if not isinstance(pages[0], Exception):
+        try:
+            key_values = _extract_last_row_numbers(str(pages[0]))
+            if key_values:
+                key_rate = key_values[-1]
+        except Exception:
+            LOGGER.warning("Не удалось распарсить ключевую ставку ЦБ, используем прогноз Year0")
 
-    try:
-        ruonia_text = str(pages[1])
-        ruonia_values = [float(v.replace(",", ".")) for v in re.findall(r"(\d+[,.]\d+)", ruonia_text)]
-        if ruonia_values:
-            ruonia = ruonia_values[-1]
-    except Exception:
-        LOGGER.warning("Не удалось распарсить RUONIA, используем спред к КС")
+    if not isinstance(pages[1], Exception):
+        try:
+            ruonia_values = _extract_last_row_numbers(str(pages[1]))
+            if ruonia_values:
+                ruonia = ruonia_values[-1]
+        except Exception:
+            LOGGER.warning("Не удалось распарсить RUONIA, используем спред к КС")
+    else:
+        ruonia = key_rate - config.YTM_RUONIA_KEY_SPREAD_DEFAULT
 
-    try:
-        zcyc_text = str(pages[2])
-        row_match = re.findall(r"<tr>\s*<td[^>]*>[^<]*</td>(.*?)</tr>", zcyc_text, flags=re.S)
-        if row_match:
-            last_row = row_match[-1]
-            values = [float(v.replace(",", ".")) for v in re.findall(r"(\d+[,.]\d+)", last_row)]
-            if len(values) >= 7:
-                gcurve_5y = values[4]
-                gcurve_7y = values[6]
-    except Exception:
-        LOGGER.warning("Не удалось распарсить КБД ОФЗ, используем КС")
-
-    if isinstance(pages[1], Exception):
-        ruonia = key_rate - 1.0
-    if isinstance(pages[2], Exception):
-        gcurve_5y = key_rate - 0.5
-        gcurve_7y = key_rate - 0.3
+    if not isinstance(pages[2], Exception):
+        try:
+            zcyc_values = _extract_last_row_numbers(str(pages[2]))
+            if len(zcyc_values) >= 7:
+                gcurve_5y = zcyc_values[4]
+                gcurve_7y = zcyc_values[6]
+        except Exception:
+            LOGGER.warning("Не удалось распарсить КБД ОФЗ, используем КС")
+    else:
+        gcurve_5y = key_rate
+        gcurve_7y = key_rate
 
     return key_rate, ruonia, gcurve_5y, gcurve_7y
 
@@ -308,6 +322,7 @@ def _calc_ytm_percent(
     clean_price: float | None,
     accrued_int: float | None,
     coupon_percent: float | None,
+    coupon_period_days: int | None,
     coupon_type: str,
     coupon_formula: str,
     secid: str,
@@ -322,35 +337,94 @@ def _calc_ytm_percent(
     today = date.today()
     if end_date <= today:
         return None
-    years = max((end_date - today).days / 365.0, 0.01)
+    total_days = (end_date - today).days
+    years = max(total_days / 365.0, 0.01)
     dirty_price = clean_price + max(accrued_int or 0.0, 0.0)
     if dirty_price <= 0:
         return None
+    if coupon_period_days is None or coupon_period_days <= 0:
+        coupon_period_days = 182
     lower_coupon_type = coupon_type.lower()
 
-    annual_coupon_rate = coupon_percent if coupon_percent is not None else 0.0
-    if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
-        projected_key = _forecast_value(config.YTM_KEY_RATE_FORECAST, min(int(years), 2))
-        projected_infl = _forecast_value(config.YTM_INFLATION_FORECAST, min(int(years), 2))
-        spread_ruonia = ruonia - key_rate
-        spread_g5 = gcurve_5y - key_rate
-        spread_g7 = gcurve_7y - key_rate
-        projected_ruonia = projected_key + spread_ruonia
-        projected_g5 = projected_key + spread_g5
-        projected_g7 = projected_key + spread_g7
-        if secid.startswith("SU50"):
-            annual_coupon_rate = projected_infl
-        parsed = _extract_formula_rate(coupon_formula, projected_key, projected_ruonia, projected_g5, projected_g7)
-        if parsed is not None:
-            annual_coupon_rate = parsed
-
-    annual_coupon_money = 100.0 * (annual_coupon_rate / 100.0)
     if not (20.0 <= dirty_price <= 200.0):
         return None
-    ytm = (annual_coupon_money + (100.0 - dirty_price) / years) / ((100.0 + dirty_price) / 2.0) * 100.0
+
+    spread_key_ruonia = key_rate - ruonia
+    if abs(spread_key_ruonia) > config.YTM_MAX_ABS_SPREAD_SANITY:
+        spread_key_ruonia = config.YTM_RUONIA_KEY_SPREAD_DEFAULT
+    spread_g5 = gcurve_5y - key_rate
+    spread_g7 = gcurve_7y - key_rate
+    if abs(spread_g5) > config.YTM_MAX_ABS_SPREAD_SANITY:
+        spread_g5 = 0.0
+    if abs(spread_g7) > config.YTM_MAX_ABS_SPREAD_SANITY:
+        spread_g7 = 0.0
+
+    def resolve_annual_coupon_rate(days_from_today: int) -> float:
+        year_index = max(days_from_today - 1, 0) // 365
+        annual_rate = coupon_percent if coupon_percent is not None else 0.0
+        if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
+            projected_key = _forecast_value(config.YTM_KEY_RATE_FORECAST, year_index)
+            projected_infl = _forecast_value(config.YTM_INFLATION_FORECAST, year_index)
+            projected_ruonia = projected_key - spread_key_ruonia
+            projected_g5 = projected_key + spread_g5
+            projected_g7 = projected_key + spread_g7
+            if secid.startswith("SU50"):
+                annual_rate = projected_infl
+            parsed = _extract_formula_rate(coupon_formula, projected_key, projected_ruonia, projected_g5, projected_g7)
+            if parsed is not None:
+                annual_rate = parsed
+        return annual_rate
+
+    payment_days: list[int] = []
+    elapsed = coupon_period_days
+    while elapsed < total_days:
+        payment_days.append(elapsed)
+        elapsed += coupon_period_days
+    payment_days.append(total_days)
+
+    cashflows: list[tuple[int, float]] = []
+    previous_day = 0
+    for payment_day in payment_days:
+        period_days = payment_day - previous_day
+        annual_coupon_rate = resolve_annual_coupon_rate(payment_day)
+        coupon_cash = 100.0 * (annual_coupon_rate / 100.0) * (period_days / 365.0)
+        principal_cash = 100.0 if payment_day == total_days else 0.0
+        cashflows.append((payment_day, coupon_cash + principal_cash))
+        previous_day = payment_day
+
+    def npv(rate: float) -> float:
+        total = -dirty_price
+        for payment_day, amount in cashflows:
+            discount = (1.0 + rate) ** (payment_day / 365.0)
+            total += amount / discount
+        return total
+
+    left, right = -0.95, 3.0
+    npv_left = npv(left)
+    npv_right = npv(right)
+    while npv_left * npv_right > 0 and right < 20.0:
+        right *= 2.0
+        npv_right = npv(right)
+    if npv_left * npv_right > 0:
+        return None
+
+    for _ in range(120):
+        mid = (left + right) / 2.0
+        npv_mid = npv(mid)
+        if abs(npv_mid) < 1e-10:
+            left = right = mid
+            break
+        if npv_left * npv_mid <= 0:
+            right = mid
+            npv_right = npv_mid
+        else:
+            left = mid
+            npv_left = npv_mid
+
+    ytm = ((left + right) / 2.0) * 100.0
     if ytm < -95.0 or ytm > 250.0:
         return None
-    return round(ytm, 4)
+    return round(ytm, 2)
 
 
 def _parse_corpbonds_html(page_html: str) -> dict[str, str]:
@@ -1198,6 +1272,7 @@ async def run_pipeline(db: Database) -> RunSummary:
                     clean_price=_select_last_price(current_price, corp.get("price", "")),
                     accrued_int=accrued_int,
                     coupon_percent=coupon_percent,
+                    coupon_period_days=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
                     coupon_type=corp.get("coupon_type", ""),
                     coupon_formula=corp.get("coupon_formula", ""),
                     secid=secid,
