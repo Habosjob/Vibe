@@ -18,6 +18,7 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 from tqdm import tqdm
+from bs4 import BeautifulSoup
 
 import config
 from app.bootstrap import load_state, save_state
@@ -255,6 +256,23 @@ def _extract_formula_rate(
     return rate
 
 
+def _extract_last_row_numbers(page_html: str) -> list[float]:
+    soup = BeautifulSoup(page_html, "html.parser")
+    rows = soup.find_all("tr")
+    for row in reversed(rows):
+        cells = row.find_all("td")
+        if not cells:
+            continue
+        numbers: list[float] = []
+        for cell in cells:
+            match = re.search(r"-?\d+[,.]\d+", cell.get_text(" ", strip=True))
+            if match:
+                numbers.append(float(match.group(0).replace(",", ".")))
+        if numbers:
+            return numbers
+    return []
+
+
 async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, float]:
     urls = {
         "key": "https://cbr.ru/hd_base/KeyRate/",
@@ -263,43 +281,39 @@ async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, flo
     }
     pages = await asyncio.gather(*(client.get_text(url) for url in urls.values()), return_exceptions=True)
     key_rate = config.YTM_KEY_RATE_FORECAST[0]
-    ruonia = key_rate
+    ruonia = key_rate - config.YTM_RUONIA_KEY_SPREAD_DEFAULT
     gcurve_5y = key_rate
     gcurve_7y = key_rate
 
-    try:
-        key_text = str(pages[0])
-        key_values = [float(v.replace(",", ".")) for v in re.findall(r"(\d+[,.]\d+)", key_text)]
-        if key_values:
-            key_rate = key_values[-1]
-    except Exception:
-        LOGGER.warning("Не удалось распарсить ключевую ставку ЦБ, используем прогноз Year0")
+    if not isinstance(pages[0], Exception):
+        try:
+            key_values = _extract_last_row_numbers(str(pages[0]))
+            if key_values:
+                key_rate = key_values[-1]
+        except Exception:
+            LOGGER.warning("Не удалось распарсить ключевую ставку ЦБ, используем прогноз Year0")
 
-    try:
-        ruonia_text = str(pages[1])
-        ruonia_values = [float(v.replace(",", ".")) for v in re.findall(r"(\d+[,.]\d+)", ruonia_text)]
-        if ruonia_values:
-            ruonia = ruonia_values[-1]
-    except Exception:
-        LOGGER.warning("Не удалось распарсить RUONIA, используем спред к КС")
+    if not isinstance(pages[1], Exception):
+        try:
+            ruonia_values = _extract_last_row_numbers(str(pages[1]))
+            if ruonia_values:
+                ruonia = ruonia_values[-1]
+        except Exception:
+            LOGGER.warning("Не удалось распарсить RUONIA, используем спред к КС")
+    else:
+        ruonia = key_rate - config.YTM_RUONIA_KEY_SPREAD_DEFAULT
 
-    try:
-        zcyc_text = str(pages[2])
-        row_match = re.findall(r"<tr>\s*<td[^>]*>[^<]*</td>(.*?)</tr>", zcyc_text, flags=re.S)
-        if row_match:
-            last_row = row_match[-1]
-            values = [float(v.replace(",", ".")) for v in re.findall(r"(\d+[,.]\d+)", last_row)]
-            if len(values) >= 7:
-                gcurve_5y = values[4]
-                gcurve_7y = values[6]
-    except Exception:
-        LOGGER.warning("Не удалось распарсить КБД ОФЗ, используем КС")
-
-    if isinstance(pages[1], Exception):
-        ruonia = key_rate - 1.0
-    if isinstance(pages[2], Exception):
-        gcurve_5y = key_rate - 0.5
-        gcurve_7y = key_rate - 0.3
+    if not isinstance(pages[2], Exception):
+        try:
+            zcyc_values = _extract_last_row_numbers(str(pages[2]))
+            if len(zcyc_values) >= 7:
+                gcurve_5y = zcyc_values[4]
+                gcurve_7y = zcyc_values[6]
+        except Exception:
+            LOGGER.warning("Не удалось распарсить КБД ОФЗ, используем КС")
+    else:
+        gcurve_5y = key_rate
+        gcurve_7y = key_rate
 
     return key_rate, ruonia, gcurve_5y, gcurve_7y
 
@@ -336,8 +350,14 @@ def _calc_ytm_percent(
         return None
 
     spread_key_ruonia = key_rate - ruonia
+    if abs(spread_key_ruonia) > config.YTM_MAX_ABS_SPREAD_SANITY:
+        spread_key_ruonia = config.YTM_RUONIA_KEY_SPREAD_DEFAULT
     spread_g5 = gcurve_5y - key_rate
     spread_g7 = gcurve_7y - key_rate
+    if abs(spread_g5) > config.YTM_MAX_ABS_SPREAD_SANITY:
+        spread_g5 = 0.0
+    if abs(spread_g7) > config.YTM_MAX_ABS_SPREAD_SANITY:
+        spread_g7 = 0.0
 
     def resolve_annual_coupon_rate(days_from_today: int) -> float:
         year_index = max(days_from_today - 1, 0) // 365
