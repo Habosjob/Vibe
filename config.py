@@ -152,7 +152,7 @@ CORPBONDS_USER_AGENT = (
 # Если срок бумаги дальше Year2, используется значение Year2.
 YTM_KEY_RATE_FORECAST = {
     0: 14.0,
-    1: 8.5,
+    1: 8.6,
     2: 8.0,
 }
 
