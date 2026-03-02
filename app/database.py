@@ -44,6 +44,15 @@ class Database:
         )
         self.conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS bondization_cashflow_cache (
+                secid TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS emitter_cache (
                 emitter_id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -158,6 +167,37 @@ class Database:
                 VALUES (?, ?, ?)
                 ON CONFLICT(secid) DO UPDATE SET
                     amortization_start=excluded.amortization_start,
+                    updated_at=excluded.updated_at;
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def get_cached_bondization_cashflows(self, secids: list[str], min_ts: int) -> tuple[dict[str, str], list[str]]:
+        if not secids:
+            return {}, []
+        placeholders = ",".join("?" for _ in secids)
+        rows = self.conn.execute(
+            f"SELECT secid, payload_json, updated_at FROM bondization_cashflow_cache WHERE secid IN ({placeholders});",
+            secids,
+        ).fetchall()
+        cached: dict[str, str] = {}
+        for row in rows:
+            if int(row["updated_at"]) >= min_ts:
+                cached[str(row["secid"])] = str(row["payload_json"])
+        missing = [secid for secid in secids if secid not in cached]
+        return cached, missing
+
+    def upsert_bondization_cashflows(self, rows: list[tuple[str, str, int]]) -> int:
+        if not rows:
+            return 0
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO bondization_cashflow_cache (secid, payload_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(secid) DO UPDATE SET
+                    payload_json=excluded.payload_json,
                     updated_at=excluded.updated_at;
                 """,
                 rows,
