@@ -67,6 +67,15 @@ LOG_FILE_PATH: Path = LOG_DIR / "app.log"
 # Уровень логирования: DEBUG, INFO, WARNING, ERROR.
 LOG_LEVEL: str = "INFO"
 
+# Показывать динамический progress-bar в терминале.
+# Если запуск идёт в среде без полноценного TTY (например, некоторые режимы VS Code Debug),
+# скрипт автоматически переключится на текстовый прогресс с ETA.
+SHOW_PROGRESS_BAR: bool = True
+
+# Интервал (в секундах) между текстовыми сообщениями о прогрессе,
+# когда графический progress-bar недоступен.
+PROGRESS_FALLBACK_INTERVAL_SEC: float = 1.5
+
 # Ограничения ротации логов.
 LOG_MAX_BYTES: int = 2_000_000
 LOG_BACKUP_COUNT: int = 5
