@@ -39,11 +39,17 @@ EXPORT_CORPBONDS_TO_EXCEL = True
 MOEX_OUTPUT_FILE_NAME_DEBUG = "MoexBonds.xlsx"
 
 # Имя итогового Excel-файла CorpBonds в режиме отладки.
-CORPBONDS_OUTPUT_FILE_NAME_DEBUG = "CorBonds.xlsx"
+CORPBONDS_OUTPUT_FILE_NAME_DEBUG = "CorpBonds.xlsx"
 
 # Имена итоговых Excel-файлов в неотладочном режиме.
 MOEX_OUTPUT_FILE_NAME_RELEASE = "MoexBonds_latest.xlsx"
-CORPBONDS_OUTPUT_FILE_NAME_RELEASE = "CorBonds_latest.xlsx"
+CORPBONDS_OUTPUT_FILE_NAME_RELEASE = "CorpBonds_latest.xlsx"
+
+# Имя итогового объединенного Excel-файла (MOEX + CorpBonds) в режиме отладки.
+MERGED_OUTPUT_FILE_NAME_DEBUG = "MergeBonds.xlsx"
+
+# Имя итогового объединенного Excel-файла (MOEX + CorpBonds) в неотладочном режиме.
+MERGED_OUTPUT_FILE_NAME_RELEASE = "MergeBonds_latest.xlsx"
 
 # Настройки логирования.
 # LOG_FILE_NAME      — основной файл логов.
@@ -69,6 +75,11 @@ REQUEST_BACKOFF_SEC = 1.2
 # Позволяет ускорить сбор данных, но не перегружать API MOEX.
 MAX_CONCURRENT_TASKS = 12
 
+# Отдельное ограничение параллельности для загрузки карточек CorpBonds.
+# Обычно этот этап самый долгий, поэтому лимит можно держать выше,
+# чем общий MAX_CONCURRENT_TASKS, чтобы ускорить полный прогон.
+CORPBONDS_MAX_CONCURRENT_TASKS = 40
+
 # TTL кэша в секундах.
 # Если кэш старше этого времени, он должен считаться устаревшим.
 CACHE_TTL_SEC = 60 * 60 * 24
@@ -80,7 +91,10 @@ BATCH_SIZE = 200
 EXCEL_SHEET_NAME = "MoexBonds"
 
 # Название листа в Excel CorpBonds.
-CORPBONDS_EXCEL_SHEET_NAME = "CorBonds"
+CORPBONDS_EXCEL_SHEET_NAME = "CorpBonds"
+
+# Название листа в Excel MergeBonds.
+MERGED_EXCEL_SHEET_NAME = "MergeBonds"
 
 # Базовый URL карточки облигации на CorpBonds (работает по SECID).
 CORPBONDS_BOND_URL_TEMPLATE = "https://corpbonds.ru/bond/{secid}"
@@ -117,3 +131,8 @@ def get_corpbonds_output_file_path() -> Path:
 
 def get_log_file_path() -> Path:
     return LOGS_DIR / LOG_FILE_NAME
+
+
+def get_merged_output_file_path() -> Path:
+    file_name = MERGED_OUTPUT_FILE_NAME_DEBUG if DEBUG_SINGLE_EXCEL_FILE else MERGED_OUTPUT_FILE_NAME_RELEASE
+    return OUTPUT_DIR / file_name

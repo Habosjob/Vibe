@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+from aiohttp import ClientResponseError
 from bs4 import BeautifulSoup
 from openpyxl import Workbook
 from openpyxl.formatting.rule import CellIsRule
@@ -36,6 +37,7 @@ class RunSummary:
     duration_save: float
     moex_output_path: Path | None
     corpbonds_output_path: Path | None
+    merged_output_path: Path | None
 
 
 @dataclass
@@ -105,6 +107,13 @@ class MoexClient:
                 async with self._session.get(url) as response:
                     response.raise_for_status()
                     return await response.json(content_type=None)
+            except ClientResponseError as exc:
+                last_exc = exc
+                if 400 <= exc.status < 500 and exc.status != 429:
+                    break
+                if attempt == config.REQUEST_RETRIES:
+                    break
+                await asyncio.sleep(config.REQUEST_BACKOFF_SEC * (2 ** (attempt - 1)))
             except Exception as exc:
                 last_exc = exc
                 if attempt == config.REQUEST_RETRIES:
@@ -121,6 +130,13 @@ class MoexClient:
                 async with self._session.get(url, headers=headers) as response:
                     response.raise_for_status()
                     return await response.text()
+            except ClientResponseError as exc:
+                last_exc = exc
+                if 400 <= exc.status < 500 and exc.status != 429:
+                    break
+                if attempt == config.REQUEST_RETRIES:
+                    break
+                await asyncio.sleep(config.REQUEST_BACKOFF_SEC * (2 ** (attempt - 1)))
             except Exception as exc:
                 last_exc = exc
                 if attempt == config.REQUEST_RETRIES:
@@ -436,7 +452,7 @@ async def _fetch_corpbonds_with_cache(
             )
         except Exception as exc:
             errors += 1
-            LOGGER.warning("Не удалось загрузить CorpBonds по %s: %s", secid, exc)
+            LOGGER.warning("Не удалось загрузить CorpBonds: %s", exc)
         progress.update(1)
     progress.close()
     db.upsert_corpbonds(upserts)
@@ -574,6 +590,98 @@ def _save_corpbonds_excel(rows: list[CorpBondRow], output_path: Path) -> int:
     return len(rows)
 
 
+def _save_merged_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBondRow], output_path: Path) -> int:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = config.MERGED_EXCEL_SHEET_NAME
+
+    headers = [
+        "Secid",
+        "ISIN",
+        "Короткое название",
+        "Наименование Эмитента",
+        "ИНН эмитента",
+        "Актуальная Цена сейчас",
+        "Предыдущая цена выгрузки",
+        "Динамика цены, %",
+        "Объем сделок по бумаге",
+        "Объем сделок за 20 дней",
+        "Дата погашения",
+        "Дата оферты",
+        "Дата начала амортизации",
+        "Квалифицированный инвестор",
+        "Дефолт",
+        "Технический дефолт",
+        "BOND_TYPE",
+        "SECSUBTYPE",
+        "Купонный период",
+        "НКД",
+        "% купона",
+        "Цена CorpBonds",
+        "Рейтинг",
+        "Тип купона",
+        "Формула купона",
+        "Купон лесенкой",
+    ]
+    ws.append(headers)
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    for cell in ws[1]:
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    corpbonds_by_secid = {row.secid: row for row in corpbonds_rows}
+    for row in moex_rows:
+        corp = corpbonds_by_secid.get(row.secid)
+        corp_offer_date = _as_date(corp.nearest_offer_date) if corp else None
+        merged_offer_date = row.offer_date if row.offer_date is not None else corp_offer_date
+        ws.append(
+            [
+                row.secid,
+                row.isin,
+                row.short_name,
+                row.emitter_name,
+                row.emitter_inn,
+                row.current_price,
+                row.previous_price,
+                row.price_change_percent,
+                row.volume_today,
+                row.volume_20d,
+                row.maturity_date,
+                merged_offer_date,
+                row.amortization_start,
+                row.qualified_investor,
+                row.default_flag,
+                row.technical_default_flag,
+                row.bond_type,
+                row.sec_sub_type,
+                row.coupon_period,
+                row.accrued_int,
+                row.coupon_percent,
+                corp.price if corp else "",
+                corp.credit_rating if corp else "",
+                corp.coupon_type if corp else "",
+                corp.coupon_formula if corp else "",
+                corp.ladder_coupon if corp else "",
+            ]
+        )
+
+    for row_idx in range(2, ws.max_row + 1):
+        for col in (11, 12, 13):
+            cell = ws.cell(row=row_idx, column=col)
+            if isinstance(cell.value, date):
+                cell.number_format = "yyyy-mm-dd"
+
+    _format_ws_base(ws)
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    ws.conditional_formatting.add(f"H2:H{ws.max_row}", CellIsRule(operator="greaterThan", formula=["0"], fill=green_fill))
+    ws.conditional_formatting.add(f"H2:H{ws.max_row}", CellIsRule(operator="lessThan", formula=["0"], fill=red_fill))
+
+    wb.save(output_path)
+    return len(moex_rows)
+
+
 async def run_pipeline(db: Database) -> RunSummary:
     total_start = time.perf_counter()
     state = load_state()
@@ -582,6 +690,7 @@ async def run_pipeline(db: Database) -> RunSummary:
     from_cache_count = 0
 
     semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_TASKS)
+    corpbonds_semaphore = asyncio.Semaphore(max(config.MAX_CONCURRENT_TASKS, config.CORPBONDS_MAX_CONCURRENT_TASKS))
     bonds: list[dict[str, Any]] = []
     descriptions: dict[str, dict[str, Any]] = {}
     emitters: dict[int, dict[str, str]] = {}
@@ -621,7 +730,9 @@ async def run_pipeline(db: Database) -> RunSummary:
         errors_count += amort_errors
 
         LOGGER.info("Этап 5/5: загрузка данных CorpBonds")
-        corpbonds_data, cache_corp_count, corp_errors = await _fetch_corpbonds_with_cache(client, db, secids, semaphore)
+        corpbonds_data, cache_corp_count, corp_errors = await _fetch_corpbonds_with_cache(
+            client, db, secids, corpbonds_semaphore
+        )
         from_cache_count += cache_corp_count
         errors_count += corp_errors
 
@@ -706,6 +817,7 @@ async def run_pipeline(db: Database) -> RunSummary:
     saved_count = 0
     moex_output_path: Path | None = None
     corpbonds_output_path: Path | None = None
+    merged_output_path: Path | None = None
 
     if config.EXPORT_MOEX_TO_EXCEL:
         moex_output_path = config.get_moex_output_file_path()
@@ -713,6 +825,9 @@ async def run_pipeline(db: Database) -> RunSummary:
     if config.EXPORT_CORPBONDS_TO_EXCEL:
         corpbonds_output_path = config.get_corpbonds_output_file_path()
         _save_corpbonds_excel(corpbonds_rows, corpbonds_output_path)
+    if config.EXPORT_MOEX_TO_EXCEL and config.EXPORT_CORPBONDS_TO_EXCEL:
+        merged_output_path = config.get_merged_output_file_path()
+        _save_merged_excel(prepared_rows, corpbonds_rows, merged_output_path)
 
     save_state({"processed_ids": [x.secid for x in prepared_rows], "last_stage": "done"})
     duration_save = time.perf_counter() - save_start
@@ -729,4 +844,5 @@ async def run_pipeline(db: Database) -> RunSummary:
         duration_save=duration_save,
         moex_output_path=moex_output_path,
         corpbonds_output_path=corpbonds_output_path,
+        merged_output_path=merged_output_path,
     )
