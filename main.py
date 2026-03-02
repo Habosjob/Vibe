@@ -67,10 +67,12 @@ class ProgressReporter:
         self.total = total
         self.logger = logger
         self.current = 0
+        self.current_secid = ""
         self.started_at = time.perf_counter()
         self.last_report_at = self.started_at
         self._use_tqdm = bool(config.SHOW_PROGRESS_BAR and total > 0 and sys.stdout.isatty())
         self._bar: tqdm | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
         if self._use_tqdm:
             self._bar = tqdm(
                 total=total,
@@ -80,32 +82,64 @@ class ProgressReporter:
                 leave=True,
                 file=sys.stdout,
             )
-        elif total > 0:
-            print(f"Обработка облигаций: 0/{total} (0%)")
+
+    async def start(self) -> None:
+        if self.total <= 0:
+            return
+        if self._bar:
+            return
+        print(f"Обработка облигаций: 0/{self.total} (0%), ETA -- сек", flush=True)
+        self._heartbeat_task = asyncio.create_task(self._heartbeat())
+
+    async def _heartbeat(self) -> None:
+        while self.current < self.total:
+            await asyncio.sleep(config.PROGRESS_FALLBACK_INTERVAL_SEC)
+            self._render(force=False)
+
+    def set_current_secid(self, secid: str) -> None:
+        self.current_secid = secid
 
     def update(self, amount: int = 1) -> None:
         self.current += amount
         if self._bar:
+            if self.current_secid:
+                self._bar.set_postfix_str(self.current_secid[:24])
             self._bar.update(amount)
             return
+        self._render(force=True)
+
+    def _render(self, force: bool) -> None:
         if self.total <= 0:
             return
         now = time.perf_counter()
-        should_print = self.current >= self.total or (now - self.last_report_at) >= config.PROGRESS_FALLBACK_INTERVAL_SEC
-        if not should_print:
+        if not force and (now - self.last_report_at) < config.PROGRESS_FALLBACK_INTERVAL_SEC:
             return
         elapsed = max(now - self.started_at, 0.001)
-        per_item = elapsed / max(self.current, 1)
-        eta = max(self.total - self.current, 0) * per_item
         percent = (self.current / self.total) * 100
-        print(f"Обработка облигаций: {self.current}/{self.total} ({percent:.1f}%), ETA {eta:.1f} сек")
+        eta_text = "--"
+        if self.current > 0:
+            per_item = elapsed / self.current
+            eta = max(self.total - self.current, 0) * per_item
+            eta_text = f"{eta:.1f}"
+        secid_text = f", текущая: {self.current_secid}" if self.current_secid else ""
+        print(
+            f"Обработка облигаций: {self.current}/{self.total} ({percent:.1f}%), ETA {eta_text} сек{secid_text}",
+            flush=True,
+        )
         self.last_report_at = now
 
-    def close(self) -> None:
+    async def close(self) -> None:
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
         if self._bar:
             self._bar.close()
-        elif self.total > 0 and self.current < self.total:
-            print(f"Обработка облигаций: {self.total}/{self.total} (100.0%), ETA 0.0 сек")
+            return
+        if self.total > 0:
+            print(f"Обработка облигаций: {self.total}/{self.total} (100.0%), ETA 0.0 сек", flush=True)
 
 
 class DB:
@@ -394,6 +428,7 @@ class MoexClient:
                 break
             filtered = [r for r in rows if str(r.get("IS_TRADED", 1)) in {"1", "True", "true"} or r.get("IS_TRADED") is None]
             all_rows.extend(filtered)
+            self.logger.info("Загружено бумаг: %s", len(all_rows))
             if len(rows) < 100:
                 break
             start += 100
@@ -736,6 +771,7 @@ async def async_main() -> int:
     validate_config()
     logger = setup_logging()
     summary = Summary()
+    print("Скрипт запущен. Подготовка окружения...", flush=True)
     state = StateStore(config.STATE_PATH)
     today = date.today()
 
@@ -752,17 +788,21 @@ async def async_main() -> int:
     missing_counter: dict[str, int] = {}
     try:
         t_stage = time.perf_counter()
+        print("Этап 1/3: загрузка списка облигаций...", flush=True)
         bonds = await client.fetch_traded_bonds()
         stage_times["Загрузка списка бумаг"] = time.perf_counter() - t_stage
         state.mark_stage("bonds_list", {"count": len(bonds), "at": datetime.now().isoformat(timespec="seconds")})
         summary.received_total = len(bonds)
 
         t_stage = time.perf_counter()
+        print("Этап 2/3: обработка карточек облигаций...", flush=True)
         rows_for_excel: list[dict[str, Any]] = []
         batch_counter = 0
         progress = ProgressReporter(total=len(bonds), logger=logger)
+        await progress.start()
         for item in bonds:
             secid = str(item.get("SECID") or "")
+            progress.set_current_secid(secid)
             try:
                 result = await process_one_bond(item, client, db, logger, today, missing_counter)
                 if result and result.get("excluded_matured"):
@@ -785,12 +825,13 @@ async def async_main() -> int:
                 summary.errors_total += 1
                 logger.exception("Ошибка обработки secid=%s: %s", secid, exc)
             progress.update(1)
-        progress.close()
+        await progress.close()
         db.commit()
         state.save()
         stage_times["Загрузка/обработка деталей"] = time.perf_counter() - t_stage
 
         t_stage = time.perf_counter()
+        print("Этап 3/3: сохранение результатов...", flush=True)
         exported_path = None
         if config.EXPORT_EXCEL:
             df = pd.DataFrame(rows_for_excel)
