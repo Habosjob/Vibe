@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import time
@@ -12,7 +13,6 @@ from typing import Any
 
 import aiohttp
 from aiohttp import ClientResponseError
-from bs4 import BeautifulSoup
 from openpyxl import Workbook
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -302,6 +302,7 @@ async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, flo
 
 
 def _calc_ytm_percent(
+    moex_ytm: float | None,
     clean_price: float | None,
     accrued_int: float | None,
     coupon_percent: float | None,
@@ -314,6 +315,8 @@ def _calc_ytm_percent(
     gcurve_5y: float,
     gcurve_7y: float,
 ) -> float | None:
+    if moex_ytm is not None and -30.0 <= moex_ytm <= 200.0:
+        return round(moex_ytm, 4)
     if clean_price is None or end_date is None:
         return None
     today = date.today()
@@ -342,12 +345,15 @@ def _calc_ytm_percent(
             annual_coupon_rate = parsed
 
     annual_coupon_money = 100.0 * (annual_coupon_rate / 100.0)
+    if not (20.0 <= dirty_price <= 200.0):
+        return None
     ytm = (annual_coupon_money + (100.0 - dirty_price) / years) / ((100.0 + dirty_price) / 2.0) * 100.0
+    if ytm < -95.0 or ytm > 250.0:
+        return None
     return round(ytm, 4)
 
 
-def _parse_corpbonds_html(html: str) -> dict[str, str]:
-    soup = BeautifulSoup(html, "html.parser")
+def _parse_corpbonds_html(page_html: str) -> dict[str, str]:
     result = {
         "price": "",
         "credit_rating": "",
@@ -365,14 +371,15 @@ def _parse_corpbonds_html(html: str) -> dict[str, str]:
         "Купон лесенкой": "ladder_coupon",
     }
 
-    for row in soup.select("tr"):
-        cells = row.select("td")
-        if len(cells) < 2:
-            continue
-        left = _normalize_text(cells[0].get_text(" ", strip=True)).replace(" ?", "")
+    rows = re.findall(r"<tr[^>]*>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>", page_html, flags=re.S | re.I)
+    for left_raw, right_raw in rows:
+        left_text = re.sub(r"<[^>]+>", " ", left_raw)
+        right_text = re.sub(r"<[^>]+>", " ", right_raw)
+        left = _normalize_text(html.unescape(left_text)).replace(" ?", "")
+        right = _normalize_text(html.unescape(right_text))
         for key, target in mapping.items():
             if left.startswith(key):
-                result[target] = _normalize_text(cells[1].get_text(" ", strip=True))
+                result[target] = right
                 break
     return result
 
@@ -384,7 +391,7 @@ async def _fetch_all_traded_bonds(client: MoexClient) -> list[dict[str, Any]]:
         "&iss.only=securities,marketdata"
         "&securities.columns=SECID,ISIN,SHORTNAME,SECNAME,MATDATE,OFFERDATE,COUPONPERIOD,ACCRUEDINT,"
         "COUPONPERCENT,BONDTYPE,BONDSUBTYPE,PREVPRICE"
-        "&marketdata.columns=SECID,LAST,LCURRENTPRICE,LCLOSEPRICE,PREVPRICE,VOLTODAY,VALTODAY"
+        "&marketdata.columns=SECID,LAST,LCURRENTPRICE,LCLOSEPRICE,PREVPRICE,VOLTODAY,VALTODAY,YIELD"
     )
     payload = await client.get_json(url)
     sec_cols = payload["securities"]["columns"]
@@ -586,7 +593,7 @@ async def _fetch_corpbonds_with_cache(
     secids: list[str],
     semaphore: asyncio.Semaphore,
 ) -> tuple[dict[str, dict[str, str]], int, int]:
-    min_ts = int(time.time()) - config.CACHE_TTL_SEC
+    min_ts = int(time.time()) - config.CORPBONDS_CACHE_TTL_SEC
     cached, missing = db.get_cached_corpbonds(secids, min_ts)
     result = dict(cached)
 
@@ -969,6 +976,7 @@ async def run_pipeline(db: Database) -> RunSummary:
                 accrued_int=accrued_int,
                 coupon_percent=coupon_percent,
                 ytm=_calc_ytm_percent(
+                    moex_ytm=_parse_float(bond.get("marketdata", {}).get("YIELD")),
                     clean_price=_select_last_price(current_price, corp.get("price", "")),
                     accrued_int=accrued_int,
                     coupon_percent=coupon_percent,
