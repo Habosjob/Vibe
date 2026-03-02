@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -11,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+from bs4 import BeautifulSoup
 from openpyxl import Workbook
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -34,7 +34,8 @@ class RunSummary:
     duration_load: float
     duration_calc: float
     duration_save: float
-    output_path: Path
+    moex_output_path: Path | None
+    corpbonds_output_path: Path | None
 
 
 @dataclass
@@ -44,9 +45,6 @@ class BondRow:
     short_name: str
     emitter_name: str
     emitter_inn: str
-    credit_rating: str
-    rating_date: date | None
-    rating_description: str
     current_price: float | None
     previous_price: float | None
     price_change_percent: float | None
@@ -63,6 +61,17 @@ class BondRow:
     coupon_period: int | None
     accrued_int: float | None
     coupon_percent: float | None
+
+
+@dataclass
+class CorpBondRow:
+    secid: str
+    price: str
+    credit_rating: str
+    coupon_type: str
+    coupon_formula: str
+    nearest_offer_date: str
+    ladder_coupon: str
 
 
 class MoexClient:
@@ -103,6 +112,22 @@ class MoexClient:
                 await asyncio.sleep(config.REQUEST_BACKOFF_SEC * (2 ** (attempt - 1)))
         raise RuntimeError(f"Не удалось получить данные: {url}. Ошибка: {last_exc}")
 
+    async def get_text(self, url: str, headers: dict[str, str] | None = None) -> str:
+        if self._session is None:
+            raise RuntimeError("HTTP-сессия не инициализирована")
+        last_exc: Exception | None = None
+        for attempt in range(1, config.REQUEST_RETRIES + 1):
+            try:
+                async with self._session.get(url, headers=headers) as response:
+                    response.raise_for_status()
+                    return await response.text()
+            except Exception as exc:
+                last_exc = exc
+                if attempt == config.REQUEST_RETRIES:
+                    break
+                await asyncio.sleep(config.REQUEST_BACKOFF_SEC * (2 ** (attempt - 1)))
+        raise RuntimeError(f"Не удалось получить страницу: {url}. Ошибка: {last_exc}")
+
 
 def _as_date(value: Any) -> date | None:
     if value in (None, ""):
@@ -132,68 +157,42 @@ def _pick_price(row: dict[str, Any]) -> float | None:
     return float(prev) if prev is not None else None
 
 
-def _extract_rating(desc: dict[str, Any]) -> tuple[str, date | None, str]:
-    rating_keys = (
-        "__RATING_VALUE",
-        "CREDIT_RATING",
-        "EMITTER_CREDIT_RATING",
-        "RATING",
-        "CREDITRATING",
-    )
-    rating_date_keys = (
-        "__RATING_DATE",
-        "CREDIT_RATING_DATE",
-        "RATING_DATE",
-        "EMITTER_RATING_DATE",
-    )
-    rating_desc_keys = (
-        "__RATING_DESCRIPTION",
-        "RATING_DESCRIPTION",
-        "RATING_DISCRIPTION",
-        "RATING_DESC",
-        "EMITTER_RATING_DESCRIPTION",
-    )
+def _normalize_text(value: str) -> str:
+    compact = " ".join(value.replace("\xa0", " ").split())
+    if compact.lower() == "нет данных":
+        return ""
+    return compact
 
-    credit_rating = ""
-    for key in rating_keys:
-        if desc.get(key):
-            credit_rating = str(desc[key])
-            break
-    if not credit_rating:
-        for key, value in desc.items():
-            upper = str(key).upper()
-            if ("RATING" in upper or "РЕЙТ" in upper) and value not in (None, "") and "DATE" not in upper and "ДАТ" not in upper and "DESCR" not in upper and "ОПИС" not in upper:
-                credit_rating = str(value)
+
+def _parse_corpbonds_html(html: str) -> dict[str, str]:
+    soup = BeautifulSoup(html, "html.parser")
+    result = {
+        "price": "",
+        "credit_rating": "",
+        "coupon_type": "",
+        "coupon_formula": "",
+        "nearest_offer_date": "",
+        "ladder_coupon": "",
+    }
+    mapping = {
+        "Цена последняя": "price",
+        "Кредитный рейтинг": "credit_rating",
+        "Тип купона": "coupon_type",
+        "Формула купона": "coupon_formula",
+        "Дата ближайшей оферты": "nearest_offer_date",
+        "Купон лесенкой": "ladder_coupon",
+    }
+
+    for row in soup.select("tr"):
+        cells = row.select("td")
+        if len(cells) < 2:
+            continue
+        left = _normalize_text(cells[0].get_text(" ", strip=True)).replace(" ?", "")
+        for key, target in mapping.items():
+            if left.startswith(key):
+                result[target] = _normalize_text(cells[1].get_text(" ", strip=True))
                 break
-
-    rating_date: date | None = None
-    for key in rating_date_keys:
-        parsed = _as_date(desc.get(key))
-        if parsed is not None:
-            rating_date = parsed
-            break
-
-    for key, value in desc.items():
-        upper = str(key).upper()
-        if ("RATING" in upper or "РЕЙТ" in upper) and ("DATE" in upper or "ДАТ" in upper):
-            parsed = _as_date(value)
-            if parsed is not None:
-                rating_date = parsed
-                break
-
-    rating_description = ""
-    for key in rating_desc_keys:
-        if desc.get(key):
-            rating_description = str(desc[key])
-            break
-    if not rating_description:
-        for key, value in desc.items():
-            upper = str(key).upper()
-            if ("RATING" in upper or "РЕЙТ" in upper) and ("DESCR" in upper or "COMMENT" in upper or "ОПИС" in upper or "ПРОГНОЗ" in upper) and value not in (None, ""):
-                rating_description = str(value)
-                break
-
-    return credit_rating, rating_date, rating_description
+    return result
 
 
 async def _fetch_all_traded_bonds(client: MoexClient) -> list[dict[str, Any]]:
@@ -265,14 +264,7 @@ async def _fetch_descriptions_with_cache(
 ) -> tuple[dict[str, dict[str, Any]], int, int]:
     min_ts = int(time.time()) - config.CACHE_TTL_SEC
     cached_raw, missing = db.get_cached_descriptions(secids, min_ts)
-    result: dict[str, dict[str, Any]] = {}
-    for secid, payload in cached_raw.items():
-        parsed = json.loads(payload)
-        result[secid] = parsed
-        has_rating_markers = any(key in parsed for key in ("__RATING_VALUE", "__RATING_DATE", "__RATING_DESCRIPTION"))
-        if not has_rating_markers:
-            missing.append(secid)
-            result.pop(secid, None)
+    result: dict[str, dict[str, Any]] = {secid: json.loads(payload) for secid, payload in cached_raw.items()}
 
     async def fetch_one(secid: str) -> tuple[str, dict[str, Any]]:
         async with semaphore:
@@ -280,58 +272,14 @@ async def _fetch_descriptions_with_cache(
             payload = await client.get_json(url)
             cols = payload["description"]["columns"]
             values: dict[str, Any] = {}
-            rating_value = ""
-            rating_date = ""
-            rating_description = ""
-            rating_rows: list[tuple[str, str, str]] = []
             for row in payload["description"]["data"]:
                 item = dict(zip(cols, row))
                 key = str(item.get("name") or "")
-                title = str(item.get("title") or "")
-                value = item.get("value")
                 if key:
-                    values[key] = value
-                if value in (None, ""):
-                    continue
-                value_text = str(value).strip()
-                if not value_text:
-                    continue
-                low_name = key.lower()
-                low_title = title.lower()
-                if any(token in low_name or token in low_title for token in ("rating", "рейтинг", "рейт")):
-                    rating_rows.append((low_name, low_title, value_text))
-
-            rating_like_pattern = re.compile(r"\b([A-D]{1,3}(?:[+-])?(?:\(RU\))?)\b", re.IGNORECASE)
-            for low_name, low_title, value_text in rating_rows:
-                is_date = any(token in low_name or token in low_title for token in ("date", "дата"))
-                is_description = any(token in low_name or token in low_title for token in ("descr", "desc", "опис", "прогноз", "outlook", "comment", "коммент"))
-                if is_date and not rating_date:
-                    rating_date = value_text
-                    continue
-                if is_description and not rating_description:
-                    rating_description = value_text
-                    continue
-                if not rating_value:
-                    rating_value = value_text
-
-            if not rating_value:
-                for _, _, value_text in rating_rows:
-                    match = rating_like_pattern.search(value_text)
-                    if match:
-                        rating_value = match.group(1)
-                        break
-
-            if rating_value:
-                values["__RATING_VALUE"] = rating_value
-            if rating_date:
-                values["__RATING_DATE"] = rating_date
-            if rating_description:
-                values["__RATING_DESCRIPTION"] = rating_description
+                    values[key] = item.get("value")
             return secid, values
 
-    missing = list(dict.fromkeys(missing))
     cache_hits = len(result)
-
     upserts: list[tuple[str, str, int]] = []
     errors = 0
     tasks = [asyncio.create_task(fetch_one(secid)) for secid in missing]
@@ -411,14 +359,13 @@ async def _fetch_amortizations_with_cache(
             earliest: date | None = None
             for row in rows:
                 data = dict(zip(cols, row))
-                amort_date_raw = data.get("amortdate")
-                parsed = _as_date(amort_date_raw)
+                parsed = _as_date(data.get("amortdate"))
                 if parsed is None:
                     continue
+                has_amort = False
                 face_value = data.get("facevalue")
                 initial_face_value = data.get("initialfacevalue")
                 value_prc = data.get("valueprc")
-                has_amort = False
                 if face_value is not None and initial_face_value is not None:
                     try:
                         has_amort = float(face_value) < float(initial_face_value)
@@ -451,7 +398,64 @@ async def _fetch_amortizations_with_cache(
     return result, cache_hits, errors
 
 
-def _save_excel(rows: list[BondRow], output_path: Path) -> int:
+async def _fetch_corpbonds_with_cache(
+    client: MoexClient,
+    db: Database,
+    secids: list[str],
+    semaphore: asyncio.Semaphore,
+) -> tuple[dict[str, dict[str, str]], int, int]:
+    min_ts = int(time.time()) - config.CACHE_TTL_SEC
+    cached, missing = db.get_cached_corpbonds(secids, min_ts)
+    result = dict(cached)
+
+    async def fetch_one(secid: str) -> tuple[str, dict[str, str]]:
+        async with semaphore:
+            url = config.CORPBONDS_BOND_URL_TEMPLATE.format(secid=secid)
+            text = await client.get_text(url, headers={"User-Agent": config.CORPBONDS_USER_AGENT})
+            return secid, _parse_corpbonds_html(text)
+
+    tasks = [asyncio.create_task(fetch_one(secid)) for secid in missing]
+    upserts: list[tuple[str, str, str, str, str, str, str, int]] = []
+    errors = 0
+    progress = tqdm(total=len(tasks), desc="CorpBonds", unit="обл", dynamic_ncols=True)
+    for task in asyncio.as_completed(tasks):
+        try:
+            secid, data = await task
+            result[secid] = data
+            upserts.append(
+                (
+                    secid,
+                    data["price"],
+                    data["credit_rating"],
+                    data["coupon_type"],
+                    data["coupon_formula"],
+                    data["nearest_offer_date"],
+                    data["ladder_coupon"],
+                    int(time.time()),
+                )
+            )
+        except Exception as exc:
+            errors += 1
+            LOGGER.warning("Не удалось загрузить CorpBonds по %s: %s", secid, exc)
+        progress.update(1)
+    progress.close()
+    db.upsert_corpbonds(upserts)
+    return result, len(cached), errors
+
+
+def _format_ws_base(ws: Any) -> None:
+    ws.auto_filter.ref = ws.dimensions
+    ws.freeze_panes = "A2"
+    for column in ws.columns:
+        max_len = 0
+        col_letter = column[0].column_letter
+        for cell in column:
+            value = "" if cell.value is None else str(cell.value)
+            max_len = max(max_len, len(value))
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+
+
+def _save_moex_excel(rows: list[BondRow], output_path: Path) -> int:
     wb = Workbook()
     ws = wb.active
     ws.title = config.EXCEL_SHEET_NAME
@@ -462,9 +466,6 @@ def _save_excel(rows: list[BondRow], output_path: Path) -> int:
         "Короткое название",
         "Наименование Эмитента",
         "ИНН эмитента",
-        "Кредитный рейтинг эмитента",
-        "Дата рейтинга эмитента",
-        "Raiting_discription",
         "Актуальная Цена сейчас",
         "Предыдущая цена выгрузки",
         "Динамика цены, %",
@@ -498,9 +499,6 @@ def _save_excel(rows: list[BondRow], output_path: Path) -> int:
                 row.short_name,
                 row.emitter_name,
                 row.emitter_inn,
-                row.credit_rating,
-                row.rating_date,
-                row.rating_description,
                 row.current_price,
                 row.previous_price,
                 row.price_change_percent,
@@ -520,30 +518,58 @@ def _save_excel(rows: list[BondRow], output_path: Path) -> int:
             ]
         )
 
-    ws.auto_filter.ref = ws.dimensions
-    ws.freeze_panes = "A2"
-
     for row_idx in range(2, ws.max_row + 1):
-        for col in (7, 14, 15, 16):
+        for col in (11, 12, 13):
             cell = ws.cell(row=row_idx, column=col)
             if isinstance(cell.value, date):
                 cell.number_format = "yyyy-mm-dd"
 
-    for column in ws.columns:
-        max_len = 0
-        col_letter = column[0].column_letter
-        for cell in column:
-            value = "" if cell.value is None else str(cell.value)
-            max_len = max(max_len, len(value))
-            if col_letter == "H":
-                cell.alignment = Alignment(wrap_text=True, vertical="top")
-        ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
-
+    _format_ws_base(ws)
     green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
     red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    ws.conditional_formatting.add(f"K2:K{ws.max_row}", CellIsRule(operator="greaterThan", formula=["0"], fill=green_fill))
-    ws.conditional_formatting.add(f"K2:K{ws.max_row}", CellIsRule(operator="lessThan", formula=["0"], fill=red_fill))
+    ws.conditional_formatting.add(f"H2:H{ws.max_row}", CellIsRule(operator="greaterThan", formula=["0"], fill=green_fill))
+    ws.conditional_formatting.add(f"H2:H{ws.max_row}", CellIsRule(operator="lessThan", formula=["0"], fill=red_fill))
 
+    wb.save(output_path)
+    return len(rows)
+
+
+def _save_corpbonds_excel(rows: list[CorpBondRow], output_path: Path) -> int:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = config.CORPBONDS_EXCEL_SHEET_NAME
+
+    headers = [
+        "Secid",
+        "Цена",
+        "Рейтинг",
+        "Тип купона",
+        "Формула купона",
+        "Дата ближайшей оферты",
+        "Купон лесенкой",
+    ]
+
+    ws.append(headers)
+    header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    for cell in ws[1]:
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    for row in rows:
+        ws.append(
+            [
+                row.secid,
+                row.price,
+                row.credit_rating,
+                row.coupon_type,
+                row.coupon_formula,
+                row.nearest_offer_date,
+                row.ladder_coupon,
+            ]
+        )
+
+    _format_ws_base(ws)
     wb.save(output_path)
     return len(rows)
 
@@ -560,22 +586,22 @@ async def run_pipeline(db: Database) -> RunSummary:
     descriptions: dict[str, dict[str, Any]] = {}
     emitters: dict[int, dict[str, str]] = {}
     amortizations: dict[str, date | None] = {}
+    corpbonds_data: dict[str, dict[str, str]] = {}
 
     async with MoexClient() as client:
-        LOGGER.info("Этап 1/4: загрузка списка облигаций")
+        LOGGER.info("Этап 1/5: загрузка списка облигаций")
         bonds = await _fetch_all_traded_bonds(client)
-        LOGGER.info("Получено строк после дедупликации: %s", len(bonds))
 
-        LOGGER.info("Этап 2/4: загрузка истории объемов")
+        LOGGER.info("Этап 2/5: загрузка истории объемов")
         volume_20d = await _fetch_volume_20d(client)
 
         secids = [str(bond.get("SECID")) for bond in bonds if bond.get("SECID")]
+
+        LOGGER.info("Этап 3/5: загрузка описаний и эмитентов")
         descriptions, cache_desc_count, desc_errors = await _fetch_descriptions_with_cache(client, db, secids, semaphore)
         from_cache_count += cache_desc_count
         errors_count += desc_errors
-        save_state({"processed_ids": list(descriptions.keys()), "last_stage": "description"})
 
-        LOGGER.info("Этап 3/4: загрузка карточек эмитентов")
         emitter_ids: set[int] = set()
         for desc in descriptions.values():
             emitter_id = desc.get("EMITTER_ID")
@@ -587,17 +613,24 @@ async def run_pipeline(db: Database) -> RunSummary:
         emitters, cache_emit_count, emit_errors = await _fetch_emitters_with_cache(client, db, emitter_ids, semaphore)
         from_cache_count += cache_emit_count
         errors_count += emit_errors
+        save_state({"processed_ids": list(descriptions.keys()), "last_stage": "description"})
 
-        LOGGER.info("Этап 4/4: загрузка амортизаций")
+        LOGGER.info("Этап 4/5: загрузка амортизаций")
         amortizations, cache_amort_count, amort_errors = await _fetch_amortizations_with_cache(client, db, secids, semaphore)
         from_cache_count += cache_amort_count
         errors_count += amort_errors
+
+        LOGGER.info("Этап 5/5: загрузка данных CorpBonds")
+        corpbonds_data, cache_corp_count, corp_errors = await _fetch_corpbonds_with_cache(client, db, secids, semaphore)
+        from_cache_count += cache_corp_count
+        errors_count += corp_errors
 
     duration_load = time.perf_counter() - load_start
 
     calc_start = time.perf_counter()
     previous_prices = db.fetch_previous_prices()
     prepared_rows: list[BondRow] = []
+    corpbonds_rows: list[CorpBondRow] = []
 
     progress_calc = tqdm(total=len(bonds), desc="Подготовка строк", unit="обл", dynamic_ncols=True)
     for bond in bonds:
@@ -622,8 +655,6 @@ async def run_pipeline(db: Database) -> RunSummary:
         else:
             price_change = None
 
-        credit_rating, rating_date, rating_description = _extract_rating(desc)
-
         prepared_rows.append(
             BondRow(
                 secid=secid,
@@ -631,9 +662,6 @@ async def run_pipeline(db: Database) -> RunSummary:
                 short_name=str(bond.get("SHORTNAME") or ""),
                 emitter_name=emitter_info["name"],
                 emitter_inn=emitter_info["inn"],
-                credit_rating=credit_rating,
-                rating_date=rating_date,
-                rating_description=rating_description,
                 current_price=current_price,
                 previous_price=previous_price,
                 price_change_percent=round(price_change, 4) if price_change is not None else None,
@@ -652,17 +680,40 @@ async def run_pipeline(db: Database) -> RunSummary:
                 coupon_percent=float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None,
             )
         )
+
+        corp = corpbonds_data.get(secid, {})
+        corpbonds_rows.append(
+            CorpBondRow(
+                secid=secid,
+                price=corp.get("price", ""),
+                credit_rating=corp.get("credit_rating", ""),
+                coupon_type=corp.get("coupon_type", ""),
+                coupon_formula=corp.get("coupon_formula", ""),
+                nearest_offer_date=corp.get("nearest_offer_date", ""),
+                ladder_coupon=corp.get("ladder_coupon", ""),
+            )
+        )
         progress_calc.update(1)
     progress_calc.close()
 
     prepared_rows.sort(key=lambda x: x.secid)
+    corpbonds_rows.sort(key=lambda x: x.secid)
     db.upsert_snapshot([(row.secid, row.current_price, datetime.now(timezone.utc).isoformat()) for row in prepared_rows])
     save_state({"processed_ids": [x.secid for x in prepared_rows], "last_stage": "calc", "prev_stage": state.get("last_stage", "init")})
     duration_calc = time.perf_counter() - calc_start
 
     save_start = time.perf_counter()
-    output_path = config.get_output_file_path()
-    saved_count = _save_excel(prepared_rows, output_path)
+    saved_count = 0
+    moex_output_path: Path | None = None
+    corpbonds_output_path: Path | None = None
+
+    if config.EXPORT_MOEX_TO_EXCEL:
+        moex_output_path = config.get_moex_output_file_path()
+        saved_count += _save_moex_excel(prepared_rows, moex_output_path)
+    if config.EXPORT_CORPBONDS_TO_EXCEL:
+        corpbonds_output_path = config.get_corpbonds_output_file_path()
+        _save_corpbonds_excel(corpbonds_rows, corpbonds_output_path)
+
     save_state({"processed_ids": [x.secid for x in prepared_rows], "last_stage": "done"})
     duration_save = time.perf_counter() - save_start
 
@@ -676,5 +727,6 @@ async def run_pipeline(db: Database) -> RunSummary:
         duration_load=duration_load,
         duration_calc=duration_calc,
         duration_save=duration_save,
-        output_path=output_path,
+        moex_output_path=moex_output_path,
+        corpbonds_output_path=corpbonds_output_path,
     )

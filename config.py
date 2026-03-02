@@ -25,17 +25,25 @@ STATE_FILE_NAME = "state.json"
 CACHE_FILE_NAME = "bonds_cache.json"
 
 # Режим отладки выгрузки Excel.
-# True  — всегда использовать один и тот же файл MoexBonds.xlsx (перезапись).
-# False — можно переключить на альтернативное имя/логику версионирования в будущем.
+# True  — всегда использовать одни и те же имена файлов (перезапись).
+# False — использовать альтернативные имена/логику версионирования в будущем.
 DEBUG_SINGLE_EXCEL_FILE = True
 
-# Имя итогового Excel-файла в режиме отладки.
-# По требованию пользователя файл всегда один и тот же.
-OUTPUT_FILE_NAME_DEBUG = "MoexBonds.xlsx"
+# Флаги включения/выключения сохранения Excel.
+# True  — файл формируется.
+# False — этап сохранения конкретного провайдера пропускается.
+EXPORT_MOEX_TO_EXCEL = True
+EXPORT_CORPBONDS_TO_EXCEL = True
 
-# Имя итогового Excel-файла в неотладочном режиме.
-# Оставлено на будущее, когда потребуется отказаться от постоянной перезаписи.
-OUTPUT_FILE_NAME_RELEASE = "MoexBonds_latest.xlsx"
+# Имя итогового Excel-файла MOEX в режиме отладки.
+MOEX_OUTPUT_FILE_NAME_DEBUG = "MoexBonds.xlsx"
+
+# Имя итогового Excel-файла CorpBonds в режиме отладки.
+CORPBONDS_OUTPUT_FILE_NAME_DEBUG = "CorBonds.xlsx"
+
+# Имена итоговых Excel-файлов в неотладочном режиме.
+MOEX_OUTPUT_FILE_NAME_RELEASE = "MoexBonds_latest.xlsx"
+CORPBONDS_OUTPUT_FILE_NAME_RELEASE = "CorBonds_latest.xlsx"
 
 # Настройки логирования.
 # LOG_FILE_NAME      — основной файл логов.
@@ -68,8 +76,21 @@ CACHE_TTL_SEC = 60 * 60 * 24
 # Размер батча для потенциальных пакетных операций записи в БД.
 BATCH_SIZE = 200
 
-# Название листа в Excel.
+# Название листа в Excel MOEX.
 EXCEL_SHEET_NAME = "MoexBonds"
+
+# Название листа в Excel CorpBonds.
+CORPBONDS_EXCEL_SHEET_NAME = "CorBonds"
+
+# Базовый URL карточки облигации на CorpBonds (работает по SECID).
+CORPBONDS_BOND_URL_TEMPLATE = "https://corpbonds.ru/bond/{secid}"
+
+# User-Agent для загрузки страниц CorpBonds.
+CORPBONDS_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
 
 
 def get_db_path() -> Path:
@@ -84,8 +105,13 @@ def get_cache_file_path() -> Path:
     return CACHE_DIR / CACHE_FILE_NAME
 
 
-def get_output_file_path() -> Path:
-    file_name = OUTPUT_FILE_NAME_DEBUG if DEBUG_SINGLE_EXCEL_FILE else OUTPUT_FILE_NAME_RELEASE
+def get_moex_output_file_path() -> Path:
+    file_name = MOEX_OUTPUT_FILE_NAME_DEBUG if DEBUG_SINGLE_EXCEL_FILE else MOEX_OUTPUT_FILE_NAME_RELEASE
+    return OUTPUT_DIR / file_name
+
+
+def get_corpbonds_output_file_path() -> Path:
+    file_name = CORPBONDS_OUTPUT_FILE_NAME_DEBUG if DEBUG_SINGLE_EXCEL_FILE else CORPBONDS_OUTPUT_FILE_NAME_RELEASE
     return OUTPUT_DIR / file_name
 
 

@@ -54,6 +54,20 @@ class Database:
         )
         self.conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS corpbonds_cache (
+                secid TEXT PRIMARY KEY,
+                price TEXT NOT NULL,
+                credit_rating TEXT NOT NULL,
+                coupon_type TEXT NOT NULL,
+                coupon_formula TEXT NOT NULL,
+                nearest_offer_date TEXT NOT NULL,
+                ladder_coupon TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL,
@@ -177,6 +191,61 @@ class Database:
                 ON CONFLICT(emitter_id) DO UPDATE SET
                     name=excluded.name,
                     inn=excluded.inn,
+                    updated_at=excluded.updated_at;
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def get_cached_corpbonds(self, secids: list[str], min_ts: int) -> tuple[dict[str, dict[str, str]], list[str]]:
+        if not secids:
+            return {}, []
+        placeholders = ",".join("?" for _ in secids)
+        rows = self.conn.execute(
+            f"SELECT secid, price, credit_rating, coupon_type, coupon_formula, nearest_offer_date, ladder_coupon, updated_at "
+            f"FROM corpbonds_cache WHERE secid IN ({placeholders});",
+            secids,
+        ).fetchall()
+        cached: dict[str, dict[str, str]] = {}
+        for row in rows:
+            secid = str(row["secid"])
+            if int(row["updated_at"]) < min_ts:
+                continue
+            cached[secid] = {
+                "price": str(row["price"]),
+                "credit_rating": str(row["credit_rating"]),
+                "coupon_type": str(row["coupon_type"]),
+                "coupon_formula": str(row["coupon_formula"]),
+                "nearest_offer_date": str(row["nearest_offer_date"]),
+                "ladder_coupon": str(row["ladder_coupon"]),
+            }
+        missing = [secid for secid in secids if secid not in cached]
+        return cached, missing
+
+    def upsert_corpbonds(self, rows: list[tuple[str, str, str, str, str, str, str, int]]) -> int:
+        if not rows:
+            return 0
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT INTO corpbonds_cache (
+                    secid,
+                    price,
+                    credit_rating,
+                    coupon_type,
+                    coupon_formula,
+                    nearest_offer_date,
+                    ladder_coupon,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(secid) DO UPDATE SET
+                    price=excluded.price,
+                    credit_rating=excluded.credit_rating,
+                    coupon_type=excluded.coupon_type,
+                    coupon_formula=excluded.coupon_formula,
+                    nearest_offer_date=excluded.nearest_offer_date,
+                    ladder_coupon=excluded.ladder_coupon,
                     updated_at=excluded.updated_at;
                 """,
                 rows,

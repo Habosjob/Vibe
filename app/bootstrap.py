@@ -68,6 +68,11 @@ def validate_config() -> list[str]:
     if not isinstance(config.LOG_LEVEL, str) or not config.LOG_LEVEL.strip():
         errors.append("LOG_LEVEL должен быть непустой строкой")
 
+    if not isinstance(config.EXPORT_MOEX_TO_EXCEL, bool):
+        errors.append("EXPORT_MOEX_TO_EXCEL должен быть True/False")
+    if not isinstance(config.EXPORT_CORPBONDS_TO_EXCEL, bool):
+        errors.append("EXPORT_CORPBONDS_TO_EXCEL должен быть True/False")
+
     path_fields = (
         ("DOCS_DIR", config.DOCS_DIR),
         ("CACHE_DIR", config.CACHE_DIR),

@@ -1,3 +1,4 @@
 aiohttp==3.10.11
 openpyxl==3.1.5
 tqdm==4.67.1
+beautifulsoup4==4.12.3

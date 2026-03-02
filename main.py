@@ -51,7 +51,8 @@ def main() -> int:
     print(f"  - Расчёты: {summary.duration_calc:.1f} сек")
     print(f"  - Сохранение: {summary.duration_save:.1f} сек")
     print(f"Ошибок при загрузке: {summary.errors_count} (подробности в логах)")
-    print(f"Итоговый файл: {summary.output_path}")
+    print(f"Итоговый файл MOEX: {summary.moex_output_path if summary.moex_output_path else 'выгрузка отключена'}")
+    print(f"Итоговый файл CorpBonds: {summary.corpbonds_output_path if summary.corpbonds_output_path else 'выгрузка отключена'}")
     print(f"Лог-файл: {log_path}")
     print(f"Взято из кэша/инкрементально: {summary.from_cache_count}")
 
