@@ -37,7 +37,8 @@ python main.py
    - графики coupons/amortizations (bondization).
 3. Сохраняет данные в SQLite с upsert (инкрементально).
 4. Обновляет checkpoint: `cache/state.json`.
-5. Печатает итоговый Summary по запуску.
+5. Печатает прогресс обработки (progress-bar с ETA, а в Debug-консолях без TTY — текстовый прогресс с ETA).
+6. Печатает итоговый Summary по запуску.
 
 ## Папки и файлы
 
