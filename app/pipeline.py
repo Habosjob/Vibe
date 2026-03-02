@@ -69,6 +69,7 @@ class BondRow:
     accrued_int: float | None
     coupon_percent: float | None
     ytm: float | None
+    ytm_from_moex: bool
 
 
 @dataclass
@@ -1020,6 +1021,33 @@ def _days_to(target: date | None, today: date) -> int | None:
     return (target - today).days
 
 
+def _read_dropped_isins(path: Path) -> set[str]:
+    if not path.exists():
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "DroppedBonds"
+        ws.append(["ISIN", "комментарий"])
+        wb.save(path)
+        return set()
+
+    wb = load_workbook(path)
+    ws = wb.active
+    headers = [str(cell.value or "").strip() for cell in ws[1]] if ws.max_row >= 1 else []
+    if not headers:
+        return set()
+    try:
+        isin_idx = headers.index("ISIN")
+    except ValueError:
+        return set()
+
+    dropped: set[str] = set()
+    for values in ws.iter_rows(min_row=2, values_only=True):
+        isin = str(values[isin_idx] or "").strip()
+        if isin:
+            dropped.add(isin)
+    return dropped
+
+
 def _filter_bonds_for_screener(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     filters = config.SCREENER_FILTERS
     today = datetime.now().date()
@@ -1101,8 +1129,13 @@ def _save_screener_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBond
                 "Купон лесенкой": corp.ladder_coupon if corp else "",
                 "ScoreList": score,
                 "DateScoreList": score_date,
+                "_ytm_from_moex": row.ytm_from_moex,
             }
         )
+
+    dropped_isins = _read_dropped_isins(config.get_dropped_bonds_output_file_path())
+    if dropped_isins:
+        merged_rows = [row for row in merged_rows if str(row.get("ISIN") or "").strip() not in dropped_isins]
 
     filtered_rows = _filter_bonds_for_screener(merged_rows)
     default_headers = list(merged_rows[0].keys()) if merged_rows else []
@@ -1143,6 +1176,27 @@ def _save_screener_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBond
                 cell = ws.cell(row=row_idx, column=col_idx)
                 if isinstance(cell.value, date):
                     cell.number_format = "yyyy-mm-dd"
+
+        price_change_column_idx = next((idx + 1 for idx, h in enumerate(headers) if h == "Динамика цены, %"), None)
+        if price_change_column_idx is not None and ws.max_row >= 2:
+            col_letter = ws.cell(row=1, column=price_change_column_idx).column_letter
+            green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+            red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            ws.conditional_formatting.add(
+                f"{col_letter}2:{col_letter}{ws.max_row}",
+                CellIsRule(operator="greaterThan", formula=["0"], fill=green_fill),
+            )
+            ws.conditional_formatting.add(
+                f"{col_letter}2:{col_letter}{ws.max_row}",
+                CellIsRule(operator="lessThan", formula=["0"], fill=red_fill),
+            )
+
+        ytm_column_idx = next((idx + 1 for idx, h in enumerate(headers) if h == "YTM, %"), None)
+        if ytm_column_idx is not None:
+            ytm_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+            for excel_row_idx, item in enumerate(grouped[sheet_name], start=2):
+                if item.get("_ytm_from_moex"):
+                    ws.cell(row=excel_row_idx, column=ytm_column_idx).fill = ytm_fill
         _format_ws_base(ws)
 
     wb.save(output_path)
@@ -1245,6 +1299,27 @@ async def run_pipeline(db: Database) -> RunSummary:
         accrued_int = float(bond.get("ACCRUEDINT")) if bond.get("ACCRUEDINT") is not None else None
         coupon_percent = float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None
 
+        ytm_value = _calc_ytm_percent(
+            clean_price=_select_last_price(current_price, corp.get("price", "")),
+            accrued_int=accrued_int,
+            coupon_percent=coupon_percent,
+            coupon_period_days=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
+            coupon_type=corp.get("coupon_type", ""),
+            coupon_formula=corp.get("coupon_formula", ""),
+            secid=secid,
+            end_date=_as_date(bond.get("OFFERDATE")) or _as_date(corp.get("nearest_offer_date")) or _as_date(bond.get("MATDATE")),
+            key_rate=key_rate,
+            ruonia=ruonia,
+            gcurve_5y=gcurve_5y,
+            gcurve_7y=gcurve_7y,
+        )
+        ytm_from_moex = False
+        if ytm_value is None:
+            moex_ytm = _parse_float(bond.get("marketdata", {}).get("YIELD"))
+            if moex_ytm is not None:
+                ytm_value = round(moex_ytm, 2)
+                ytm_from_moex = True
+
         prepared_rows.append(
             BondRow(
                 secid=secid,
@@ -1268,20 +1343,8 @@ async def run_pipeline(db: Database) -> RunSummary:
                 coupon_period=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
                 accrued_int=accrued_int,
                 coupon_percent=coupon_percent,
-                ytm=_calc_ytm_percent(
-                    clean_price=_select_last_price(current_price, corp.get("price", "")),
-                    accrued_int=accrued_int,
-                    coupon_percent=coupon_percent,
-                    coupon_period_days=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
-                    coupon_type=corp.get("coupon_type", ""),
-                    coupon_formula=corp.get("coupon_formula", ""),
-                    secid=secid,
-                    end_date=_as_date(bond.get("OFFERDATE")) or _as_date(corp.get("nearest_offer_date")) or _as_date(bond.get("MATDATE")),
-                    key_rate=key_rate,
-                    ruonia=ruonia,
-                    gcurve_5y=gcurve_5y,
-                    gcurve_7y=gcurve_7y,
-                ),
+                ytm=ytm_value,
+                ytm_from_moex=ytm_from_moex,
             )
         )
 
