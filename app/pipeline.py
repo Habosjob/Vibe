@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -161,7 +162,7 @@ def _extract_rating(desc: dict[str, Any]) -> tuple[str, date | None, str]:
     if not credit_rating:
         for key, value in desc.items():
             upper = str(key).upper()
-            if "RATING" in upper and value not in (None, "") and "DATE" not in upper and "DESCR" not in upper:
+            if ("RATING" in upper or "РЕЙТ" in upper) and value not in (None, "") and "DATE" not in upper and "ДАТ" not in upper and "DESCR" not in upper and "ОПИС" not in upper:
                 credit_rating = str(value)
                 break
 
@@ -172,6 +173,14 @@ def _extract_rating(desc: dict[str, Any]) -> tuple[str, date | None, str]:
             rating_date = parsed
             break
 
+    for key, value in desc.items():
+        upper = str(key).upper()
+        if ("RATING" in upper or "РЕЙТ" in upper) and ("DATE" in upper or "ДАТ" in upper):
+            parsed = _as_date(value)
+            if parsed is not None:
+                rating_date = parsed
+                break
+
     rating_description = ""
     for key in rating_desc_keys:
         if desc.get(key):
@@ -180,7 +189,7 @@ def _extract_rating(desc: dict[str, Any]) -> tuple[str, date | None, str]:
     if not rating_description:
         for key, value in desc.items():
             upper = str(key).upper()
-            if "RATING" in upper and ("DESCR" in upper or "COMMENT" in upper) and value not in (None, ""):
+            if ("RATING" in upper or "РЕЙТ" in upper) and ("DESCR" in upper or "COMMENT" in upper or "ОПИС" in upper or "ПРОГНОЗ" in upper) and value not in (None, ""):
                 rating_description = str(value)
                 break
 
@@ -274,10 +283,11 @@ async def _fetch_descriptions_with_cache(
             rating_value = ""
             rating_date = ""
             rating_description = ""
+            rating_rows: list[tuple[str, str, str]] = []
             for row in payload["description"]["data"]:
                 item = dict(zip(cols, row))
                 key = str(item.get("name") or "")
-                title = str(item.get("title") or "").lower()
+                title = str(item.get("title") or "")
                 value = item.get("value")
                 if key:
                     values[key] = value
@@ -286,15 +296,31 @@ async def _fetch_descriptions_with_cache(
                 value_text = str(value).strip()
                 if not value_text:
                     continue
-                if ("рейтинг" in title or "rating" in title) and "дата" not in title and "date" not in title:
-                    if "опис" in title or "коммент" in title or "прогноз" in title or "outlook" in title:
-                        if not rating_description:
-                            rating_description = value_text
-                    elif not rating_value:
-                        rating_value = value_text
-                if ("рейтинг" in title or "rating" in title) and ("дата" in title or "date" in title):
-                    if not rating_date:
-                        rating_date = value_text
+                low_name = key.lower()
+                low_title = title.lower()
+                if any(token in low_name or token in low_title for token in ("rating", "рейтинг", "рейт")):
+                    rating_rows.append((low_name, low_title, value_text))
+
+            rating_like_pattern = re.compile(r"\b([A-D]{1,3}(?:[+-])?(?:\(RU\))?)\b", re.IGNORECASE)
+            for low_name, low_title, value_text in rating_rows:
+                is_date = any(token in low_name or token in low_title for token in ("date", "дата"))
+                is_description = any(token in low_name or token in low_title for token in ("descr", "desc", "опис", "прогноз", "outlook", "comment", "коммент"))
+                if is_date and not rating_date:
+                    rating_date = value_text
+                    continue
+                if is_description and not rating_description:
+                    rating_description = value_text
+                    continue
+                if not rating_value:
+                    rating_value = value_text
+
+            if not rating_value:
+                for _, _, value_text in rating_rows:
+                    match = rating_like_pattern.search(value_text)
+                    if match:
+                        rating_value = match.group(1)
+                        break
+
             if rating_value:
                 values["__RATING_VALUE"] = rating_value
             if rating_date:
