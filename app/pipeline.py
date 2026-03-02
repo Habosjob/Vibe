@@ -179,6 +179,15 @@ async def _fetch_bond_description(client: MoexClient, secid: str, semaphore: asy
         values = {row[0]: dict(zip(cols, row)).get("value") for row in payload["description"]["data"]}
         return secid, values
 
+    tasks = [asyncio.create_task(fetch_one(secid)) for secid in secids]
+    if tasks:
+        for task in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Амортизация", unit="обл", dynamic_ncols=True):
+            try:
+                secid, amort = await task
+                result[secid] = amort
+            except Exception as exc:
+                LOGGER.warning("Не удалось загрузить амортизацию: %s", exc)
+    return result
 
 async def _fetch_emitters(client: MoexClient, emitter_ids: set[int], semaphore: asyncio.Semaphore) -> dict[int, dict[str, str]]:
     result: dict[int, dict[str, str]] = {}
@@ -268,6 +277,14 @@ def _format_date(value: Any) -> str:
     except Exception:
         return text
 
+def _format_date(value: Any) -> str:
+    if not value:
+        return ""
+    text = str(value)
+    try:
+        return datetime.fromisoformat(text).strftime("%d.%m.%Y")
+    except Exception:
+        return text
 
 def _save_excel(rows: list[BondRow], output_path: Path) -> int:
     wb = Workbook()
