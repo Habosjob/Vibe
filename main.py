@@ -108,6 +108,28 @@ def is_source_alive(url: str, logger: logging.Logger) -> bool:
         return False
 
 
+def check_sources_health(logger: logging.Logger) -> dict[str, bool]:
+    checks = {
+        "moex": f"{BASE_URL}/engines/stock/markets/shares/securities.json",
+        "expert_ra": f"{EXPERT_RA_BASE_URL}/ratings/",
+        "acra": f"{ACRA_BASE_URL}/ratings/issuers/",
+    }
+    statuses: dict[str, bool] = {}
+    with ThreadPoolExecutor(max_workers=len(checks)) as executor:
+        futures = {executor.submit(is_source_alive, url, logger): name for name, url in checks.items()}
+        with progress(total=len(futures), desc="Проверка источников", unit="источник") as pbar:
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    statuses[name] = future.result()
+                except Exception as error:
+                    logger.exception("Source health failed name=%s: %s", name, error)
+                    statuses[name] = False
+                pbar.update(1)
+
+    return statuses
+
+
 def load_cache(logger: logging.Logger) -> dict[str, dict[str, Any]]:
     if not CACHE_FILE.exists():
         return {"secid_to_emitter": {}, "emitters": {}}
@@ -756,18 +778,37 @@ def run() -> None:
     bonds = pd.DataFrame()
     emitters = pd.DataFrame()
 
-    moex_alive = is_source_alive(f"{BASE_URL}/engines/stock/markets/shares/securities.json", logger)
-    expert_ra_alive = is_source_alive(f"{EXPERT_RA_BASE_URL}/ratings/", logger)
-    acra_alive = is_source_alive(f"{ACRA_BASE_URL}/ratings/issuers/", logger)
+    health = check_sources_health(logger)
+    moex_alive = health.get("moex", False)
+    expert_ra_alive = health.get("expert_ra", False)
+    acra_alive = health.get("acra", False)
 
     try:
+        def fetch_shares_online() -> pd.DataFrame:
+            result = client.fetch_market_securities("shares", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "LISTLEVEL", "STATUS", "EMITTER_ID"])
+            result = result[(result["BOARDID"] == "TQBR") & (result["STATUS"].fillna("") != "N")].copy()
+            save_dataframe_snapshot(SHARES_CACHE_FILE, result, logger)
+            return result
+
+        def fetch_bonds_online() -> pd.DataFrame:
+            result = client.fetch_market_securities("bonds", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "MATDATE", "LISTLEVEL", "STATUS", "EMITTER_ID"])
+            result = result[result["BOARDID"].isin(["TQCB", "TQOB", "TQOD", "TQIR", "TQOE"])].copy()
+            result = result[result["STATUS"].fillna("") != "N"].copy()
+            result["MATDATE"] = pd.to_datetime(result["MATDATE"], errors="coerce").dt.date
+            result = result[(result["MATDATE"].isna()) | (result["MATDATE"] >= date.today())].copy()
+            save_dataframe_snapshot(BONDS_CACHE_FILE, result, logger)
+            return result
+
+        bonds_future = None
+        moex_prefetch_executor = ThreadPoolExecutor(max_workers=1)
+        if moex_alive:
+            bonds_future = moex_prefetch_executor.submit(fetch_bonds_online)
+
         print("=====\nЭтап 1: Сбор акций")
         stage_started_at = perf_counter()
         if moex_alive:
             try:
-                shares = client.fetch_market_securities("shares", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "LISTLEVEL", "STATUS", "EMITTER_ID"])
-                shares = shares[(shares["BOARDID"] == "TQBR") & (shares["STATUS"].fillna("") != "N")].copy()
-                save_dataframe_snapshot(SHARES_CACHE_FILE, shares, logger)
+                shares = fetch_shares_online()
             except requests.RequestException as error:
                 logger.warning("Shares stage failed, trying cache: %s", error)
                 skipped_sources.append("MOEX (акции)")
@@ -785,12 +826,7 @@ def run() -> None:
         stage_started_at = perf_counter()
         if moex_alive:
             try:
-                bonds = client.fetch_market_securities("bonds", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "MATDATE", "LISTLEVEL", "STATUS", "EMITTER_ID"])
-                bonds = bonds[bonds["BOARDID"].isin(["TQCB", "TQOB", "TQOD", "TQIR", "TQOE"])].copy()
-                bonds = bonds[bonds["STATUS"].fillna("") != "N"].copy()
-                bonds["MATDATE"] = pd.to_datetime(bonds["MATDATE"], errors="coerce").dt.date
-                bonds = bonds[(bonds["MATDATE"].isna()) | (bonds["MATDATE"] >= date.today())].copy()
-                save_dataframe_snapshot(BONDS_CACHE_FILE, bonds, logger)
+                bonds = bonds_future.result() if bonds_future is not None else fetch_bonds_online()
             except requests.RequestException as error:
                 logger.warning("Bonds stage failed, trying cache: %s", error)
                 skipped_sources.append("MOEX (облигации)")
@@ -803,6 +839,7 @@ def run() -> None:
             if not bonds.empty:
                 restored_sources.append("MOEX (облигации)")
         stage_times["Этап 2: Сбор облигаций"] = perf_counter() - stage_started_at
+        moex_prefetch_executor.shutdown(wait=False)
 
         print("Этап 3: Обогащение эмитентов")
         stage_started_at = perf_counter()
@@ -819,6 +856,8 @@ def run() -> None:
         emitters = build_emitters_table(shares, bonds) if not shares.empty or not bonds.empty else load_dataframe_snapshot(EMITTERS_CACHE_FILE, logger)
         inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
         expert_ra_ratings: dict[str, str] = {}
+        rating_executor = ThreadPoolExecutor(max_workers=1)
+        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if acra_alive else None
         if expert_ra_alive:
             try:
                 expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
@@ -844,7 +883,7 @@ def run() -> None:
         acra_ratings: dict[str, str] = {}
         if acra_alive:
             try:
-                acra_ratings = acra_client.fetch_latest_ratings_by_inn(inns)
+                acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
                 save_json_dict(ACRA_CACHE_FILE, acra_ratings, logger)
             except requests.RequestException as error:
                 logger.warning("ACRA stage failed, trying cache: %s", error)
@@ -857,6 +896,7 @@ def run() -> None:
             acra_ratings = {k: str(v) for k, v in load_json_dict(ACRA_CACHE_FILE, logger).items()}
             if acra_ratings:
                 restored_sources.append("АКРА")
+        rating_executor.shutdown(wait=False)
 
         if not emitters.empty:
             emitters = apply_acra_ratings(emitters, acra_ratings)
@@ -866,10 +906,16 @@ def run() -> None:
         print("Этап 6: Формирование Excel")
         stage_started_at = perf_counter()
         excel_exports = [(shares, SHARES_FILE), (bonds, BONDS_FILE), (emitters, EMITTERS_FILE)]
+        def save_excel_item(item: tuple[pd.DataFrame, Path]) -> None:
+            frame, output_path = item
+            save_to_excel(frame, output_path, logger)
+
         with progress(total=len(excel_exports), desc="Экспорт Excel", unit="файл") as pbar:
-            for df, output_path in excel_exports:
-                save_to_excel(df, output_path, logger)
-                pbar.update(1)
+            with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(excel_exports))) as executor:
+                futures = [executor.submit(save_excel_item, item) for item in excel_exports]
+                for future in as_completed(futures):
+                    future.result()
+                    pbar.update(1)
         stage_times["Этап 6: Формирование Excel"] = perf_counter() - stage_started_at
 
         print("=====\nГотово")
