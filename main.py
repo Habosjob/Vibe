@@ -549,6 +549,12 @@ class AcraClient:
         self.logger = logger
         self.session = ProxyRotatingSession(logger, proxies)
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
+        self.direct_session = requests.Session()
+        self.direct_session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
+        self.direct_session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS))
+        self.direct_session.mount("http://", requests.adapters.HTTPAdapter(pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS))
+        self._request_mode = "auto"
+        self._request_mode_lock = threading.Lock()
 
     def _normalize_inn(self, value: Any) -> str | None:
         if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -595,33 +601,55 @@ class AcraClient:
         url = f"{ACRA_BASE_URL}{path}"
         errors: list[str] = []
 
-        try:
-            response = self.session.get(url, params=request_params, timeout=REQUEST_TIMEOUT)
+        def call_direct(verify: bool = True) -> str:
+            response = self.direct_session.get(url, params=request_params, timeout=REQUEST_TIMEOUT, verify=verify)
             response.raise_for_status()
-            self.logger.info("GET ACRA %s params=%s status=%s", url, request_params, response.status_code)
+            self.logger.info("GET ACRA direct verify=%s %s params=%s status=%s", verify, url, request_params, response.status_code)
             return response.text
+
+        def call_proxy() -> str:
+            proxy_response = self.direct_session.get(
+                f"{ACRA_PROXY_BASE_URL}{path}",
+                params=request_params,
+                timeout=REQUEST_TIMEOUT,
+            )
+            proxy_response.raise_for_status()
+            self.logger.info("GET ACRA proxy %s params=%s status=%s", path, request_params, proxy_response.status_code)
+            return proxy_response.text
+
+        with self._request_mode_lock:
+            mode = self._request_mode
+
+        if mode == "proxy":
+            return call_proxy()
+        if mode == "direct":
+            return call_direct(verify=True)
+        if mode == "direct_insecure":
+            return call_direct(verify=False)
+
+        try:
+            text = call_direct(verify=True)
+            with self._request_mode_lock:
+                self._request_mode = "direct"
+            return text
         except requests.RequestException as error:
             errors.append(f"direct-verify-on: {error}")
             self.logger.warning("ACRA direct request failed with certificate verification: %s", error)
 
         try:
-            response = self.session.get(url, params=request_params, timeout=REQUEST_TIMEOUT, verify=False)
-            response.raise_for_status()
-            self.logger.warning("GET ACRA without SSL verification %s params=%s status=%s", url, request_params, response.status_code)
-            return response.text
+            text = call_direct(verify=False)
+            with self._request_mode_lock:
+                self._request_mode = "direct_insecure"
+            return text
         except requests.RequestException as error:
             errors.append(f"direct-verify-off: {error}")
             self.logger.warning("ACRA direct request without certificate verification failed: %s", error)
 
         try:
-            proxy_response = self.session.get(
-                f"{ACRA_PROXY_BASE_URL}{path}",
-                params=request_params,
-                timeout=REQUEST_TIMEOUT * 2,
-            )
-            proxy_response.raise_for_status()
-            self.logger.info("GET ACRA proxy %s params=%s status=%s", path, request_params, proxy_response.status_code)
-            return proxy_response.text
+            text = call_proxy()
+            with self._request_mode_lock:
+                self._request_mode = "proxy"
+            return text
         except requests.RequestException as error:
             errors.append(f"proxy: {error}")
             self.logger.warning("ACRA proxy request failed: %s", error)
@@ -676,16 +704,15 @@ class AcraClient:
                 break
 
         if current_start is None:
-            return inn, None
-
-        end_index = len(lines)
-        for index in range(current_start + 1, len(lines)):
-            lowered = lines[index].lower()
-            if lowered == "история рейтингов":
-                end_index = index
-                break
-
-        current_block = lines[current_start:end_index]
+            current_block = lines
+        else:
+            end_index = len(lines)
+            for index in range(current_start + 1, len(lines)):
+                lowered = lines[index].lower()
+                if lowered == "история рейтингов":
+                    end_index = index
+                    break
+            current_block = lines[current_start:end_index]
         current_text = "\n".join(current_block)
 
         rating_match = re.search(r"([A-Z]{1,4}[+-]?\(RU\))", current_text)
@@ -710,6 +737,10 @@ class AcraClient:
         date_match = re.search(r"\b(\d{1,2}\s+[а-я]+\s+\d{4})\b", current_text.lower())
         if date_match:
             date_value = self._parse_ru_date(date_match.group(1))
+
+        if not rating:
+            rating_match = re.search(r"\b([A-Z]{1,4}(?:[+-]|-)?\(RU\))\b", "\n".join(lines))
+            rating = rating_match.group(1) if rating_match else None
 
         if not rating:
             return inn, None
@@ -774,6 +805,14 @@ class AcraClient:
                         self.logger.exception("ACRA issuer parse failed path=%s: %s", issuer_path, error)
                     pbar.update(1)
 
+        self.logger.info(
+            "ACRA scan stats: request_mode=%s total_issuers=%s total_pages=%s issuer_links=%s target_inn=%s",
+            self._request_mode,
+            total_issuers,
+            total_pages,
+            len(sorted_links),
+            len(normalized_inns),
+        )
         self.logger.info("ACRA ratings matched by INN: %s", len(ratings_by_inn))
         return ratings_by_inn
 
@@ -1411,6 +1450,7 @@ def run() -> None:
         emitters = build_emitters_table(shares, bonds) if not shares.empty or not bonds.empty else load_dataframe_snapshot(EMITTERS_CACHE_FILE, logger)
         emitters = apply_manual_score_columns(emitters, logger)
         inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
+        logger.info("Emitters scope: rows=%s unique_inn=%s", len(emitters), len(inns))
         expert_ra_cached, expert_ra_cached_today = load_daily_ratings_cache(EXPERT_RA_CACHE_FILE, logger)
         acra_cached, acra_cached_today = load_daily_ratings_cache(ACRA_CACHE_FILE, logger)
         nkr_cached, nkr_cached_today = load_daily_ratings_cache(NKR_CACHE_FILE, logger)
@@ -1443,6 +1483,7 @@ def run() -> None:
 
         if not emitters.empty:
             emitters = apply_expert_ra_ratings(emitters, expert_ra_ratings)
+        logger.info("Expert RA coverage: %s/%s", len(expert_ra_ratings), len(inns))
         stage_times["Этап 4: Получение рейтингов Эксперт РА"] = perf_counter() - stage_started_at
 
         print("Этап 5: Получение рейтингов АКРА")
@@ -1469,6 +1510,7 @@ def run() -> None:
         if not emitters.empty:
             emitters = apply_acra_ratings(emitters, acra_ratings)
             save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
+        logger.info("ACRA coverage: %s/%s", len(acra_ratings), len(inns))
         stage_times["Этап 5: Получение рейтингов АКРА"] = perf_counter() - stage_started_at
 
         print("Этап 6: Получение рейтингов НКР")
@@ -1497,6 +1539,7 @@ def run() -> None:
         if not emitters.empty:
             emitters = apply_nkr_ratings(emitters, nkr_ratings)
             save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
+        logger.info("NKR coverage: %s/%s", len(nkr_ratings), len(inns))
         stage_times["Этап 6: Получение рейтингов НКР"] = perf_counter() - stage_started_at
 
         print("Этап 7: Получение рейтингов НРА")
@@ -1524,6 +1567,7 @@ def run() -> None:
         if not emitters.empty:
             emitters = apply_nra_ratings(emitters, nra_ratings)
             save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
+        logger.info("NRA coverage: %s/%s", len(nra_ratings), len(inns))
         stage_times["Этап 7: Получение рейтингов НРА"] = perf_counter() - stage_started_at
 
         print("Этап 8: Формирование Excel")
