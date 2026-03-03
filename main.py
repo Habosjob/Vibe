@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import signal
+import sqlite3
 import threading
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,10 +34,13 @@ OUTPUT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = OUTPUT_DIR / "logs"
 CACHE_DIR = OUTPUT_DIR / "cache"
 EXPORT_DIR = OUTPUT_DIR / "output"
+DB_DIR = OUTPUT_DIR / "DB"
 LOG_FILE = LOGS_DIR / "main.log"
 SHARES_FILE = EXPORT_DIR / "moex_shares.xlsx"
 BONDS_FILE = EXPORT_DIR / "moex_bonds.xlsx"
 EMITTERS_FILE = EXPORT_DIR / "moex_emitters.xlsx"
+GREEN_BONDS_FILE = EXPORT_DIR / "GreenBonds.xlsx"
+SQLITE_FILE = DB_DIR / "vibe_data.sqlite"
 REQUEST_TIMEOUT = 30
 MAX_WORKERS = 64
 PROXY_SOURCE_TIMEOUT = 6
@@ -49,11 +53,12 @@ PROXY_VALIDATION_TIME_BUDGET = 8
 ACRA_PAGE_WORKERS = 24
 ACRA_ISSUER_WORKERS = 64
 PROXYLIST_FILE = OUTPUT_DIR / "proxylist.csv"
-USE_CACHE = False
+USE_CACHE = True
 CACHE_FILE = CACHE_DIR / "emitter_cache.json"
 SHARES_CACHE_FILE = CACHE_DIR / "shares_snapshot.json"
 BONDS_CACHE_FILE = CACHE_DIR / "bonds_snapshot.json"
 EMITTERS_CACHE_FILE = CACHE_DIR / "emitters_snapshot.json"
+GREEN_BONDS_CACHE_FILE = CACHE_DIR / "green_bonds_snapshot.json"
 EXPERT_RA_CACHE_FILE = CACHE_DIR / "expert_ra_ratings.json"
 ACRA_CACHE_FILE = CACHE_DIR / "acra_ratings.json"
 NKR_CACHE_FILE = CACHE_DIR / "nkr_ratings.json"
@@ -114,8 +119,92 @@ def progress(total: int, desc: str, unit: str):
 
 
 def ensure_project_dirs() -> None:
-    for directory in [LOGS_DIR, CACHE_DIR, EXPORT_DIR, OUTPUT_DIR / "docs"]:
+    for directory in [LOGS_DIR, CACHE_DIR, EXPORT_DIR, DB_DIR, OUTPUT_DIR / "docs"]:
         directory.mkdir(parents=True, exist_ok=True)
+
+
+def open_sqlite_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(SQLITE_FILE, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    return conn
+
+
+def _serialize_sql_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return pd.Timestamp(value).isoformat()
+    if isinstance(value, (str, bytes)):
+        return value
+    if hasattr(value, "tolist") and not isinstance(value, (pd.Series, pd.DataFrame)):
+        try:
+            return json.dumps(value.tolist(), ensure_ascii=False)
+        except Exception:
+            pass
+    try:
+        missing = pd.isna(value)
+        if isinstance(missing, bool) and missing:
+            return None
+    except Exception:
+        pass
+    return value
+
+
+def upsert_records_sqlite(
+    conn: sqlite3.Connection,
+    table_name: str,
+    records: list[dict[str, Any]],
+    key_columns: list[str],
+    logger: logging.Logger,
+) -> None:
+    if not records:
+        return
+    frame = pd.DataFrame(records)
+    upsert_dataframe_sqlite(conn, table_name, frame, key_columns, logger)
+
+
+def upsert_dataframe_sqlite(
+    conn: sqlite3.Connection,
+    table_name: str,
+    frame: pd.DataFrame,
+    key_columns: list[str],
+    logger: logging.Logger,
+) -> None:
+    if frame.empty:
+        logger.info("SQLite upsert skipped table=%s (empty frame)", table_name)
+        return
+
+    columns = list(frame.columns)
+    quoted_columns = ", ".join(f'"{column}" TEXT' for column in columns)
+    pk = ", ".join(f'"{column}"' for column in key_columns)
+    conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({quoted_columns}, "updated_at" TEXT, PRIMARY KEY ({pk}))')
+
+    insert_columns = columns + ["updated_at"]
+    insert_column_clause = ", ".join([f'"{col}"' for col in insert_columns])
+    placeholders = ", ".join(["?" for _ in insert_columns])
+    conflict_clause = ", ".join([f'"{col}"' for col in key_columns])
+    update_clause = ", ".join([f'"{col}"=excluded."{col}"' for col in columns if col not in key_columns] + ['"updated_at"=excluded."updated_at"'])
+    insert_sql = (
+        f'INSERT INTO "{table_name}" ({insert_column_clause}) '
+        f'VALUES ({placeholders}) '
+        f'ON CONFLICT({conflict_clause}) DO UPDATE SET {update_clause}'
+    )
+
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    records = []
+    for row in frame.to_dict(orient="records"):
+        values = [_serialize_sql_value(row.get(column)) for column in columns]
+        values.append(timestamp)
+        records.append(values)
+
+    conn.executemany(insert_sql, records)
+    conn.commit()
+    logger.info("SQLite upsert done table=%s rows=%s", table_name, len(records))
 
 
 def load_json_dict(path: Path, logger: logging.Logger) -> dict[str, Any]:
@@ -459,6 +548,42 @@ class MoexClient:
             return {"EMITTER_ID": emitter_id, "EMITTER_NAME": None, "INN": None}
         return {"EMITTER_ID": int(row[0][0]), "EMITTER_NAME": row[0][1], "INN": row[0][2]}
 
+    def fetch_security_description(self, secid: str) -> dict[str, Any]:
+        data = self._get(f"/securities/{secid}.json", params={"iss.meta": "off", "iss.only": "description"})
+        rows = data.get("description", {}).get("data", [])
+        description: dict[str, Any] = {}
+        for row in rows:
+            if len(row) >= 3:
+                description[str(row[0]).upper()] = row[2]
+        return description
+
+    def fetch_security_market_snapshot(self, secid: str) -> dict[str, Any]:
+        data = self._get(
+            "/engines/stock/markets/bonds/securities/{secid}.json".format(secid=secid),
+            params={"iss.meta": "off", "iss.only": "securities,marketdata"},
+        )
+        result: dict[str, Any] = {}
+        for block_name in ["securities", "marketdata"]:
+            block = data.get(block_name, {})
+            cols = block.get("columns", [])
+            rows = block.get("data", [])
+            if rows:
+                for idx, col in enumerate(cols):
+                    result[col.upper()] = rows[0][idx] if idx < len(rows[0]) else None
+        return result
+
+    def fetch_bondization(self, secid: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+        data = self._get(
+            f"/statistics/engines/stock/markets/bonds/bondization/{secid}.json",
+            params={"iss.meta": "off", "iss.only": "coupons,amortizations"},
+        )
+        coupons = pd.DataFrame(data.get("coupons", {}).get("data", []), columns=data.get("coupons", {}).get("columns", []))
+        amortizations = pd.DataFrame(
+            data.get("amortizations", {}).get("data", []),
+            columns=data.get("amortizations", {}).get("columns", []),
+        )
+        return coupons, amortizations
+
 
 class ExpertRaClient:
     def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
@@ -592,6 +717,36 @@ class AcraClient:
     def _extract_total_issuers(self, text: str) -> int | None:
         match = re.search(r"Найдено:\s*(\d+)", text)
         return int(match.group(1)) if match else None
+
+    def _extract_search_rows(self, text: str) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        row_blocks = re.findall(r"<tr[^>]*>([\s\S]*?)</tr>", text, flags=re.IGNORECASE)
+        for block in row_blocks:
+            issuer_match = re.search(r'href="(/ratings/issuers/[^"#?]+/)"[^>]*>([\s\S]*?)</a>', block, flags=re.IGNORECASE)
+            if not issuer_match:
+                continue
+            issuer_path = issuer_match.group(1)
+            issuer_name = self._clean_text(re.sub(r"<[^>]+>", " ", issuer_match.group(2)))
+
+            rating_match = re.search(r"([A-Z]{1,4}[+-]?\(RU\))", block)
+            rating = rating_match.group(1) if rating_match else ""
+
+            forecast_match = re.search(r"(Позитивный|Стабильный|Негативный|Развивающийся|Под наблюдением)", block, flags=re.IGNORECASE)
+            forecast = self._clean_text(forecast_match.group(1)) if forecast_match else ""
+
+            date_match = re.search(r"(\d{1,2}\s+[а-я]+\s+\d{4}|\d{1,2}\.\d{1,2}\.\d{2,4})", block, flags=re.IGNORECASE)
+            date_text = self._parse_ru_date(date_match.group(1)) if date_match else ""
+
+            rows.append(
+                {
+                    "issuer_path": issuer_path,
+                    "issuer_name": issuer_name,
+                    "rating": rating,
+                    "forecast": forecast,
+                    "date": date_text,
+                }
+            )
+        return rows
 
     def _parse_ru_date(self, raw_value: str) -> str:
         month_map = {
@@ -778,65 +933,41 @@ class AcraClient:
         if not normalized_inns:
             return {}
 
-        try:
-            first_page = self._get_page_text("/ratings/issuers/", params={"page": 1})
-        except requests.RequestException as error:
-            self.logger.warning("ACRA parsing skipped: cannot load issuer list: %s", error)
-            return {}
-
-        total_issuers = self._extract_total_issuers(first_page)
-        total_pages = max(1, math.ceil(total_issuers / 10)) if total_issuers else 100
-
-        issuer_links = set(self._extract_issuer_links(first_page))
-        pages = list(range(2, total_pages + 1))
-
-        def fetch_page_links(page: int) -> list[str]:
-            page_text = self._get_page_text("/ratings/issuers/", params={"page": page})
-            return self._extract_issuer_links(page_text)
-
-        with progress(total=len(pages), desc="Сканирование страниц АКРА", unit="страница") as pbar:
-            with ThreadPoolExecutor(max_workers=min(ACRA_PAGE_WORKERS, max(len(pages), 1))) as executor:
-                futures = {executor.submit(fetch_page_links, page): page for page in pages}
-                for future in as_completed(futures):
-                    page = futures[future]
-                    try:
-                        page_links = future.result()
-                        issuer_links.update(page_links)
-                    except requests.RequestException as error:
-                        self.logger.warning("ACRA page skipped page=%s: %s", page, error)
-                    except Exception as error:
-                        self.logger.exception("ACRA page parse failed page=%s: %s", page, error)
-                    pbar.update(1)
-
         ratings_by_inn: dict[str, str] = {}
-        sorted_links = sorted(issuer_links, key=lambda link: int(link.rstrip("/").split("/")[-1]))
-        def fetch_issuer_payload(issuer_path: str) -> tuple[str | None, str | None]:
-            issuer_text = self._get_page_text(issuer_path)
-            return self._parse_issuer_card(issuer_text)
 
-        with progress(total=len(sorted_links), desc="Парсинг АКРА", unit="эмитент") as pbar:
-            with ThreadPoolExecutor(max_workers=min(ACRA_ISSUER_WORKERS, max(len(sorted_links), 1))) as executor:
-                futures = {executor.submit(fetch_issuer_payload, issuer_path): issuer_path for issuer_path in sorted_links}
+        def fetch_for_inn(inn: str) -> tuple[str, str | None]:
+            search_text = self._get_page_text("/ratings/issuers/", params={"text": inn})
+            rows = self._extract_search_rows(search_text)
+            for row in rows:
+                parts = [part for part in [row.get("rating", ""), row.get("forecast", ""), row.get("date", "")] if part]
+                if parts:
+                    return inn, "\n".join(parts)
+
+            issuer_links = self._extract_issuer_links(search_text)
+            if issuer_links:
+                issuer_text = self._get_page_text(issuer_links[0])
+                parsed_inn, parsed_value = self._parse_issuer_card(issuer_text)
+                if parsed_inn == inn and parsed_value:
+                    return inn, parsed_value
+            return inn, None
+
+        ordered_inns = sorted(normalized_inns)
+        with progress(total=len(ordered_inns), desc="Парсинг АКРА", unit="ИНН") as pbar:
+            with ThreadPoolExecutor(max_workers=min(ACRA_PAGE_WORKERS, max(len(ordered_inns), 1))) as executor:
+                futures = {executor.submit(fetch_for_inn, inn): inn for inn in ordered_inns}
                 for future in as_completed(futures):
-                    issuer_path = futures[future]
+                    inn = futures[future]
                     try:
-                        inn, value = future.result()
-                        if inn and inn in normalized_inns and value:
-                            ratings_by_inn[inn] = value
+                        resolved_inn, rating_value = future.result()
+                        if rating_value:
+                            ratings_by_inn[resolved_inn] = rating_value
                     except requests.RequestException as error:
-                        self.logger.exception("ACRA issuer fetch failed path=%s: %s", issuer_path, error)
+                        self.logger.warning("ACRA INN query failed inn=%s: %s", inn, error)
                     except Exception as error:
-                        self.logger.exception("ACRA issuer parse failed path=%s: %s", issuer_path, error)
+                        self.logger.exception("ACRA parse failed inn=%s: %s", inn, error)
                     pbar.update(1)
 
-        self.logger.info(
-            "ACRA scan stats: request_mode=%s total_issuers=%s total_pages=%s issuer_links=%s target_inn=%s",
-            self._request_mode,
-            total_issuers,
-            total_pages,
-            len(sorted_links),
-            len(normalized_inns),
-        )
+        self.logger.info("ACRA request mode=%s target_inn=%s", self._request_mode, len(normalized_inns))
         self.logger.info("ACRA ratings matched by INN: %s", len(ratings_by_inn))
         return ratings_by_inn
 
@@ -1306,6 +1437,99 @@ def apply_nra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) ->
     return result
 
 
+def collect_green_bonds(
+    client: MoexClient,
+    emitters: pd.DataFrame,
+    bonds: pd.DataFrame,
+    logger: logging.Logger,
+    sqlite_conn: sqlite3.Connection | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if emitters.empty or bonds.empty or "ScoreList" not in emitters.columns:
+        return pd.DataFrame(), pd.DataFrame()
+
+    green_emitters = emitters[emitters["ScoreList"].fillna("").str.lower() == "green"].copy()
+    if green_emitters.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    green_emitter_ids = set(pd.to_numeric(green_emitters["EMITTER_ID"], errors="coerce").dropna().astype("int64").tolist())
+    scoped_bonds = bonds[pd.to_numeric(bonds["EMITTER_ID"], errors="coerce").fillna(-1).astype("int64").isin(green_emitter_ids)].copy()
+
+    records: list[dict[str, Any]] = []
+    payment_records: list[dict[str, Any]] = []
+
+    scoped_records = scoped_bonds.to_dict(orient="records")
+
+    def fetch_bond_payload(row: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        secid = row.get("SECID")
+        description = client.fetch_security_description(str(secid))
+        market = client.fetch_security_market_snapshot(str(secid))
+        coupons, amortizations = client.fetch_bondization(str(secid))
+
+        amort_startdate = None
+        if not amortizations.empty and "amortdate" in amortizations.columns:
+            amortizations["amortdate"] = pd.to_datetime(amortizations["amortdate"], errors="coerce")
+            value_col = "valueprc" if "valueprc" in amortizations.columns else ("value" if "value" in amortizations.columns else None)
+            if value_col:
+                non_zero = amortizations[pd.to_numeric(amortizations[value_col], errors="coerce").fillna(0) > 0]
+                if not non_zero.empty:
+                    amort_startdate = non_zero["amortdate"].min()
+
+        coupon_records: list[dict[str, Any]] = []
+        if not coupons.empty:
+            coupons = coupons.copy()
+            coupons["SECID"] = secid
+            coupon_records = coupons.where(pd.notna(coupons), None).to_dict(orient="records")
+
+        record = {
+            "SECID": secid,
+            "ISIN": row.get("ISIN"),
+            "SHORTNAME": row.get("SHORTNAME"),
+            "EMITTER_ID": row.get("EMITTER_ID"),
+            "EMITTER_NAME": row.get("EMITTER_NAME"),
+            "INN": row.get("INN"),
+            "MATDATE": row.get("MATDATE"),
+            "offerdate": description.get("OFFERDATE") or description.get("BUYBACKDATE"),
+            "maturity_date": description.get("MATDATE") or description.get("REPAYDATE"),
+            "is_qualified_investors": description.get("ISQUALIFIEDINVESTORS") or description.get("QUALIFIEDINVESTOR"),
+            "coupon_percent": description.get("COUPONPERCENT") or market.get("COUPONPERCENT"),
+            "coupon_value": description.get("COUPONVALUE") or market.get("COUPONVALUE"),
+            "yield": market.get("YIELD") or market.get("YIELDATWAP"),
+            "accrued_coupon_income": market.get("ACCRUEDINT") or market.get("ACCRUEDINTVALUE"),
+            "last_price": market.get("LAST") or market.get("LASTVALUE"),
+            "close_price": market.get("CLOSE") or market.get("LCLOSE") or market.get("LEGALCLOSEPRICE"),
+            "market_price": market.get("MARKETPRICE"),
+            "amort_startdate": amort_startdate.date().isoformat() if pd.notna(amort_startdate) else None,
+            "coupons_json": coupon_records,
+            "amortizations_json": amortizations.where(pd.notna(amortizations), None).to_dict(orient="records"),
+            "description_json": description,
+            "market_json": market,
+        }
+        return record, coupon_records
+
+    with progress(total=len(scoped_records), desc="Green bonds", unit="бумага") as pbar:
+        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(len(scoped_records), 1))) as executor:
+            futures = {executor.submit(fetch_bond_payload, row): row.get("SECID") for row in scoped_records}
+            for future in as_completed(futures):
+                secid = futures[future]
+                try:
+                    record, coupon_records = future.result()
+                    records.append(record)
+                    payment_records.extend(coupon_records)
+
+                    if sqlite_conn is not None:
+                        upsert_records_sqlite(sqlite_conn, "green_bonds", [record], ["SECID"], logger)
+                        if coupon_records:
+                            coupons_frame = pd.DataFrame(coupon_records)
+                            if "coupondate" not in coupons_frame.columns:
+                                coupons_frame["coupondate"] = pd.NA
+                            upsert_dataframe_sqlite(sqlite_conn, "green_bond_payments", coupons_frame, ["SECID", "coupondate"], logger)
+                except Exception as error:
+                    logger.exception("Green bond details failed secid=%s: %s", secid, error)
+                pbar.update(1)
+
+    return pd.DataFrame(records), pd.DataFrame(payment_records)
+
+
 def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
     for col_idx, column_name in enumerate(df.columns, start=1):
         values = df[column_name]
@@ -1395,6 +1619,9 @@ def run() -> None:
     shares = pd.DataFrame()
     bonds = pd.DataFrame()
     emitters = pd.DataFrame()
+    green_bonds = pd.DataFrame()
+    green_payments = pd.DataFrame()
+    sqlite_conn = open_sqlite_connection()
 
     try:
         def fetch_shares_online() -> pd.DataFrame:
@@ -1556,9 +1783,38 @@ def run() -> None:
         logger.info("NRA coverage: %s/%s", len(nra_ratings), len(inns))
         stage_times["Этап 7: Получение рейтингов НРА"] = perf_counter() - stage_started_at
 
-        print("Этап 8: Формирование Excel")
+        print("Этап 8: Обновление SQLite (инкремент)")
         stage_started_at = perf_counter()
-        excel_exports = [(shares, SHARES_FILE), (bonds, BONDS_FILE), (emitters, EMITTERS_FILE)]
+        sqlite_targets = [
+            ("moex_shares", shares, ["SECID"]),
+            ("moex_bonds", bonds, ["SECID"]),
+            ("moex_emitters", emitters, ["EMITTER_ID"]),
+        ]
+
+        def write_sqlite_target(item: tuple[str, pd.DataFrame, list[str]]) -> None:
+            table_name, frame, key_cols = item
+            conn = open_sqlite_connection()
+            try:
+                upsert_dataframe_sqlite(conn, table_name, frame, key_cols, logger)
+            finally:
+                conn.close()
+
+        with progress(total=len(sqlite_targets), desc="SQLite upsert", unit="таблица") as pbar:
+            with ThreadPoolExecutor(max_workers=len(sqlite_targets)) as executor:
+                futures = [executor.submit(write_sqlite_target, item) for item in sqlite_targets]
+                for future in as_completed(futures):
+                    future.result()
+                    pbar.update(1)
+        stage_times["Этап 8: Обновление SQLite (инкремент)"] = perf_counter() - stage_started_at
+
+        print("Этап 9: Green bonds (ScoreList=Green)")
+        stage_started_at = perf_counter()
+        green_bonds, green_payments = collect_green_bonds(client, emitters, bonds, logger, sqlite_conn=sqlite_conn)
+        stage_times["Этап 9: Green bonds (ScoreList=Green)"] = perf_counter() - stage_started_at
+
+        print("Этап 10: Формирование Excel")
+        stage_started_at = perf_counter()
+        excel_exports = [(emitters, EMITTERS_FILE), (green_bonds, GREEN_BONDS_FILE)]
         def save_excel_item(item: tuple[pd.DataFrame, Path]) -> None:
             frame, output_path = item
             save_to_excel(frame, output_path, logger)
@@ -1569,7 +1825,7 @@ def run() -> None:
                 for future in as_completed(futures):
                     future.result()
                     pbar.update(1)
-        stage_times["Этап 8: Формирование Excel"] = perf_counter() - stage_started_at
+        stage_times["Этап 10: Формирование Excel"] = perf_counter() - stage_started_at
 
         print("=====\nГотово")
         logger.info("Script completed successfully")
@@ -1581,6 +1837,7 @@ def run() -> None:
         raise
     finally:
         save_cache(cache, logger)
+        sqlite_conn.close()
         logger.info("Script finished. interrupted=%s", interrupted["value"])
 
         total_time = perf_counter() - script_started_at
