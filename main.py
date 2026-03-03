@@ -43,10 +43,11 @@ PROXY_SOURCE_TIMEOUT = 6
 PROXY_VALIDATION_TIMEOUT = 1.5
 PROXY_VALIDATION_WORKERS = 512
 PROXY_VALIDATION_TARGET = 80
-PROXY_CANDIDATE_LIMIT = 400
 PROXY_REQUEST_TIMEOUT = 2.5
 PROXY_MAX_ATTEMPTS = 2
 PROXY_VALIDATION_TIME_BUDGET = 8
+ACRA_PAGE_WORKERS = 24
+ACRA_ISSUER_WORKERS = 64
 PROXYLIST_FILE = OUTPUT_DIR / "proxylist.csv"
 USE_CACHE = False
 CACHE_FILE = CACHE_DIR / "emitter_cache.json"
@@ -171,6 +172,9 @@ class ProxyRotatingSession(requests.Session):
         self._proxy_lock = threading.Lock()
         self._proxy_failures: dict[str, int] = {}
         self.trust_env = False
+        adapter = requests.adapters.HTTPAdapter(pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
+        self.mount("https://", adapter)
+        self.mount("http://", adapter)
 
     def _next_proxy(self) -> str | None:
         with self._proxy_lock:
@@ -257,8 +261,6 @@ def fetch_proxy_candidates(logger: logging.Logger) -> list[str]:
                 pbar.update(1)
 
     proxies = sorted(collected)
-    if len(proxies) > PROXY_CANDIDATE_LIMIT:
-        proxies = proxies[:PROXY_CANDIDATE_LIMIT]
     logger.info("Proxy candidates collected: %s", len(proxies))
     return proxies
 
@@ -279,26 +281,52 @@ def validate_proxies(proxies: list[str], logger: logging.Logger) -> list[str]:
         except Exception:
             return None
 
-    valid: list[str] = []
+    valid: set[str] = set()
     started_at = perf_counter()
+    total = len(proxies)
+    max_pending = max(PROXY_VALIDATION_WORKERS * 2, 1)
+    submitted = 0
+    completed = 0
     with ThreadPoolExecutor(max_workers=PROXY_VALIDATION_WORKERS) as executor:
-        futures = [executor.submit(check_proxy, proxy) for proxy in proxies]
-        with progress(total=len(futures), desc="Проверка прокси", unit="прокси") as pbar:
-            for future in as_completed(futures):
-                resolved = future.result()
-                if resolved:
-                    valid.append(resolved)
-                pbar.update(1)
+        in_flight: dict[Any, str] = {}
 
-                if len(valid) >= PROXY_VALIDATION_TARGET or (perf_counter() - started_at) >= PROXY_VALIDATION_TIME_BUDGET:
-                    for pending in futures:
-                        pending.cancel()
-                    pbar.n = len(futures)
+        def submit_next() -> bool:
+            nonlocal submitted
+            if submitted >= total:
+                return False
+            proxy = proxies[submitted]
+            submitted += 1
+            in_flight[executor.submit(check_proxy, proxy)] = proxy
+            return True
+
+        while len(in_flight) < min(max_pending, total) and submit_next():
+            pass
+
+        with progress(total=total, desc="Проверка прокси", unit="прокси") as pbar:
+            while in_flight:
+                timed_out = (perf_counter() - started_at) >= PROXY_VALIDATION_TIME_BUDGET
+                if timed_out or len(valid) >= PROXY_VALIDATION_TARGET:
+                    completed += len(in_flight)
+                    for pending_future in list(in_flight):
+                        pending_future.cancel()
+                    in_flight.clear()
+                    pbar.n = completed
                     pbar.refresh()
                     break
 
+                done_future = next(as_completed(in_flight))
+                in_flight.pop(done_future, None)
+                resolved = done_future.result()
+                if resolved:
+                    valid.add(resolved)
+                completed += 1
+                pbar.update(1)
+
+                while len(in_flight) < max_pending and submit_next():
+                    pass
+
     logger.info("Proxy validated: total=%s valid=%s", len(proxies), len(valid))
-    return sorted(set(valid))
+    return sorted(valid)
 
 
 def save_valid_proxies_csv(proxies: list[str], logger: logging.Logger) -> None:
@@ -705,36 +733,46 @@ class AcraClient:
         total_pages = max(1, math.ceil(total_issuers / 10)) if total_issuers else 100
 
         issuer_links = set(self._extract_issuer_links(first_page))
-        with progress(total=max(total_pages - 1, 0), desc="Сканирование страниц АКРА", unit="страница") as pbar:
-            for page in range(2, total_pages + 1):
-                try:
-                    page_text = self._get_page_text("/ratings/issuers/", params={"page": page})
-                except requests.RequestException as error:
-                    self.logger.warning("ACRA page skipped page=%s: %s", page, error)
-                    pbar.update(1)
-                    continue
+        pages = list(range(2, total_pages + 1))
 
-                page_links = self._extract_issuer_links(page_text)
-                if not page_links and not total_issuers:
-                    pbar.update(total_pages - page + 1)
-                    break
-                issuer_links.update(page_links)
-                pbar.update(1)
+        def fetch_page_links(page: int) -> list[str]:
+            page_text = self._get_page_text("/ratings/issuers/", params={"page": page})
+            return self._extract_issuer_links(page_text)
+
+        with progress(total=len(pages), desc="Сканирование страниц АКРА", unit="страница") as pbar:
+            with ThreadPoolExecutor(max_workers=min(ACRA_PAGE_WORKERS, max(len(pages), 1))) as executor:
+                futures = {executor.submit(fetch_page_links, page): page for page in pages}
+                for future in as_completed(futures):
+                    page = futures[future]
+                    try:
+                        page_links = future.result()
+                        issuer_links.update(page_links)
+                    except requests.RequestException as error:
+                        self.logger.warning("ACRA page skipped page=%s: %s", page, error)
+                    except Exception as error:
+                        self.logger.exception("ACRA page parse failed page=%s: %s", page, error)
+                    pbar.update(1)
 
         ratings_by_inn: dict[str, str] = {}
         sorted_links = sorted(issuer_links, key=lambda link: int(link.rstrip("/").split("/")[-1]))
+        def fetch_issuer_payload(issuer_path: str) -> tuple[str | None, str | None]:
+            issuer_text = self._get_page_text(issuer_path)
+            return self._parse_issuer_card(issuer_text)
+
         with progress(total=len(sorted_links), desc="Парсинг АКРА", unit="эмитент") as pbar:
-            for issuer_path in sorted_links:
-                try:
-                    issuer_text = self._get_page_text(issuer_path)
-                    inn, value = self._parse_issuer_card(issuer_text)
-                    if inn and inn in normalized_inns and value:
-                        ratings_by_inn[inn] = value
-                except requests.RequestException as error:
-                    self.logger.exception("ACRA issuer fetch failed path=%s: %s", issuer_path, error)
-                except Exception as error:
-                    self.logger.exception("ACRA issuer parse failed path=%s: %s", issuer_path, error)
-                pbar.update(1)
+            with ThreadPoolExecutor(max_workers=min(ACRA_ISSUER_WORKERS, max(len(sorted_links), 1))) as executor:
+                futures = {executor.submit(fetch_issuer_payload, issuer_path): issuer_path for issuer_path in sorted_links}
+                for future in as_completed(futures):
+                    issuer_path = futures[future]
+                    try:
+                        inn, value = future.result()
+                        if inn and inn in normalized_inns and value:
+                            ratings_by_inn[inn] = value
+                    except requests.RequestException as error:
+                        self.logger.exception("ACRA issuer fetch failed path=%s: %s", issuer_path, error)
+                    except Exception as error:
+                        self.logger.exception("ACRA issuer parse failed path=%s: %s", issuer_path, error)
+                    pbar.update(1)
 
         self.logger.info("ACRA ratings matched by INN: %s", len(ratings_by_inn))
         return ratings_by_inn
