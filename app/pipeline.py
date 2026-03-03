@@ -70,6 +70,7 @@ class BondRow:
     coupon_percent: float | None
     ytm: float | None
     ytm_from_moex: bool
+    ytm_reason: str
 
 
 @dataclass
@@ -203,6 +204,19 @@ def _pick_price(row: dict[str, Any]) -> float | None:
     return numeric_prev if numeric_prev > 0 else None
 
 
+def _get_effective_price_pct(secid: str, board: str, valuation_date: date, market_row: dict[str, Any]) -> float | None:
+    del secid, board, valuation_date
+    numtrades = _parse_float(market_row.get("NUMTRADES"))
+    last_price = _parse_float(market_row.get("LAST"))
+    if numtrades is not None and numtrades > 0 and last_price is not None and last_price > 0:
+        return last_price
+    for key in ("PREVADMITTEDQUOTE", "PREVLEGALCLOSEPRICE", "WAPRICE", "PREVPRICE", "LCLOSEPRICE"):
+        value = _parse_float(market_row.get(key))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
 def _normalize_text(value: str) -> str:
     compact = " ".join(value.replace("\xa0", " ").split())
     if compact.lower() == "нет данных":
@@ -296,14 +310,18 @@ def _extract_index_premium(formula: str) -> tuple[str | None, float]:
         index_type = "ZCYC"
 
     premium = 0.0
-    premium_match = re.search(r"([+-])\s*(\d+(?:\.\d+)?)\s*(BPS|Б\.П\.|П\.П\.|%)?", normalized)
-    if premium_match:
+    for premium_match in re.finditer(r"([+-])\s*(\d+(?:\.\d+)?)\s*(BPS|Б\.П\.|П\.П\.|%)?", normalized):
+        end = premium_match.end()
+        suffix = normalized[end : end + 1].upper()
+        if suffix == "Y":
+            continue
         sign = -1.0 if premium_match.group(1) == "-" else 1.0
         value = float(premium_match.group(2))
         unit = (premium_match.group(3) or "").upper()
         if "BPS" in unit:
             value /= 100.0
         premium = sign * value
+        break
 
     return index_type, premium
 
@@ -399,23 +417,23 @@ def _calc_ytm_percent(
     cbr_snapshot: CbrSnapshot,
     face_currency: str,
     nominal_currency: str,
-) -> float | None:
+) -> tuple[float | None, str]:
     if clean_price is None or face_value is None or face_value <= 0:
-        return None
+        return None, "NO_PRICE"
     if not _currencies_compatible(face_currency, nominal_currency):
-        return None
+        return None, "FX_MISMATCH"
 
     if offer_date and maturity_date:
         horizon = offer_date if offer_date < maturity_date else maturity_date
     else:
         horizon = offer_date or maturity_date
     if horizon is None or horizon <= valuation_date:
-        return None
+        return None, "NO_CASHFLOWS"
 
     clean_price_money = (clean_price / 100.0) * face_value
     dirty_price = clean_price_money + max(accrued_int or 0.0, 0.0)
     if dirty_price <= 0:
-        return None
+        return None, "NO_PRICE"
 
     spread_key_ruonia = cbr_snapshot.key_rate_today - cbr_snapshot.ruonia_today
     if abs(spread_key_ruonia) > config.YTM_MAX_ABS_SPREAD_SANITY:
@@ -426,6 +444,9 @@ def _calc_ytm_percent(
     lower_coupon_type = coupon_type.lower()
     index_type, premium = _extract_index_premium(coupon_formula)
     zcyc_term_a, zcyc_term_b = _extract_zcyc_terms(coupon_formula)
+    is_floater = "флоатер" in lower_coupon_type or index_type in {"RUONIA", "KEYRATE", "ZCYC"}
+    if is_floater and index_type not in {"RUONIA", "KEYRATE", "ZCYC"}:
+        return None, "FLOAT_FORMULA_PARSE_FAIL"
 
     def _projected_key_rate(payment_date: date) -> float:
         year_index = max((payment_date - valuation_date).days, 0) // 365
@@ -464,7 +485,7 @@ def _calc_ytm_percent(
                 continue
             period_days = coupon_period if coupon_period and coupon_period > 0 else 91
             coupon_amount = event.coupon_amount
-            if "флоатер" in lower_coupon_type or index_type in {"RUONIA", "KEYRATE", "ZCYC"}:
+            if is_floater:
                 annual_rate = _forecast_rate(event.payment_date)
                 coupon_amount = max(outstanding_face * (annual_rate / 100.0) * (period_days / 365.0), 0.0)
             if secid.startswith("SU50"):
@@ -501,7 +522,21 @@ def _calc_ytm_percent(
         flows.append((max((horizon - valuation_date).days, 0), outstanding_face + horizon_coupon))
 
     if not flows:
-        return None
+        return None, "NO_CASHFLOWS"
+    if not any(amount > 0 for _, amount in flows):
+        return None, "NO_CASHFLOWS"
+
+    total_principal = 0.0
+    if cashflow_schedule:
+        for event in cashflow_schedule:
+            if valuation_date < event.payment_date <= horizon:
+                total_principal += max(event.amortization_amount, 0.0)
+        if outstanding_face > 0:
+            total_principal += outstanding_face
+    else:
+        total_principal = outstanding_face
+    if total_principal <= 0:
+        return None, "NO_CASHFLOWS"
 
     def npv(rate: float) -> float:
         total = -dirty_price
@@ -516,7 +551,7 @@ def _calc_ytm_percent(
         right *= 2.0
         npv_right = npv(right)
     if npv_left * npv_right > 0:
-        return None
+        return None, "IRR_NO_BRACKET"
 
     for _ in range(120):
         mid = (left + right) / 2.0
@@ -533,8 +568,8 @@ def _calc_ytm_percent(
 
     ytm = ((left + right) / 2.0) * 100.0
     if ytm < -95.0 or ytm > 250.0:
-        return None
-    return round(ytm, 2)
+        return None, "IRR_NO_BRACKET"
+    return round(ytm, 2), "OK"
 
 
 def _parse_corpbonds_html(page_html: str) -> dict[str, str]:
@@ -573,9 +608,10 @@ async def _fetch_all_traded_bonds(client: MoexClient) -> list[dict[str, Any]]:
         "https://iss.moex.com/iss/engines/stock/markets/bonds/securities.json"
         "?iss.meta=off&is_traded=1"
         "&iss.only=securities,marketdata"
-        "&securities.columns=SECID,ISIN,SHORTNAME,SECNAME,MATDATE,OFFERDATE,COUPONPERIOD,ACCRUEDINT,"
+        "&securities.columns=SECID,BOARDID,ISIN,SHORTNAME,SECNAME,MATDATE,OFFERDATE,COUPONPERIOD,ACCRUEDINT,"
         "COUPONPERCENT,BONDTYPE,BONDSUBTYPE,PREVPRICE,FACEVALUE,FACEUNIT,CURRENCYID"
-        "&marketdata.columns=SECID,LAST,LCURRENTPRICE,LCLOSEPRICE,PREVPRICE,VOLTODAY,VALTODAY,YIELD"
+        "&marketdata.columns=SECID,LAST,NUMTRADES,LCURRENTPRICE,LCLOSEPRICE,PREVPRICE,PREVADMITTEDQUOTE,"
+        "PREVLEGALCLOSEPRICE,WAPRICE,VOLTODAY,VALTODAY,YIELD"
     )
     payload = await client.get_json(url)
     sec_cols = payload["securities"]["columns"]
@@ -1002,6 +1038,7 @@ def _save_merged_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBondRo
         "НКД",
         "% купона",
         "YTM, %",
+        "YTM reason",
         "Цена CorpBonds",
         "Рейтинг",
         "Тип купона",
@@ -1044,6 +1081,7 @@ def _save_merged_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBondRo
                 row.accrued_int,
                 row.coupon_percent,
                 row.ytm,
+                row.ytm_reason,
                 corp.price if corp else "",
                 corp.credit_rating if corp else "",
                 corp.coupon_type if corp else "",
@@ -1258,6 +1296,7 @@ def _save_screener_excel(moex_rows: list[BondRow], corpbonds_rows: list[CorpBond
                 "НКД": row.accrued_int,
                 "% купона": row.coupon_percent,
                 "YTM, %": row.ytm,
+                "YTM reason": row.ytm_reason,
                 "Цена CorpBonds": corp.price if corp else "",
                 "Рейтинг": corp.credit_rating if corp else "",
                 "Тип купона": corp.coupon_type if corp else "",
@@ -1428,6 +1467,12 @@ async def run_pipeline(db: Database) -> RunSummary:
                 pass
 
         current_price = _pick_price(bond)
+        effective_price_pct = _get_effective_price_pct(
+            secid=secid,
+            board=str(bond.get("BOARDID") or ""),
+            valuation_date=valuation_date,
+            market_row=bond.get("marketdata", {}),
+        )
         previous_price = previous_prices.get(secid)
         if previous_price not in (None, 0) and current_price is not None:
             price_change = ((current_price - previous_price) / previous_price) * 100
@@ -1438,8 +1483,8 @@ async def run_pipeline(db: Database) -> RunSummary:
         accrued_int = float(bond.get("ACCRUEDINT")) if bond.get("ACCRUEDINT") is not None else None
         coupon_percent = float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None
 
-        ytm_value: float | None = _calc_ytm_percent(
-                clean_price=_select_last_price(current_price, corp.get("price", "")),
+        ytm_value, ytm_reason = _calc_ytm_percent(
+                clean_price=effective_price_pct,
                 accrued_int=accrued_int,
                 face_value=_parse_float(bond.get("FACEVALUE")),
                 cashflow_schedule=bond_cashflows.get(secid, []),
@@ -1461,6 +1506,11 @@ async def run_pipeline(db: Database) -> RunSummary:
             if moex_ytm is not None:
                 ytm_value = round(moex_ytm, 2)
                 ytm_from_moex = True
+                LOGGER.info("YTM fallback to MOEX YIELD for %s: reason=%s", secid, ytm_reason)
+            else:
+                LOGGER.info("YTM unavailable for %s: reason=%s", secid, ytm_reason)
+        if ytm_value is None and not ytm_reason:
+            ytm_reason = "NO_CASHFLOWS"
 
         prepared_rows.append(
             BondRow(
@@ -1487,6 +1537,7 @@ async def run_pipeline(db: Database) -> RunSummary:
                 coupon_percent=coupon_percent,
                 ytm=ytm_value,
                 ytm_from_moex=ytm_from_moex,
+                ytm_reason=ytm_reason,
             )
         )
 
