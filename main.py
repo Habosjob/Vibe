@@ -6,10 +6,12 @@ import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import pandas as pd
 import requests
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from tqdm import tqdm
@@ -26,6 +28,36 @@ CACHE_FILE = OUTPUT_DIR / "emitter_cache.json"
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ZEBRA_FILL = PatternFill(fill_type="solid", fgColor="E8F2FF")
+
+
+def progress(total: int, desc: str, unit: str):
+    return tqdm(total=total, desc=desc, unit=unit, position=0, leave=False, dynamic_ncols=True)
+
+
+def load_cache(logger: logging.Logger) -> dict[str, dict[str, Any]]:
+    if not CACHE_FILE.exists():
+        return {"secid_to_emitter": {}, "emitters": {}}
+
+    try:
+        with CACHE_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        if isinstance(data, dict):
+            return {
+                "secid_to_emitter": data.get("secid_to_emitter", {}),
+                "emitters": data.get("emitters", {}),
+            }
+    except Exception as error:
+        logger.exception("Cache load failed: %s", error)
+
+    return {"secid_to_emitter": {}, "emitters": {}}
+
+
+def save_cache(cache: dict[str, dict[str, Any]], logger: logging.Logger) -> None:
+    try:
+        with CACHE_FILE.open("w", encoding="utf-8") as file:
+            json.dump(cache, file, ensure_ascii=False, indent=2)
+    except Exception as error:
+        logger.exception("Cache save failed: %s", error)
 
 
 
@@ -82,11 +114,13 @@ class MoexClient:
         return response.json()
 
     def fetch_market_securities(self, market: str, columns: list[str]) -> pd.DataFrame:
-        for _ in tqdm(range(1), desc=f"MOEX {market}", unit="запрос"):
+        with progress(total=1, desc=f"MOEX {market}", unit="запрос") as pbar:
             data = self._get(
                 f"/engines/stock/markets/{market}/securities.json",
                 params={"iss.meta": "off", "iss.only": "securities", "securities.columns": ",".join(columns)},
             )
+            pbar.update(1)
+
         return pd.DataFrame(data.get("securities", {}).get("data", []), columns=data.get("securities", {}).get("columns", []))
 
     def fetch_emitter_id_by_secid(self, secid: str) -> int | None:
@@ -113,21 +147,22 @@ class MoexClient:
         return {"EMITTER_ID": int(row[0][0]), "EMITTER_NAME": row[0][1], "INN": row[0][2]}
 
 
-def enrich_emitters(client: MoexClient, shares: pd.DataFrame, bonds: pd.DataFrame, logger: logging.Logger, cache: dict[str, dict[str, Any]]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def enrich_emitters(
+    client: MoexClient,
+    shares: pd.DataFrame,
+    bonds: pd.DataFrame,
+    logger: logging.Logger,
+    cache: dict[str, dict[str, Any]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     if "EMITTER_ID" not in shares.columns:
         shares["EMITTER_ID"] = pd.NA
     if "EMITTER_ID" not in bonds.columns:
         bonds["EMITTER_ID"] = pd.NA
 
-    existing_pairs = pd.concat(
-        [shares[["SECID", "EMITTER_ID"]], bonds[["SECID", "EMITTER_ID"]]],
-        ignore_index=True,
-    )
-
+    existing_pairs = pd.concat([shares[["SECID", "EMITTER_ID"]], bonds[["SECID", "EMITTER_ID"]]], ignore_index=True)
     cached_pairs = pd.DataFrame(
         [{"SECID": secid, "EMITTER_ID": emitter_id} for secid, emitter_id in cache.get("secid_to_emitter", {}).items()]
     )
-
     existing_pairs = pd.concat([existing_pairs, cached_pairs], ignore_index=True)
     existing_pairs = existing_pairs.dropna(subset=["EMITTER_ID"]).drop_duplicates(subset=["SECID"], keep="first")
     existing_secids = set(existing_pairs["SECID"].tolist())
@@ -138,19 +173,21 @@ def enrich_emitters(client: MoexClient, shares: pd.DataFrame, bonds: pd.DataFram
     secid_rows: list[dict[str, Any]] = existing_pairs.to_dict("records")
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(client.fetch_emitter_id_by_secid, secid): secid for secid in secids}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Определение EMITTER_ID", unit="бумага"):
-            secid = futures[future]
-            try:
-                emitter_id = future.result()
-            except requests.RequestException as error:
-                logger.exception("Emitter id fetch failed secid=%s: %s", secid, error)
-                emitter_id = None
-            except Exception as error:
-                logger.exception("Unexpected emitter id error secid=%s: %s", secid, error)
-                emitter_id = None
-            secid_rows.append({"SECID": secid, "EMITTER_ID": emitter_id})
-            if emitter_id is not None:
-                cache.setdefault("secid_to_emitter", {})[secid] = int(emitter_id)
+        with progress(total=len(futures), desc="Определение EMITTER_ID", unit="бумага") as pbar:
+            for future in as_completed(futures):
+                secid = futures[future]
+                try:
+                    emitter_id = future.result()
+                except requests.RequestException as error:
+                    logger.exception("Emitter id fetch failed secid=%s: %s", secid, error)
+                    emitter_id = None
+                except Exception as error:
+                    logger.exception("Unexpected emitter id error secid=%s: %s", secid, error)
+                    emitter_id = None
+                secid_rows.append({"SECID": secid, "EMITTER_ID": emitter_id})
+                if emitter_id is not None:
+                    cache.setdefault("secid_to_emitter", {})[secid] = int(emitter_id)
+                pbar.update(1)
 
     secid_map = pd.DataFrame(secid_rows).drop_duplicates(subset=["SECID"], keep="first")
     secid_map["EMITTER_ID"] = pd.to_numeric(secid_map["EMITTER_ID"], errors="coerce")
@@ -169,18 +206,20 @@ def enrich_emitters(client: MoexClient, shares: pd.DataFrame, bonds: pd.DataFram
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(client.fetch_emitter_info, emitter_id): emitter_id for emitter_id in missing_emitter_ids}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Дозагрузка эмитентов", unit="эмитент"):
-            emitter_id = futures[future]
-            try:
-                emitter_info = future.result()
-                emitter_rows.append(emitter_info)
-                cache.setdefault("emitters", {})[str(emitter_id)] = emitter_info
-            except requests.RequestException as error:
-                logger.exception("Emitter info failed id=%s: %s", emitter_id, error)
-                emitter_rows.append({"EMITTER_ID": emitter_id, "EMITTER_NAME": None, "INN": None})
-            except Exception as error:
-                logger.exception("Unexpected emitter info error id=%s: %s", emitter_id, error)
-                emitter_rows.append({"EMITTER_ID": emitter_id, "EMITTER_NAME": None, "INN": None})
+        with progress(total=len(futures), desc="Дозагрузка эмитентов", unit="эмитент") as pbar:
+            for future in as_completed(futures):
+                emitter_id = futures[future]
+                try:
+                    emitter_info = future.result()
+                    emitter_rows.append(emitter_info)
+                    cache.setdefault("emitters", {})[str(emitter_id)] = emitter_info
+                except requests.RequestException as error:
+                    logger.exception("Emitter info failed id=%s: %s", emitter_id, error)
+                    emitter_rows.append({"EMITTER_ID": emitter_id, "EMITTER_NAME": None, "INN": None})
+                except Exception as error:
+                    logger.exception("Unexpected emitter info error id=%s: %s", emitter_id, error)
+                    emitter_rows.append({"EMITTER_ID": emitter_id, "EMITTER_NAME": None, "INN": None})
+                pbar.update(1)
 
     emitters_df = pd.DataFrame(emitter_rows).drop_duplicates(subset=["EMITTER_ID"], keep="first")
 
@@ -212,15 +251,40 @@ def enrich_emitters(client: MoexClient, shares: pd.DataFrame, bonds: pd.DataFram
 
 
 def build_emitters_table(shares: pd.DataFrame, bonds: pd.DataFrame) -> pd.DataFrame:
-    shares_grouped = shares.dropna(subset=["EMITTER_ID"]).groupby("EMITTER_ID")["SECID"].apply(lambda v: ", ".join(sorted(set(v)))).reset_index(name="TRADED_SHARES")
-    bonds_grouped = bonds.dropna(subset=["EMITTER_ID"]).groupby("EMITTER_ID")["SECID"].apply(lambda v: ", ".join(sorted(set(v)))).reset_index(name="TRADED_BONDS")
+    shares_grouped = (
+        shares.dropna(subset=["EMITTER_ID"])
+        .groupby("EMITTER_ID")["SECID"]
+        .apply(lambda v: ", ".join(sorted(set(v))))
+        .reset_index(name="TRADED_SHARES")
+    )
+    bonds_grouped = (
+        bonds.dropna(subset=["EMITTER_ID"])
+        .groupby("EMITTER_ID")["SECID"]
+        .apply(lambda v: ", ".join(sorted(set(v))))
+        .reset_index(name="TRADED_BONDS")
+    )
 
     emitters = shares_grouped.merge(bonds_grouped, on="EMITTER_ID", how="outer")
     details = pd.concat([shares[["EMITTER_ID", "EMITTER_NAME", "INN"]], bonds[["EMITTER_ID", "EMITTER_NAME", "INN"]]], ignore_index=True)
     details = details.dropna(subset=["EMITTER_ID"]).drop_duplicates(subset=["EMITTER_ID"], keep="first")
 
     emitters = emitters.merge(details, on="EMITTER_ID", how="left")
-    return emitters[["EMITTER_NAME", "INN", "TRADED_SHARES", "TRADED_BONDS", "EMITTER_ID"]].sort_values(by=["EMITTER_NAME", "EMITTER_ID"], na_position="last")
+    return emitters[["EMITTER_NAME", "INN", "TRADED_SHARES", "TRADED_BONDS", "EMITTER_ID"]].sort_values(
+        by=["EMITTER_NAME", "EMITTER_ID"], na_position="last"
+    )
+
+
+def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
+    for col_idx, column_name in enumerate(df.columns, start=1):
+        values = df[column_name]
+        if values.empty:
+            max_len = len(str(column_name))
+        else:
+            series_len = values.map(lambda value: len(str(value)) if pd.notna(value) else 0)
+            max_len = max(len(str(column_name)), int(series_len.max()))
+
+        adjusted_width = min(max_len + 2, 80)
+        worksheet.column_dimensions[get_column_letter(col_idx)].width = max(10, adjusted_width)
 
 
 def save_to_excel(df: pd.DataFrame, path: Path, logger: logging.Logger) -> None:
@@ -231,23 +295,17 @@ def save_to_excel(df: pd.DataFrame, path: Path, logger: logging.Logger) -> None:
         worksheet.freeze_panes = "A2"
         worksheet.auto_filter.ref = worksheet.dimensions
 
-        for row_idx in range(1, worksheet.max_row + 1):
-            for cell in worksheet[row_idx]:
-                if row_idx == 1:
-                    cell.fill = HEADER_FILL
-                    cell.font = HEADER_FONT
-                elif row_idx % 2 == 0:
-                    cell.fill = ZEBRA_FILL
+        for cell in worksheet[1]:
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
 
-        for column_cells in worksheet.columns:
-            max_len = 0
-            for cell in column_cells:
-                value_len = len(str(cell.value)) if cell.value is not None else 0
-                if value_len > max_len:
-                    max_len = value_len
+        if worksheet.max_row >= 2:
+            max_col_letter = get_column_letter(worksheet.max_column)
+            zebra_range = f"A2:{max_col_letter}{worksheet.max_row}"
+            zebra_rule = FormulaRule(formula=["MOD(ROW(),2)=0"], fill=ZEBRA_FILL)
+            worksheet.conditional_formatting.add(zebra_range, zebra_rule)
 
-            adjusted_width = min(max_len + 2, 80)
-            worksheet.column_dimensions[get_column_letter(column_cells[0].column)].width = max(10, adjusted_width)
+        _fit_column_widths(worksheet, df)
 
     logger.info("Saved %s rows=%s", path, len(df))
 
@@ -257,6 +315,8 @@ def run() -> None:
     logger.info("Script started")
 
     interrupted = {"value": False}
+    stage_times: dict[str, float] = {}
+    script_started_at = perf_counter()
 
     def handle_sigint(signum: int, frame: Any) -> None:
         _ = (signum, frame)
@@ -269,25 +329,40 @@ def run() -> None:
 
     try:
         print("=====\nЭтап 1: Сбор акций")
+        stage_started_at = perf_counter()
         shares = client.fetch_market_securities("shares", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "LISTLEVEL", "STATUS", "EMITTER_ID"])
         shares = shares[(shares["BOARDID"] == "TQBR") & (shares["STATUS"].fillna("") != "N")].copy()
+        stage_times["Этап 1: Сбор акций"] = perf_counter() - stage_started_at
 
         print("Этап 2: Сбор облигаций")
+        stage_started_at = perf_counter()
         bonds = client.fetch_market_securities("bonds", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "MATDATE", "LISTLEVEL", "STATUS", "EMITTER_ID"])
         bonds = bonds[bonds["BOARDID"].isin(["TQCB", "TQOB", "TQOD", "TQIR", "TQOE"])].copy()
         bonds = bonds[bonds["STATUS"].fillna("") != "N"].copy()
         bonds["MATDATE"] = pd.to_datetime(bonds["MATDATE"], errors="coerce").dt.date
         bonds = bonds[(bonds["MATDATE"].isna()) | (bonds["MATDATE"] >= date.today())].copy()
+        stage_times["Этап 2: Сбор облигаций"] = perf_counter() - stage_started_at
 
         print("Этап 3: Обогащение эмитентов")
+        stage_started_at = perf_counter()
         shares, bonds = enrich_emitters(client, shares, bonds, logger, cache)
+        stage_times["Этап 3: Обогащение эмитентов"] = perf_counter() - stage_started_at
 
         print("Этап 4: Формирование Excel")
+        stage_started_at = perf_counter()
         emitters = build_emitters_table(shares, bonds)
 
-        save_to_excel(shares, SHARES_FILE, logger)
-        save_to_excel(bonds, BONDS_FILE, logger)
-        save_to_excel(emitters, EMITTERS_FILE, logger)
+        excel_exports = [
+            (shares, SHARES_FILE),
+            (bonds, BONDS_FILE),
+            (emitters, EMITTERS_FILE),
+        ]
+        with progress(total=len(excel_exports), desc="Экспорт Excel", unit="файл") as pbar:
+            for df, output_path in excel_exports:
+                save_to_excel(df, output_path, logger)
+                pbar.update(1)
+
+        stage_times["Этап 4: Формирование Excel"] = perf_counter() - stage_started_at
 
         print("=====\nГотово")
         logger.info("Script completed successfully")
@@ -300,6 +375,13 @@ def run() -> None:
     finally:
         save_cache(cache, logger)
         logger.info("Script finished. interrupted=%s", interrupted["value"])
+
+        total_time = perf_counter() - script_started_at
+        print("=====\nSummary")
+        for stage_name, duration in stage_times.items():
+            print(f"{stage_name}: {duration:.2f} сек")
+        print(f"Всего: {total_time:.2f} сек")
+        print("=====")
 
 
 if __name__ == "__main__":
