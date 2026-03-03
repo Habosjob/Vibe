@@ -945,6 +945,19 @@ class AcraClient:
             return {}
 
         ratings_by_inn: dict[str, str] = {}
+        issuer_cache: dict[str, tuple[str | None, str | None]] = {}
+        issuer_cache_lock = threading.Lock()
+
+        def fetch_issuer_cached(issuer_path: str) -> tuple[str | None, str | None]:
+            with issuer_cache_lock:
+                if issuer_path in issuer_cache:
+                    return issuer_cache[issuer_path]
+
+            issuer_text = self._get_page_text(issuer_path)
+            parsed = self._parse_issuer_card(issuer_text)
+            with issuer_cache_lock:
+                issuer_cache[issuer_path] = parsed
+            return parsed
 
         def fetch_for_inn(inn: str) -> tuple[str, str | None]:
             search_text = self._get_page_text("/ratings/issuers/", params={"text": inn})
@@ -955,9 +968,8 @@ class AcraClient:
                     return inn, "\n".join(parts)
 
             issuer_links = self._extract_issuer_links(search_text)
-            if issuer_links:
-                issuer_text = self._get_page_text(issuer_links[0])
-                parsed_inn, parsed_value = self._parse_issuer_card(issuer_text)
+            for issuer_path in issuer_links[:10]:
+                parsed_inn, parsed_value = fetch_issuer_cached(issuer_path)
                 if parsed_inn == inn and parsed_value:
                     return inn, parsed_value
             return inn, None
@@ -1675,11 +1687,23 @@ def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
 
 def _extract_coupon_summary(coupons: Any) -> dict[str, Any]:
     if not isinstance(coupons, list) or not coupons:
-        return {"coupons_count": 0, "next_coupon_date": None, "next_coupon_value": None, "last_coupon_date": None}
+        return {
+            "coupons_count": 0,
+            "next_coupon_date": None,
+            "next_coupon_value": None,
+            "next_coupon_period_days": None,
+            "last_coupon_date": None,
+        }
 
     rows = pd.DataFrame(coupons)
     if rows.empty:
-        return {"coupons_count": 0, "next_coupon_date": None, "next_coupon_value": None, "last_coupon_date": None}
+        return {
+            "coupons_count": 0,
+            "next_coupon_date": None,
+            "next_coupon_value": None,
+            "next_coupon_period_days": None,
+            "last_coupon_date": None,
+        }
 
     rows["coupondate_ts"] = pd.to_datetime(rows.get("coupondate"), errors="coerce")
     now = pd.Timestamp.now().normalize()
@@ -1691,6 +1715,7 @@ def _extract_coupon_summary(coupons: Any) -> dict[str, Any]:
         "coupons_count": int(len(rows)),
         "next_coupon_date": next_row["coupondate_ts"].date().isoformat() if next_row is not None and pd.notna(next_row["coupondate_ts"]) else None,
         "next_coupon_value": next_row.get("value") if next_row is not None else None,
+        "next_coupon_period_days": next_row.get("couponperiod") if next_row is not None else None,
         "last_coupon_date": last_row["coupondate_ts"].date().isoformat() if last_row is not None and pd.notna(last_row["coupondate_ts"]) else None,
     }
 
@@ -1704,6 +1729,16 @@ def _extract_amortization_summary(amortizations: Any) -> dict[str, Any]:
         return {"amortizations_count": 0, "next_amort_date": None, "next_amort_value": None}
 
     rows["amortdate_ts"] = pd.to_datetime(rows.get("amortdate"), errors="coerce")
+    if "data_source" in rows.columns:
+        data_source = rows["data_source"].astype(str).str.lower()
+        rows = rows[~data_source.isin(["maturity", "issue"])]
+
+    if "valueprc" in rows.columns:
+        rows = rows[pd.to_numeric(rows["valueprc"], errors="coerce").fillna(0) < 100]
+
+    if rows.empty:
+        return {"amortizations_count": 0, "next_amort_date": None, "next_amort_value": None}
+
     now = pd.Timestamp.now().normalize()
     future_rows = rows[rows["amortdate_ts"] >= now].sort_values("amortdate_ts")
     next_row = future_rows.iloc[0] if not future_rows.empty else rows.sort_values("amortdate_ts").iloc[-1]
@@ -1747,12 +1782,9 @@ def save_to_excel(df: pd.DataFrame, path: Path, logger: logging.Logger) -> None:
         worksheet.freeze_panes = "A2"
         worksheet.auto_filter.ref = worksheet.dimensions
 
-        for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
-            for cell in row:
-                cell.alignment = CENTERED_WRAP_ALIGNMENT
-                cell.border = THIN_BORDER
-
         for cell in worksheet[1]:
+            cell.alignment = CENTERED_WRAP_ALIGNMENT
+            cell.border = THIN_BORDER
             cell.fill = HEADER_FILL
             cell.font = HEADER_FONT
 
@@ -1817,6 +1849,8 @@ def run() -> None:
     emitters = pd.DataFrame()
     green_bonds = pd.DataFrame()
     green_payments = pd.DataFrame()
+    green_bonds_future = None
+    green_executor: ThreadPoolExecutor | None = None
     sqlite_conn = open_sqlite_connection()
 
     try:
@@ -1881,6 +1915,10 @@ def run() -> None:
         inns = {normalize_inn(value) for value in emitters["INN"].tolist()} if not emitters.empty and "INN" in emitters.columns else set()
         inns = {inn for inn in inns if inn}
         logger.info("Emitters scope: rows=%s unique_inn=%s", len(emitters), len(inns))
+
+        green_executor = ThreadPoolExecutor(max_workers=1)
+        green_bonds_future = green_executor.submit(collect_green_bonds, client, emitters, bonds, logger, None)
+
         expert_ra_cached, expert_ra_cached_today = load_daily_ratings_cache(EXPERT_RA_CACHE_FILE, logger)
         acra_cached, acra_cached_today = load_daily_ratings_cache(ACRA_CACHE_FILE, logger)
         nkr_cached, nkr_cached_today = load_daily_ratings_cache(NKR_CACHE_FILE, logger)
@@ -2005,7 +2043,19 @@ def run() -> None:
 
         print("Этап 9: Green bonds (ScoreList=Green)")
         stage_started_at = perf_counter()
-        green_bonds, green_payments = collect_green_bonds(client, emitters, bonds, logger, sqlite_conn=sqlite_conn)
+        if green_bonds_future is not None:
+            green_bonds, green_payments = green_bonds_future.result()
+        else:
+            green_bonds, green_payments = collect_green_bonds(client, emitters, bonds, logger, sqlite_conn=None)
+
+        if not green_bonds.empty:
+            upsert_dataframe_sqlite(sqlite_conn, "green_bonds", green_bonds, ["SECID"], logger)
+        if not green_payments.empty:
+            payments_frame = green_payments.copy()
+            if "coupondate" not in payments_frame.columns:
+                payments_frame["coupondate"] = pd.NA
+            upsert_dataframe_sqlite(sqlite_conn, "green_bond_payments", payments_frame, ["SECID", "coupondate"], logger)
+
         stage_times["Этап 9: Green bonds (ScoreList=Green)"] = perf_counter() - stage_started_at
 
         print("Этап 10: Формирование Excel")
@@ -2034,6 +2084,8 @@ def run() -> None:
         logger.exception("Script failed: %s", error)
         raise
     finally:
+        if green_executor is not None:
+            green_executor.shutdown(wait=False)
         save_cache(cache, logger)
         sqlite_conn.close()
         logger.info("Script finished. interrupted=%s", interrupted["value"])
