@@ -83,6 +83,32 @@ PROXY_SOURCES = [
 ]
 
 
+
+
+def normalize_inn(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+
+    if isinstance(value, float):
+        if value.is_integer():
+            text = str(int(value))
+        else:
+            text = format(value, "f")
+    else:
+        text = str(value).strip()
+
+    if text.endswith('.0') and text.replace('.', '', 1).isdigit():
+        text = text[:-2]
+
+    digits = ''.join(ch for ch in text if ch.isdigit())
+    if len(digits) in {10, 12}:
+        return digits
+
+    if digits.endswith('0') and len(digits[:-1]) in {10, 12}:
+        return digits[:-1]
+
+    return digits if len(digits) in {10, 12} else None
+
 def progress(total: int, desc: str, unit: str):
     return tqdm(total=total, desc=desc, unit=unit, position=0, leave=False, dynamic_ncols=True)
 
@@ -164,10 +190,11 @@ def load_dataframe_snapshot(path: Path, logger: logging.Logger) -> pd.DataFrame:
 
 
 class ProxyRotatingSession(requests.Session):
-    def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
+    def __init__(self, logger: logging.Logger, proxies: list[str], prefer_proxies: bool = False) -> None:
         super().__init__()
         self.logger = logger
         self.proxy_pool = proxies.copy()
+        self.prefer_proxies = prefer_proxies
         self._proxy_index = 0
         self._proxy_lock = threading.Lock()
         self._proxy_failures: dict[str, int] = {}
@@ -197,6 +224,9 @@ class ProxyRotatingSession(requests.Session):
                 self.proxy_pool.remove(proxy)
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        if not self.prefer_proxies or not self.proxy_pool:
+            return super().request(method, url, **kwargs)
+
         max_attempts = min(PROXY_MAX_ATTEMPTS, max(1, len(self.proxy_pool))) if self.proxy_pool else 0
         last_error: Exception | None = None
         base_timeout = kwargs.get("timeout", REQUEST_TIMEOUT)
@@ -437,10 +467,7 @@ class ExpertRaClient:
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
-        return digits or None
+        return normalize_inn(value)
 
     def _clean_text(self, value: Any) -> str:
         if value is None or pd.isna(value):
@@ -549,12 +576,15 @@ class AcraClient:
         self.logger = logger
         self.session = ProxyRotatingSession(logger, proxies)
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
+        self.direct_session = requests.Session()
+        self.direct_session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
+        self.direct_session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS))
+        self.direct_session.mount("http://", requests.adapters.HTTPAdapter(pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS))
+        self._request_mode = "auto"
+        self._request_mode_lock = threading.Lock()
 
     def _normalize_inn(self, value: Any) -> str | None:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
-        return digits or None
+        return normalize_inn(value)
 
     def _clean_text(self, value: str) -> str:
         return re.sub(r"\s+", " ", value).strip()
@@ -595,33 +625,55 @@ class AcraClient:
         url = f"{ACRA_BASE_URL}{path}"
         errors: list[str] = []
 
-        try:
-            response = self.session.get(url, params=request_params, timeout=REQUEST_TIMEOUT)
+        def call_direct(verify: bool = True) -> str:
+            response = self.direct_session.get(url, params=request_params, timeout=REQUEST_TIMEOUT, verify=verify)
             response.raise_for_status()
-            self.logger.info("GET ACRA %s params=%s status=%s", url, request_params, response.status_code)
+            self.logger.info("GET ACRA direct verify=%s %s params=%s status=%s", verify, url, request_params, response.status_code)
             return response.text
+
+        def call_proxy() -> str:
+            proxy_response = self.direct_session.get(
+                f"{ACRA_PROXY_BASE_URL}{path}",
+                params=request_params,
+                timeout=REQUEST_TIMEOUT,
+            )
+            proxy_response.raise_for_status()
+            self.logger.info("GET ACRA proxy %s params=%s status=%s", path, request_params, proxy_response.status_code)
+            return proxy_response.text
+
+        with self._request_mode_lock:
+            mode = self._request_mode
+
+        if mode == "proxy":
+            return call_proxy()
+        if mode == "direct":
+            return call_direct(verify=True)
+        if mode == "direct_insecure":
+            return call_direct(verify=False)
+
+        try:
+            text = call_direct(verify=True)
+            with self._request_mode_lock:
+                self._request_mode = "direct"
+            return text
         except requests.RequestException as error:
             errors.append(f"direct-verify-on: {error}")
             self.logger.warning("ACRA direct request failed with certificate verification: %s", error)
 
         try:
-            response = self.session.get(url, params=request_params, timeout=REQUEST_TIMEOUT, verify=False)
-            response.raise_for_status()
-            self.logger.warning("GET ACRA without SSL verification %s params=%s status=%s", url, request_params, response.status_code)
-            return response.text
+            text = call_direct(verify=False)
+            with self._request_mode_lock:
+                self._request_mode = "direct_insecure"
+            return text
         except requests.RequestException as error:
             errors.append(f"direct-verify-off: {error}")
             self.logger.warning("ACRA direct request without certificate verification failed: %s", error)
 
         try:
-            proxy_response = self.session.get(
-                f"{ACRA_PROXY_BASE_URL}{path}",
-                params=request_params,
-                timeout=REQUEST_TIMEOUT * 2,
-            )
-            proxy_response.raise_for_status()
-            self.logger.info("GET ACRA proxy %s params=%s status=%s", path, request_params, proxy_response.status_code)
-            return proxy_response.text
+            text = call_proxy()
+            with self._request_mode_lock:
+                self._request_mode = "proxy"
+            return text
         except requests.RequestException as error:
             errors.append(f"proxy: {error}")
             self.logger.warning("ACRA proxy request failed: %s", error)
@@ -676,16 +728,15 @@ class AcraClient:
                 break
 
         if current_start is None:
-            return inn, None
-
-        end_index = len(lines)
-        for index in range(current_start + 1, len(lines)):
-            lowered = lines[index].lower()
-            if lowered == "история рейтингов":
-                end_index = index
-                break
-
-        current_block = lines[current_start:end_index]
+            current_block = lines
+        else:
+            end_index = len(lines)
+            for index in range(current_start + 1, len(lines)):
+                lowered = lines[index].lower()
+                if lowered == "история рейтингов":
+                    end_index = index
+                    break
+            current_block = lines[current_start:end_index]
         current_text = "\n".join(current_block)
 
         rating_match = re.search(r"([A-Z]{1,4}[+-]?\(RU\))", current_text)
@@ -710,6 +761,10 @@ class AcraClient:
         date_match = re.search(r"\b(\d{1,2}\s+[а-я]+\s+\d{4})\b", current_text.lower())
         if date_match:
             date_value = self._parse_ru_date(date_match.group(1))
+
+        if not rating:
+            rating_match = re.search(r"\b([A-Z]{1,4}(?:[+-]|-)?\(RU\))\b", "\n".join(lines))
+            rating = rating_match.group(1) if rating_match else None
 
         if not rating:
             return inn, None
@@ -774,6 +829,14 @@ class AcraClient:
                         self.logger.exception("ACRA issuer parse failed path=%s: %s", issuer_path, error)
                     pbar.update(1)
 
+        self.logger.info(
+            "ACRA scan stats: request_mode=%s total_issuers=%s total_pages=%s issuer_links=%s target_inn=%s",
+            self._request_mode,
+            total_issuers,
+            total_pages,
+            len(sorted_links),
+            len(normalized_inns),
+        )
         self.logger.info("ACRA ratings matched by INN: %s", len(ratings_by_inn))
         return ratings_by_inn
 
@@ -785,10 +848,7 @@ class NkrClient:
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
-        return digits or None
+        return normalize_inn(value)
 
     def _clean_text(self, value: str) -> str:
         text = html.unescape(value)
@@ -878,10 +938,7 @@ class NraClient:
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
-        return digits or None
+        return normalize_inn(value)
 
     def _clean_text(self, value: str) -> str:
         text = html.unescape(value)
@@ -991,11 +1048,17 @@ def enrich_emitters(
     if "EMITTER_ID" not in bonds.columns:
         bonds["EMITTER_ID"] = pd.NA
 
+    shares_emitter_ids = pd.to_numeric(shares["EMITTER_ID"], errors="coerce")
+    bonds_emitter_ids = pd.to_numeric(bonds["EMITTER_ID"], errors="coerce")
+    shares["EMITTER_ID"] = shares_emitter_ids
+    bonds["EMITTER_ID"] = bonds_emitter_ids
+
     existing_pairs = pd.concat([shares[["SECID", "EMITTER_ID"]], bonds[["SECID", "EMITTER_ID"]]], ignore_index=True)
     cached_pairs = pd.DataFrame(
         [{"SECID": secid, "EMITTER_ID": emitter_id} for secid, emitter_id in cache.get("secid_to_emitter", {}).items()]
     )
     existing_pairs = pd.concat([existing_pairs, cached_pairs], ignore_index=True)
+    existing_pairs["EMITTER_ID"] = pd.to_numeric(existing_pairs["EMITTER_ID"], errors="coerce")
     existing_pairs = existing_pairs.dropna(subset=["EMITTER_ID"]).drop_duplicates(subset=["SECID"], keep="first")
     existing_secids = set(existing_pairs["SECID"].tolist())
 
@@ -1189,7 +1252,7 @@ def apply_expert_ra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, st
     def rating_for_row(inn: Any) -> Any:
         if pd.isna(inn):
             return pd.NA
-        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        normalized = normalize_inn(inn)
         if not normalized:
             return pd.NA
         return ratings_by_inn.get(normalized, pd.NA)
@@ -1204,7 +1267,7 @@ def apply_acra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) -
     def rating_for_row(inn: Any) -> Any:
         if pd.isna(inn):
             return pd.NA
-        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        normalized = normalize_inn(inn)
         if not normalized:
             return pd.NA
         return ratings_by_inn.get(normalized, pd.NA)
@@ -1219,7 +1282,7 @@ def apply_nkr_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) ->
     def rating_for_row(inn: Any) -> Any:
         if pd.isna(inn):
             return pd.NA
-        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        normalized = normalize_inn(inn)
         if not normalized:
             return pd.NA
         return ratings_by_inn.get(normalized, pd.NA)
@@ -1234,7 +1297,7 @@ def apply_nra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) ->
     def rating_for_row(inn: Any) -> Any:
         if pd.isna(inn):
             return pd.NA
-        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        normalized = normalize_inn(inn)
         if not normalized:
             return pd.NA
         return ratings_by_inn.get(normalized, pd.NA)
@@ -1332,11 +1395,6 @@ def run() -> None:
     shares = pd.DataFrame()
     bonds = pd.DataFrame()
     emitters = pd.DataFrame()
-    moex_alive = True
-    expert_ra_alive = True
-    acra_alive = True
-    nkr_alive = True
-    nra_alive = True
 
     try:
         def fetch_shares_online() -> pd.DataFrame:
@@ -1356,21 +1414,14 @@ def run() -> None:
 
         bonds_future = None
         moex_prefetch_executor = ThreadPoolExecutor(max_workers=1)
-        if moex_alive:
-            bonds_future = moex_prefetch_executor.submit(fetch_bonds_online)
+        bonds_future = moex_prefetch_executor.submit(fetch_bonds_online)
 
         print("=====\nЭтап 1: Сбор акций")
         stage_started_at = perf_counter()
-        if moex_alive:
-            try:
-                shares = fetch_shares_online()
-            except requests.RequestException as error:
-                logger.warning("Shares stage failed, trying cache: %s", error)
-                skipped_sources.append("MOEX (акции)")
-                shares = load_dataframe_snapshot(SHARES_CACHE_FILE, logger)
-                if not shares.empty:
-                    restored_sources.append("MOEX (акции)")
-        else:
+        try:
+            shares = fetch_shares_online()
+        except requests.RequestException as error:
+            logger.warning("Shares stage failed, trying cache: %s", error)
             skipped_sources.append("MOEX (акции)")
             shares = load_dataframe_snapshot(SHARES_CACHE_FILE, logger)
             if not shares.empty:
@@ -1379,16 +1430,10 @@ def run() -> None:
 
         print("Этап 2: Сбор облигаций")
         stage_started_at = perf_counter()
-        if moex_alive:
-            try:
-                bonds = bonds_future.result() if bonds_future is not None else fetch_bonds_online()
-            except requests.RequestException as error:
-                logger.warning("Bonds stage failed, trying cache: %s", error)
-                skipped_sources.append("MOEX (облигации)")
-                bonds = load_dataframe_snapshot(BONDS_CACHE_FILE, logger)
-                if not bonds.empty:
-                    restored_sources.append("MOEX (облигации)")
-        else:
+        try:
+            bonds = bonds_future.result() if bonds_future is not None else fetch_bonds_online()
+        except requests.RequestException as error:
+            logger.warning("Bonds stage failed, trying cache: %s", error)
             skipped_sources.append("MOEX (облигации)")
             bonds = load_dataframe_snapshot(BONDS_CACHE_FILE, logger)
             if not bonds.empty:
@@ -1398,7 +1443,7 @@ def run() -> None:
 
         print("Этап 3: Обогащение эмитентов")
         stage_started_at = perf_counter()
-        if not shares.empty and not bonds.empty and moex_alive:
+        if not shares.empty and not bonds.empty:
             shares, bonds = enrich_emitters(client, shares, bonds, logger, cache)
             save_dataframe_snapshot(SHARES_CACHE_FILE, shares, logger)
             save_dataframe_snapshot(BONDS_CACHE_FILE, bonds, logger)
@@ -1410,7 +1455,9 @@ def run() -> None:
         stage_started_at = perf_counter()
         emitters = build_emitters_table(shares, bonds) if not shares.empty or not bonds.empty else load_dataframe_snapshot(EMITTERS_CACHE_FILE, logger)
         emitters = apply_manual_score_columns(emitters, logger)
-        inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
+        inns = {normalize_inn(value) for value in emitters["INN"].tolist()} if not emitters.empty and "INN" in emitters.columns else set()
+        inns = {inn for inn in inns if inn}
+        logger.info("Emitters scope: rows=%s unique_inn=%s", len(emitters), len(inns))
         expert_ra_cached, expert_ra_cached_today = load_daily_ratings_cache(EXPERT_RA_CACHE_FILE, logger)
         acra_cached, acra_cached_today = load_daily_ratings_cache(ACRA_CACHE_FILE, logger)
         nkr_cached, nkr_cached_today = load_daily_ratings_cache(NKR_CACHE_FILE, logger)
@@ -1418,31 +1465,26 @@ def run() -> None:
 
         expert_ra_ratings: dict[str, str] = {}
         rating_executor = ThreadPoolExecutor(max_workers=3)
-        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if (acra_alive and not acra_cached_today) else None
-        nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if (nkr_alive and not nkr_cached_today) else None
-        nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if (nra_alive and not nra_cached_today) else None
-        if expert_ra_alive:
-            if expert_ra_cached_today:
-                expert_ra_ratings = expert_ra_cached
-                restored_sources.append("Эксперт РА (дневной кэш)")
-            else:
-                try:
-                    expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
-                    save_daily_ratings_cache(EXPERT_RA_CACHE_FILE, expert_ra_ratings, logger)
-                except requests.RequestException as error:
-                    logger.warning("Expert RA stage failed, trying cache: %s", error)
-                    skipped_sources.append("Эксперт РА")
-                    expert_ra_ratings = expert_ra_cached
-                    if expert_ra_ratings:
-                        restored_sources.append("Эксперт РА")
-        else:
-            skipped_sources.append("Эксперт РА")
+        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if not acra_cached_today else None
+        nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if not nkr_cached_today else None
+        nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if not nra_cached_today else None
+        if expert_ra_cached_today:
             expert_ra_ratings = expert_ra_cached
-            if expert_ra_ratings:
-                restored_sources.append("Эксперт РА")
+            restored_sources.append("Эксперт РА (дневной кэш)")
+        else:
+            try:
+                expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
+                save_daily_ratings_cache(EXPERT_RA_CACHE_FILE, expert_ra_ratings, logger)
+            except requests.RequestException as error:
+                logger.warning("Expert RA stage failed, trying cache: %s", error)
+                skipped_sources.append("Эксперт РА")
+                expert_ra_ratings = expert_ra_cached
+                if expert_ra_ratings:
+                    restored_sources.append("Эксперт РА")
 
         if not emitters.empty:
             emitters = apply_expert_ra_ratings(emitters, expert_ra_ratings)
+        logger.info("Expert RA coverage: %s/%s", len(expert_ra_ratings), len(inns))
         stage_times["Этап 4: Получение рейтингов Эксперт РА"] = perf_counter() - stage_started_at
 
         print("Этап 5: Получение рейтингов АКРА")
@@ -1451,7 +1493,7 @@ def run() -> None:
         if acra_cached_today:
             acra_ratings = acra_cached
             restored_sources.append("АКРА (дневной кэш)")
-        elif acra_alive:
+        else:
             try:
                 acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
                 save_daily_ratings_cache(ACRA_CACHE_FILE, acra_ratings, logger)
@@ -1461,14 +1503,10 @@ def run() -> None:
                 acra_ratings = acra_cached
                 if acra_ratings:
                     restored_sources.append("АКРА")
-        else:
-            skipped_sources.append("АКРА")
-            acra_ratings = acra_cached
-            if acra_ratings:
-                restored_sources.append("АКРА")
         if not emitters.empty:
             emitters = apply_acra_ratings(emitters, acra_ratings)
             save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
+        logger.info("ACRA coverage: %s/%s", len(acra_ratings), len(inns))
         stage_times["Этап 5: Получение рейтингов АКРА"] = perf_counter() - stage_started_at
 
         print("Этап 6: Получение рейтингов НКР")
@@ -1477,7 +1515,7 @@ def run() -> None:
         if nkr_cached_today:
             nkr_ratings = nkr_cached
             restored_sources.append("НКР (дневной кэш)")
-        elif nkr_alive:
+        else:
             try:
                 nkr_ratings = nkr_future.result() if nkr_future is not None else nkr_client.fetch_latest_ratings_by_inn(inns)
                 save_daily_ratings_cache(NKR_CACHE_FILE, nkr_ratings, logger)
@@ -1487,16 +1525,12 @@ def run() -> None:
                 nkr_ratings = nkr_cached
                 if nkr_ratings:
                     restored_sources.append("НКР")
-        else:
-            skipped_sources.append("НКР")
-            nkr_ratings = nkr_cached
-            if nkr_ratings:
-                restored_sources.append("НКР")
         rating_executor.shutdown(wait=False)
 
         if not emitters.empty:
             emitters = apply_nkr_ratings(emitters, nkr_ratings)
             save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
+        logger.info("NKR coverage: %s/%s", len(nkr_ratings), len(inns))
         stage_times["Этап 6: Получение рейтингов НКР"] = perf_counter() - stage_started_at
 
         print("Этап 7: Получение рейтингов НРА")
@@ -1505,7 +1539,7 @@ def run() -> None:
         if nra_cached_today:
             nra_ratings = nra_cached
             restored_sources.append("НРА (дневной кэш)")
-        elif nra_alive:
+        else:
             try:
                 nra_ratings = nra_future.result() if nra_future is not None else nra_client.fetch_latest_ratings_by_inn(inns)
                 save_daily_ratings_cache(NRA_CACHE_FILE, nra_ratings, logger)
@@ -1515,15 +1549,11 @@ def run() -> None:
                 nra_ratings = nra_cached
                 if nra_ratings:
                     restored_sources.append("НРА")
-        else:
-            skipped_sources.append("НРА")
-            nra_ratings = nra_cached
-            if nra_ratings:
-                restored_sources.append("НРА")
 
         if not emitters.empty:
             emitters = apply_nra_ratings(emitters, nra_ratings)
             save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
+        logger.info("NRA coverage: %s/%s", len(nra_ratings), len(inns))
         stage_times["Этап 7: Получение рейтингов НРА"] = perf_counter() - stage_started_at
 
         print("Этап 8: Формирование Excel")
