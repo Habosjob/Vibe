@@ -26,6 +26,7 @@ EXPERT_RA_BASE_URL = "https://raexpert.ru"
 ACRA_BASE_URL = "https://www.acra-ratings.ru"
 ACRA_PROXY_BASE_URL = "https://r.jina.ai/http://www.acra-ratings.ru"
 NKR_BASE_URL = "https://ratings.ru"
+NRA_BASE_URL = "https://www.ra-national.ru"
 OUTPUT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = OUTPUT_DIR / "logs"
 CACHE_DIR = OUTPUT_DIR / "cache"
@@ -43,6 +44,7 @@ EMITTERS_CACHE_FILE = CACHE_DIR / "emitters_snapshot.json"
 EXPERT_RA_CACHE_FILE = CACHE_DIR / "expert_ra_ratings.json"
 ACRA_CACHE_FILE = CACHE_DIR / "acra_ratings.json"
 NKR_CACHE_FILE = CACHE_DIR / "nkr_ratings.json"
+NRA_CACHE_FILE = CACHE_DIR / "nra_ratings.json"
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ZEBRA_FILL = PatternFill(fill_type="solid", fgColor="E8F2FF")
@@ -116,6 +118,7 @@ def check_sources_health(logger: logging.Logger) -> dict[str, bool]:
         "expert_ra": f"{EXPERT_RA_BASE_URL}/ratings/",
         "acra": f"{ACRA_BASE_URL}/ratings/issuers/",
         "nkr": f"{NKR_BASE_URL}/ratings/issuers/",
+        "nra": f"{NRA_BASE_URL}/list-of-credit-ratings/",
     }
     statuses: dict[str, bool] = {}
     with ThreadPoolExecutor(max_workers=len(checks)) as executor:
@@ -651,6 +654,114 @@ class NkrClient:
         return ratings_by_inn
 
 
+class NraClient:
+    def __init__(self, logger: logging.Logger) -> None:
+        self.logger = logger
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
+
+    def _normalize_inn(self, value: Any) -> str | None:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
+        return digits or None
+
+    def _clean_text(self, value: str) -> str:
+        text = html.unescape(value)
+        text = re.sub(r"<[^>]+>", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _normalize_date(self, value: str) -> str:
+        parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
+        if pd.notna(parsed):
+            return parsed.strftime("%d.%m.%Y")
+        return value
+
+    def _extract_table_rows(self, page_text: str) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        table_blocks = re.findall(r"<table[^>]*class=\"[^\"]*wpdtSimpleTable[^\"]*\"[^>]*>([\s\S]*?)</table>", page_text, flags=re.IGNORECASE)
+
+        for table_block in table_blocks:
+            header_map: dict[str, int] = {}
+            tr_blocks = re.findall(r"<tr[^>]*>([\s\S]*?)</tr>", table_block, flags=re.IGNORECASE)
+            for tr_block in tr_blocks:
+                cells_raw = re.findall(r"<td[^>]*>([\s\S]*?)</td>", tr_block, flags=re.IGNORECASE)
+                if not cells_raw:
+                    continue
+                cells = [self._clean_text(cell) for cell in cells_raw]
+                upper_cells = [cell.upper() for cell in cells]
+                if "ИНН" in upper_cells and "ПРИСВОЕН РЕЙТИНГ" in upper_cells:
+                    header_map = {name: idx for idx, name in enumerate(upper_cells)}
+                    continue
+
+                if not header_map:
+                    continue
+
+                inn_idx = header_map.get("ИНН")
+                rating_idx = header_map.get("ПРИСВОЕН РЕЙТИНГ")
+                forecast_idx = header_map.get("ПРОГНОЗ ПО РЕЙТИНГУ")
+                date_idx = header_map.get("ДАТА ПУБЛИКАЦИИ")
+                status_idx = header_map.get("СТАТУС РЕЙТИНГА")
+
+                if inn_idx is None or rating_idx is None:
+                    continue
+                if max(filter(lambda value: value is not None, [inn_idx, rating_idx, forecast_idx, date_idx, status_idx])) >= len(cells):
+                    continue
+
+                rows.append(
+                    {
+                        "inn": cells[inn_idx],
+                        "rating": cells[rating_idx],
+                        "forecast": cells[forecast_idx] if forecast_idx is not None else "",
+                        "date": self._normalize_date(cells[date_idx]) if date_idx is not None and cells[date_idx] else "",
+                        "status": cells[status_idx] if status_idx is not None else "",
+                    }
+                )
+
+        self.logger.info("NRA rows parsed: %s", len(rows))
+        return rows
+
+    def fetch_latest_ratings_by_inn(self, inns: set[str]) -> dict[str, str]:
+        normalized_inns = {self._normalize_inn(value) for value in inns}
+        normalized_inns = {inn for inn in normalized_inns if inn}
+        if not normalized_inns:
+            return {}
+
+        response = self.session.get(f"{NRA_BASE_URL}/list-of-credit-ratings/", timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        rows = self._extract_table_rows(response.text)
+
+        ratings_by_inn: dict[str, dict[str, Any]] = {}
+        with progress(total=len(rows), desc="Парсинг НРА", unit="строка") as pbar:
+            for row in rows:
+                inn = self._normalize_inn(row["inn"])
+                rating = row["rating"].strip()
+                if not inn or inn not in normalized_inns or not rating:
+                    pbar.update(1)
+                    continue
+
+                parsed_date = pd.to_datetime(row["date"], errors="coerce", dayfirst=True)
+                sort_date = parsed_date if pd.notna(parsed_date) else pd.Timestamp.min
+                status = row["status"].lower()
+                is_active = 1 if "действ" in status else 0
+                current = ratings_by_inn.get(inn)
+                current_sort = (current["is_active"], current["sort_date"]) if current else (-1, pd.Timestamp.min)
+
+                if (is_active, sort_date) >= current_sort:
+                    rating_parts = [part for part in [rating, row["forecast"], row["date"]] if part]
+                    ratings_by_inn[inn] = {
+                        "is_active": is_active,
+                        "sort_date": sort_date,
+                        "value": "\n".join(rating_parts),
+                    }
+
+                pbar.update(1)
+
+        result = {inn: payload["value"] for inn, payload in ratings_by_inn.items()}
+        self.logger.info("NRA ratings matched by INN: %s", len(result))
+        return result
+
+
 def enrich_emitters(
     client: MoexClient,
     shares: pd.DataFrame,
@@ -823,6 +934,21 @@ def apply_nkr_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) ->
     return result
 
 
+def apply_nra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) -> pd.DataFrame:
+    result = emitters.copy()
+
+    def rating_for_row(inn: Any) -> Any:
+        if pd.isna(inn):
+            return pd.NA
+        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        if not normalized:
+            return pd.NA
+        return ratings_by_inn.get(normalized, pd.NA)
+
+    result["НРА рейтинг"] = result["INN"].map(rating_for_row)
+    return result
+
+
 def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
     for col_idx, column_name in enumerate(df.columns, start=1):
         values = df[column_name]
@@ -884,6 +1010,7 @@ def run() -> None:
     expert_ra_client = ExpertRaClient(logger)
     acra_client = AcraClient(logger)
     nkr_client = NkrClient(logger)
+    nra_client = NraClient(logger)
     cache = load_cache(logger)
 
     shares = pd.DataFrame()
@@ -895,6 +1022,7 @@ def run() -> None:
     expert_ra_alive = health.get("expert_ra", False)
     acra_alive = health.get("acra", False)
     nkr_alive = health.get("nkr", False)
+    nra_alive = health.get("nra", False)
 
     try:
         def fetch_shares_online() -> pd.DataFrame:
@@ -969,9 +1097,10 @@ def run() -> None:
         emitters = build_emitters_table(shares, bonds) if not shares.empty or not bonds.empty else load_dataframe_snapshot(EMITTERS_CACHE_FILE, logger)
         inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
         expert_ra_ratings: dict[str, str] = {}
-        rating_executor = ThreadPoolExecutor(max_workers=2)
+        rating_executor = ThreadPoolExecutor(max_workers=3)
         acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if acra_alive else None
         nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if nkr_alive else None
+        nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if nra_alive else None
         if expert_ra_alive:
             try:
                 expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
@@ -1040,7 +1169,31 @@ def run() -> None:
             save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
         stage_times["Этап 6: Получение рейтингов НКР"] = perf_counter() - stage_started_at
 
-        print("Этап 7: Формирование Excel")
+        print("Этап 7: Получение рейтингов НРА")
+        stage_started_at = perf_counter()
+        nra_ratings: dict[str, str] = {}
+        if nra_alive:
+            try:
+                nra_ratings = nra_future.result() if nra_future is not None else nra_client.fetch_latest_ratings_by_inn(inns)
+                save_json_dict(NRA_CACHE_FILE, nra_ratings, logger)
+            except requests.RequestException as error:
+                logger.warning("NRA stage failed, trying cache: %s", error)
+                skipped_sources.append("НРА")
+                nra_ratings = {k: str(v) for k, v in load_json_dict(NRA_CACHE_FILE, logger).items()}
+                if nra_ratings:
+                    restored_sources.append("НРА")
+        else:
+            skipped_sources.append("НРА")
+            nra_ratings = {k: str(v) for k, v in load_json_dict(NRA_CACHE_FILE, logger).items()}
+            if nra_ratings:
+                restored_sources.append("НРА")
+
+        if not emitters.empty:
+            emitters = apply_nra_ratings(emitters, nra_ratings)
+            save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
+        stage_times["Этап 7: Получение рейтингов НРА"] = perf_counter() - stage_started_at
+
+        print("Этап 8: Формирование Excel")
         stage_started_at = perf_counter()
         excel_exports = [(shares, SHARES_FILE), (bonds, BONDS_FILE), (emitters, EMITTERS_FILE)]
         def save_excel_item(item: tuple[pd.DataFrame, Path]) -> None:
@@ -1053,7 +1206,7 @@ def run() -> None:
                 for future in as_completed(futures):
                     future.result()
                     pbar.update(1)
-        stage_times["Этап 7: Формирование Excel"] = perf_counter() - stage_started_at
+        stage_times["Этап 8: Формирование Excel"] = perf_counter() - stage_started_at
 
         print("=====\nГотово")
         logger.info("Script completed successfully")
