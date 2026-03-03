@@ -89,6 +89,31 @@ def save_json_dict(path: Path, payload: dict[str, Any], logger: logging.Logger) 
         logger.exception("JSON cache save failed path=%s: %s", path, error)
 
 
+def load_daily_ratings_cache(path: Path, logger: logging.Logger) -> tuple[dict[str, str], bool]:
+    payload = load_json_dict(path, logger)
+    today = date.today().isoformat()
+
+    cached_on = payload.get("cached_on") if isinstance(payload, dict) else None
+    ratings_payload = payload.get("ratings") if isinstance(payload, dict) and isinstance(payload.get("ratings"), dict) else None
+
+    if ratings_payload is None and isinstance(payload, dict):
+        ratings_payload = payload
+
+    if not isinstance(ratings_payload, dict):
+        return {}, False
+
+    ratings = {str(key): str(value) for key, value in ratings_payload.items() if value is not None}
+    return ratings, cached_on == today
+
+
+def save_daily_ratings_cache(path: Path, ratings: dict[str, str], logger: logging.Logger) -> None:
+    payload = {
+        "cached_on": date.today().isoformat(),
+        "ratings": ratings,
+    }
+    save_json_dict(path, payload, logger)
+
+
 def save_dataframe_snapshot(path: Path, frame: pd.DataFrame, logger: logging.Logger) -> None:
     payload = {"columns": frame.columns.tolist(), "records": frame.where(pd.notna(frame), None).to_dict(orient="records")}
     save_json_dict(path, payload, logger)
@@ -115,32 +140,31 @@ def is_source_alive(url: str, logger: logging.Logger) -> bool:
 
 
 def is_acra_source_alive(logger: logging.Logger) -> bool:
-    direct_url = f"{ACRA_BASE_URL}/ratings/issuers/"
-    proxy_url = f"{ACRA_PROXY_BASE_URL}/ratings/issuers/"
+    def _looks_like_issuers_page(response_text: str) -> bool:
+        normalized = response_text.lower()
+        return "ratings/issuers/" in normalized or "найдено:" in normalized
 
-    try:
-        response = requests.get(direct_url, timeout=10)
-        response.raise_for_status()
-        logger.info("ACRA source health OK direct status=%s", response.status_code)
-        return True
-    except requests.RequestException as direct_error:
-        logger.warning("ACRA source direct health failed: %s", direct_error)
+    checks = [
+        (f"{ACRA_BASE_URL}/ratings/issuers/", True, 10, "direct"),
+        (f"{ACRA_BASE_URL}/ratings/issuers/?page=1", True, 10, "direct-page-1"),
+        (f"{ACRA_BASE_URL}/ratings/issuers/", False, 10, "direct-no-verify"),
+        (f"{ACRA_PROXY_BASE_URL}/ratings/issuers/", True, 20, "proxy"),
+    ]
 
-    try:
-        response = requests.get(direct_url, timeout=10, verify=False)
-        response.raise_for_status()
-        logger.info("ACRA source health OK direct-no-verify status=%s", response.status_code)
-        return True
-    except requests.RequestException as direct_no_verify_error:
-        logger.warning("ACRA source direct health without verify failed: %s", direct_no_verify_error)
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
-    try:
-        response = requests.get(proxy_url, timeout=10)
-        response.raise_for_status()
-        logger.info("ACRA source health OK proxy status=%s", response.status_code)
-        return True
-    except requests.RequestException as proxy_error:
-        logger.warning("ACRA source proxy health failed: %s", proxy_error)
+    for url, verify_ssl, timeout, label in checks:
+        try:
+            response = session.get(url, timeout=timeout, verify=verify_ssl)
+            response.raise_for_status()
+            if not _looks_like_issuers_page(response.text):
+                logger.warning("ACRA source health %s failed: unexpected response content", label)
+                continue
+            logger.info("ACRA source health OK %s status=%s", label, response.status_code)
+            return True
+        except requests.RequestException as error:
+            logger.warning("ACRA source health %s failed: %s", label, error)
 
     return False
 
@@ -1223,24 +1247,33 @@ def run() -> None:
         emitters = build_emitters_table(shares, bonds) if not shares.empty or not bonds.empty else load_dataframe_snapshot(EMITTERS_CACHE_FILE, logger)
         emitters = apply_manual_score_columns(emitters, logger)
         inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
+        expert_ra_cached, expert_ra_cached_today = load_daily_ratings_cache(EXPERT_RA_CACHE_FILE, logger)
+        acra_cached, acra_cached_today = load_daily_ratings_cache(ACRA_CACHE_FILE, logger)
+        nkr_cached, nkr_cached_today = load_daily_ratings_cache(NKR_CACHE_FILE, logger)
+        nra_cached, nra_cached_today = load_daily_ratings_cache(NRA_CACHE_FILE, logger)
+
         expert_ra_ratings: dict[str, str] = {}
         rating_executor = ThreadPoolExecutor(max_workers=3)
-        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns)
-        nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if nkr_alive else None
-        nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if nra_alive else None
+        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if (acra_alive and not acra_cached_today) else None
+        nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if (nkr_alive and not nkr_cached_today) else None
+        nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if (nra_alive and not nra_cached_today) else None
         if expert_ra_alive:
-            try:
-                expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
-                save_json_dict(EXPERT_RA_CACHE_FILE, expert_ra_ratings, logger)
-            except requests.RequestException as error:
-                logger.warning("Expert RA stage failed, trying cache: %s", error)
-                skipped_sources.append("Эксперт РА")
-                expert_ra_ratings = {k: str(v) for k, v in load_json_dict(EXPERT_RA_CACHE_FILE, logger).items()}
-                if expert_ra_ratings:
-                    restored_sources.append("Эксперт РА")
+            if expert_ra_cached_today:
+                expert_ra_ratings = expert_ra_cached
+                restored_sources.append("Эксперт РА (дневной кэш)")
+            else:
+                try:
+                    expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
+                    save_daily_ratings_cache(EXPERT_RA_CACHE_FILE, expert_ra_ratings, logger)
+                except requests.RequestException as error:
+                    logger.warning("Expert RA stage failed, trying cache: %s", error)
+                    skipped_sources.append("Эксперт РА")
+                    expert_ra_ratings = expert_ra_cached
+                    if expert_ra_ratings:
+                        restored_sources.append("Эксперт РА")
         else:
             skipped_sources.append("Эксперт РА")
-            expert_ra_ratings = {k: str(v) for k, v in load_json_dict(EXPERT_RA_CACHE_FILE, logger).items()}
+            expert_ra_ratings = expert_ra_cached
             if expert_ra_ratings:
                 restored_sources.append("Эксперт РА")
 
@@ -1251,15 +1284,22 @@ def run() -> None:
         print("Этап 5: Получение рейтингов АКРА")
         stage_started_at = perf_counter()
         acra_ratings: dict[str, str] = {}
-        if not acra_alive:
-            logger.warning("ACRA health check is negative, but fetching is still attempted")
-        try:
-            acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
-            save_json_dict(ACRA_CACHE_FILE, acra_ratings, logger)
-        except requests.RequestException as error:
-            logger.warning("ACRA stage failed, trying cache: %s", error)
+        if acra_cached_today:
+            acra_ratings = acra_cached
+            restored_sources.append("АКРА (дневной кэш)")
+        elif acra_alive:
+            try:
+                acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
+                save_daily_ratings_cache(ACRA_CACHE_FILE, acra_ratings, logger)
+            except requests.RequestException as error:
+                logger.warning("ACRA stage failed, trying cache: %s", error)
+                skipped_sources.append("АКРА")
+                acra_ratings = acra_cached
+                if acra_ratings:
+                    restored_sources.append("АКРА")
+        else:
             skipped_sources.append("АКРА")
-            acra_ratings = {k: str(v) for k, v in load_json_dict(ACRA_CACHE_FILE, logger).items()}
+            acra_ratings = acra_cached
             if acra_ratings:
                 restored_sources.append("АКРА")
         if not emitters.empty:
@@ -1270,19 +1310,22 @@ def run() -> None:
         print("Этап 6: Получение рейтингов НКР")
         stage_started_at = perf_counter()
         nkr_ratings: dict[str, str] = {}
-        if nkr_alive:
+        if nkr_cached_today:
+            nkr_ratings = nkr_cached
+            restored_sources.append("НКР (дневной кэш)")
+        elif nkr_alive:
             try:
                 nkr_ratings = nkr_future.result() if nkr_future is not None else nkr_client.fetch_latest_ratings_by_inn(inns)
-                save_json_dict(NKR_CACHE_FILE, nkr_ratings, logger)
+                save_daily_ratings_cache(NKR_CACHE_FILE, nkr_ratings, logger)
             except requests.RequestException as error:
                 logger.warning("NKR stage failed, trying cache: %s", error)
                 skipped_sources.append("НКР")
-                nkr_ratings = {k: str(v) for k, v in load_json_dict(NKR_CACHE_FILE, logger).items()}
+                nkr_ratings = nkr_cached
                 if nkr_ratings:
                     restored_sources.append("НКР")
         else:
             skipped_sources.append("НКР")
-            nkr_ratings = {k: str(v) for k, v in load_json_dict(NKR_CACHE_FILE, logger).items()}
+            nkr_ratings = nkr_cached
             if nkr_ratings:
                 restored_sources.append("НКР")
         rating_executor.shutdown(wait=False)
@@ -1295,19 +1338,22 @@ def run() -> None:
         print("Этап 7: Получение рейтингов НРА")
         stage_started_at = perf_counter()
         nra_ratings: dict[str, str] = {}
-        if nra_alive:
+        if nra_cached_today:
+            nra_ratings = nra_cached
+            restored_sources.append("НРА (дневной кэш)")
+        elif nra_alive:
             try:
                 nra_ratings = nra_future.result() if nra_future is not None else nra_client.fetch_latest_ratings_by_inn(inns)
-                save_json_dict(NRA_CACHE_FILE, nra_ratings, logger)
+                save_daily_ratings_cache(NRA_CACHE_FILE, nra_ratings, logger)
             except requests.RequestException as error:
                 logger.warning("NRA stage failed, trying cache: %s", error)
                 skipped_sources.append("НРА")
-                nra_ratings = {k: str(v) for k, v in load_json_dict(NRA_CACHE_FILE, logger).items()}
+                nra_ratings = nra_cached
                 if nra_ratings:
                     restored_sources.append("НРА")
         else:
             skipped_sources.append("НРА")
-            nra_ratings = {k: str(v) for k, v in load_json_dict(NRA_CACHE_FILE, logger).items()}
+            nra_ratings = nra_cached
             if nra_ratings:
                 restored_sources.append("НРА")
 
