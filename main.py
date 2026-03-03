@@ -38,14 +38,15 @@ SHARES_FILE = EXPORT_DIR / "moex_shares.xlsx"
 BONDS_FILE = EXPORT_DIR / "moex_bonds.xlsx"
 EMITTERS_FILE = EXPORT_DIR / "moex_emitters.xlsx"
 REQUEST_TIMEOUT = 30
-MAX_WORKERS = 24
-PROXY_SOURCE_TIMEOUT = 12
-PROXY_VALIDATION_TIMEOUT = 3
-PROXY_VALIDATION_WORKERS = 256
-PROXY_VALIDATION_TARGET = 200
-PROXY_CANDIDATE_LIMIT = 1200
-PROXY_REQUEST_TIMEOUT = 8
-PROXY_MAX_ATTEMPTS = 6
+MAX_WORKERS = 64
+PROXY_SOURCE_TIMEOUT = 6
+PROXY_VALIDATION_TIMEOUT = 1.5
+PROXY_VALIDATION_WORKERS = 512
+PROXY_VALIDATION_TARGET = 80
+PROXY_CANDIDATE_LIMIT = 400
+PROXY_REQUEST_TIMEOUT = 2.5
+PROXY_MAX_ATTEMPTS = 2
+PROXY_VALIDATION_TIME_BUDGET = 8
 PROXYLIST_FILE = OUTPUT_DIR / "proxylist.csv"
 USE_CACHE = False
 CACHE_FILE = CACHE_DIR / "emitter_cache.json"
@@ -192,25 +193,23 @@ class ProxyRotatingSession(requests.Session):
                 self.proxy_pool.remove(proxy)
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
-        max_attempts = min(PROXY_MAX_ATTEMPTS, max(1, len(self.proxy_pool))) if self.proxy_pool else 1
+        max_attempts = min(PROXY_MAX_ATTEMPTS, max(1, len(self.proxy_pool))) if self.proxy_pool else 0
         last_error: Exception | None = None
         base_timeout = kwargs.get("timeout", REQUEST_TIMEOUT)
 
         for _ in range(max_attempts):
             request_kwargs = dict(kwargs)
             proxy = self._next_proxy()
-            if proxy:
-                request_kwargs["proxies"] = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
-                request_kwargs["timeout"] = min(base_timeout, PROXY_REQUEST_TIMEOUT)
+            if not proxy:
+                break
+            request_kwargs["proxies"] = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+            request_kwargs["timeout"] = min(base_timeout, PROXY_REQUEST_TIMEOUT)
             try:
                 return super().request(method, url, **request_kwargs)
             except requests.RequestException as error:
                 last_error = error
                 self._mark_failed(proxy)
-                if proxy:
-                    self.logger.warning("Proxy request failed proxy=%s url=%s error=%s", proxy, url, error)
-                else:
-                    self.logger.warning("Direct request failed url=%s error=%s", url, error)
+                self.logger.warning("Proxy request failed proxy=%s url=%s error=%s", proxy, url, error)
 
         fallback_kwargs = dict(kwargs)
         fallback_kwargs.pop("proxies", None)
@@ -281,6 +280,7 @@ def validate_proxies(proxies: list[str], logger: logging.Logger) -> list[str]:
             return None
 
     valid: list[str] = []
+    started_at = perf_counter()
     with ThreadPoolExecutor(max_workers=PROXY_VALIDATION_WORKERS) as executor:
         futures = [executor.submit(check_proxy, proxy) for proxy in proxies]
         with progress(total=len(futures), desc="Проверка прокси", unit="прокси") as pbar:
@@ -288,13 +288,14 @@ def validate_proxies(proxies: list[str], logger: logging.Logger) -> list[str]:
                 resolved = future.result()
                 if resolved:
                     valid.append(resolved)
-                    if len(valid) >= PROXY_VALIDATION_TARGET:
-                        for pending in futures:
-                            pending.cancel()
-                        pbar.n = len(futures)
-                        pbar.refresh()
-                        break
                 pbar.update(1)
+
+                if len(valid) >= PROXY_VALIDATION_TARGET or (perf_counter() - started_at) >= PROXY_VALIDATION_TIME_BUDGET:
+                    for pending in futures:
+                        pending.cancel()
+                    pbar.n = len(futures)
+                    pbar.refresh()
+                    break
 
     logger.info("Proxy validated: total=%s valid=%s", len(proxies), len(valid))
     return sorted(set(valid))
