@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import logging
 import math
@@ -339,24 +340,44 @@ class AcraClient:
         return [f"/ratings/issuers/{issuer_id}/" for issuer_id in unique_ids]
 
     def _parse_issuer_card(self, text: str) -> tuple[str | None, str | None]:
-        lines = [self._clean_text(line) for line in text.splitlines() if self._clean_text(line)]
+        raw_text = text
+        if "<html" in text.lower() or "<body" in text.lower():
+            cleaned = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
+            cleaned = re.sub(r"<style[\s\S]*?</style>", " ", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"</?(?:br|p|div|li|tr|td|th|h1|h2|h3|h4|h5|h6)\b[^>]*>", "\n", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+            raw_text = html.unescape(cleaned)
+
+        lines = [self._clean_text(line) for line in raw_text.splitlines() if self._clean_text(line)]
         if not lines:
             return None, None
 
         inn: str | None = None
         for index, line in enumerate(lines):
-            if line.upper() == "ИНН" and index + 1 < len(lines):
+            upper_line = line.upper()
+            if upper_line == "ИНН" and index + 1 < len(lines):
                 candidate = self._normalize_inn(lines[index + 1])
                 if candidate:
                     inn = candidate
                     break
+            if "ИНН" in upper_line:
+                inn_match = re.search(r"ИНН\D{0,30}(\d{10,12})", line, flags=re.IGNORECASE)
+                if inn_match:
+                    inn = inn_match.group(1)
+                    break
+
+        if not inn:
+            full_text = "\n".join(lines)
+            inn_match = re.search(r"ИНН\D{0,30}(\d{10,12})", full_text, flags=re.IGNORECASE)
+            if inn_match:
+                inn = inn_match.group(1)
 
         if not inn:
             return None, None
 
         current_start: int | None = None
         for index, line in enumerate(lines):
-            if line.lower() == "текущий рейтинг":
+            if "текущий рейтинг" in line.lower():
                 current_start = index
                 break
 
@@ -365,28 +386,36 @@ class AcraClient:
 
         end_index = len(lines)
         for index in range(current_start + 1, len(lines)):
-            if lines[index].lower() == "история рейтингов":
+            lowered = lines[index].lower()
+            if lowered == "история рейтингов":
                 end_index = index
                 break
 
         current_block = lines[current_start:end_index]
-        rating = next((line for line in current_block if re.fullmatch(r"[A-Z]{1,4}[+-]?\(RU\)", line)), None)
+        current_text = "\n".join(current_block)
+
+        rating_match = re.search(r"([A-Z]{1,4}[+-]?\(RU\))", current_text)
+        rating = rating_match.group(1) if rating_match else None
 
         forecast: str | None = None
-        for line in current_block:
-            lower_line = line.lower()
-            if lower_line.startswith("прогноз "):
-                forecast = self._clean_text(line[8:])
-                break
-            if "под наблюдением" in lower_line or lower_line in {"позитивный", "стабильный", "негативный", "развивающийся"}:
-                forecast = line
-                break
+        forecast_match = re.search(
+            r"прогноз\s+([А-Яа-яA-Za-z ,()\-]+)",
+            current_text,
+            flags=re.IGNORECASE,
+        )
+        if forecast_match:
+            forecast = self._clean_text(forecast_match.group(1))
+        else:
+            for line in current_block:
+                lower_line = line.lower()
+                if "под наблюдением" in lower_line or lower_line in {"позитивный", "стабильный", "негативный", "развивающийся"}:
+                    forecast = line
+                    break
 
         date_value: str | None = None
-        for line in current_block:
-            if re.search(r"\b\d{1,2}\s+[а-я]+\s+\d{4}\b", line.lower()):
-                date_value = self._parse_ru_date(line)
-                break
+        date_match = re.search(r"\b(\d{1,2}\s+[а-я]+\s+\d{4})\b", current_text.lower())
+        if date_match:
+            date_value = self._parse_ru_date(date_match.group(1))
 
         if not rating:
             return inn, None
