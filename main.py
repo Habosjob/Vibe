@@ -25,6 +25,7 @@ BASE_URL = "https://iss.moex.com/iss"
 EXPERT_RA_BASE_URL = "https://raexpert.ru"
 ACRA_BASE_URL = "https://www.acra-ratings.ru"
 ACRA_PROXY_BASE_URL = "https://r.jina.ai/http://www.acra-ratings.ru"
+NKR_BASE_URL = "https://ratings.ru"
 OUTPUT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = OUTPUT_DIR / "logs"
 CACHE_DIR = OUTPUT_DIR / "cache"
@@ -41,6 +42,7 @@ BONDS_CACHE_FILE = CACHE_DIR / "bonds_snapshot.json"
 EMITTERS_CACHE_FILE = CACHE_DIR / "emitters_snapshot.json"
 EXPERT_RA_CACHE_FILE = CACHE_DIR / "expert_ra_ratings.json"
 ACRA_CACHE_FILE = CACHE_DIR / "acra_ratings.json"
+NKR_CACHE_FILE = CACHE_DIR / "nkr_ratings.json"
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ZEBRA_FILL = PatternFill(fill_type="solid", fgColor="E8F2FF")
@@ -113,6 +115,7 @@ def check_sources_health(logger: logging.Logger) -> dict[str, bool]:
         "moex": f"{BASE_URL}/engines/stock/markets/shares/securities.json",
         "expert_ra": f"{EXPERT_RA_BASE_URL}/ratings/",
         "acra": f"{ACRA_BASE_URL}/ratings/issuers/",
+        "nkr": f"{NKR_BASE_URL}/ratings/issuers/",
     }
     statuses: dict[str, bool] = {}
     with ThreadPoolExecutor(max_workers=len(checks)) as executor:
@@ -555,6 +558,99 @@ class AcraClient:
         return ratings_by_inn
 
 
+class NkrClient:
+    def __init__(self, logger: logging.Logger) -> None:
+        self.logger = logger
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
+
+    def _normalize_inn(self, value: Any) -> str | None:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
+        return digits or None
+
+    def _clean_text(self, value: str) -> str:
+        text = html.unescape(value)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _parse_issuers_rows(self, text: str) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        row_pattern = re.compile(r"<tr[^>]*>([\s\S]*?)</tr>", flags=re.IGNORECASE)
+        for block in row_pattern.findall(text):
+            href_match = re.search(r'href="(/ratings/issuers/[^"#?]+/)"', block, flags=re.IGNORECASE)
+            if not href_match:
+                continue
+
+            cells = re.findall(r"<td[^>]*>([\s\S]*?)</td>", block, flags=re.IGNORECASE)
+            if len(cells) < 6:
+                continue
+
+            rating = self._clean_text(re.sub(r"<[^>]+>", " ", cells[1]))
+            if not rating:
+                continue
+            forecast = self._clean_text(re.sub(r"<[^>]+>", " ", cells[2]))
+            date_value = self._clean_text(re.sub(r"<[^>]+>", " ", cells[5]))
+
+            rows.append({"issuer_path": href_match.group(1), "rating": rating, "forecast": forecast, "date": date_value})
+
+        self.logger.info("NKR issuer rows parsed: %s", len(rows))
+        return rows
+
+    def _fetch_issuer_inn(self, issuer_path: str) -> str | None:
+        response = self.session.get(f"{NKR_BASE_URL}{issuer_path}", timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        text = response.text
+
+        match = re.search(
+            r"<span[^>]*>\s*ИНН\s*</span>\s*<span[^>]*>\s*(\d{10,12})\s*</span>",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+
+        fallback = re.search(r"ИНН\D{0,30}(\d{10,12})", re.sub(r"<[^>]+>", " ", text), flags=re.IGNORECASE)
+        return fallback.group(1) if fallback else None
+
+    def fetch_latest_ratings_by_inn(self, inns: set[str]) -> dict[str, str]:
+        normalized_inns = {self._normalize_inn(value) for value in inns}
+        normalized_inns = {inn for inn in normalized_inns if inn}
+        if not normalized_inns:
+            return {}
+
+        response = self.session.get(f"{NKR_BASE_URL}/ratings/issuers/", timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        rows = self._parse_issuers_rows(response.text)
+        if not rows:
+            return {}
+
+        ratings_by_inn: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(self._fetch_issuer_inn, row["issuer_path"]): row for row in rows}
+            with progress(total=len(futures), desc="Парсинг НКР", unit="эмитент") as pbar:
+                for future in as_completed(futures):
+                    row = futures[future]
+                    try:
+                        inn = self._normalize_inn(future.result())
+                    except requests.RequestException as error:
+                        self.logger.warning("NKR issuer page skipped path=%s: %s", row["issuer_path"], error)
+                        pbar.update(1)
+                        continue
+                    except Exception as error:
+                        self.logger.exception("NKR issuer parse failed path=%s: %s", row["issuer_path"], error)
+                        pbar.update(1)
+                        continue
+
+                    if inn and inn in normalized_inns:
+                        rating_parts = [part for part in [row["rating"], row["forecast"], row["date"] if row["date"] else ""] if part]
+                        ratings_by_inn[inn] = "\n".join(rating_parts)
+                    pbar.update(1)
+
+        self.logger.info("NKR ratings matched by INN: %s", len(ratings_by_inn))
+        return ratings_by_inn
+
+
 def enrich_emitters(
     client: MoexClient,
     shares: pd.DataFrame,
@@ -712,6 +808,21 @@ def apply_acra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) -
     return result
 
 
+def apply_nkr_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) -> pd.DataFrame:
+    result = emitters.copy()
+
+    def rating_for_row(inn: Any) -> Any:
+        if pd.isna(inn):
+            return pd.NA
+        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        if not normalized:
+            return pd.NA
+        return ratings_by_inn.get(normalized, pd.NA)
+
+    result["НКР Рейтинг"] = result["INN"].map(rating_for_row)
+    return result
+
+
 def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
     for col_idx, column_name in enumerate(df.columns, start=1):
         values = df[column_name]
@@ -772,6 +883,7 @@ def run() -> None:
     client = MoexClient(logger)
     expert_ra_client = ExpertRaClient(logger)
     acra_client = AcraClient(logger)
+    nkr_client = NkrClient(logger)
     cache = load_cache(logger)
 
     shares = pd.DataFrame()
@@ -782,6 +894,7 @@ def run() -> None:
     moex_alive = health.get("moex", False)
     expert_ra_alive = health.get("expert_ra", False)
     acra_alive = health.get("acra", False)
+    nkr_alive = health.get("nkr", False)
 
     try:
         def fetch_shares_online() -> pd.DataFrame:
@@ -856,8 +969,9 @@ def run() -> None:
         emitters = build_emitters_table(shares, bonds) if not shares.empty or not bonds.empty else load_dataframe_snapshot(EMITTERS_CACHE_FILE, logger)
         inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
         expert_ra_ratings: dict[str, str] = {}
-        rating_executor = ThreadPoolExecutor(max_workers=1)
+        rating_executor = ThreadPoolExecutor(max_workers=2)
         acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if acra_alive else None
+        nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if nkr_alive else None
         if expert_ra_alive:
             try:
                 expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
@@ -896,14 +1010,37 @@ def run() -> None:
             acra_ratings = {k: str(v) for k, v in load_json_dict(ACRA_CACHE_FILE, logger).items()}
             if acra_ratings:
                 restored_sources.append("АКРА")
-        rating_executor.shutdown(wait=False)
-
         if not emitters.empty:
             emitters = apply_acra_ratings(emitters, acra_ratings)
             save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
         stage_times["Этап 5: Получение рейтингов АКРА"] = perf_counter() - stage_started_at
 
-        print("Этап 6: Формирование Excel")
+        print("Этап 6: Получение рейтингов НКР")
+        stage_started_at = perf_counter()
+        nkr_ratings: dict[str, str] = {}
+        if nkr_alive:
+            try:
+                nkr_ratings = nkr_future.result() if nkr_future is not None else nkr_client.fetch_latest_ratings_by_inn(inns)
+                save_json_dict(NKR_CACHE_FILE, nkr_ratings, logger)
+            except requests.RequestException as error:
+                logger.warning("NKR stage failed, trying cache: %s", error)
+                skipped_sources.append("НКР")
+                nkr_ratings = {k: str(v) for k, v in load_json_dict(NKR_CACHE_FILE, logger).items()}
+                if nkr_ratings:
+                    restored_sources.append("НКР")
+        else:
+            skipped_sources.append("НКР")
+            nkr_ratings = {k: str(v) for k, v in load_json_dict(NKR_CACHE_FILE, logger).items()}
+            if nkr_ratings:
+                restored_sources.append("НКР")
+        rating_executor.shutdown(wait=False)
+
+        if not emitters.empty:
+            emitters = apply_nkr_ratings(emitters, nkr_ratings)
+            save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
+        stage_times["Этап 6: Получение рейтингов НКР"] = perf_counter() - stage_started_at
+
+        print("Этап 7: Формирование Excel")
         stage_started_at = perf_counter()
         excel_exports = [(shares, SHARES_FILE), (bonds, BONDS_FILE), (emitters, EMITTERS_FILE)]
         def save_excel_item(item: tuple[pd.DataFrame, Path]) -> None:
@@ -916,7 +1053,7 @@ def run() -> None:
                 for future in as_completed(futures):
                     future.result()
                     pbar.update(1)
-        stage_times["Этап 6: Формирование Excel"] = perf_counter() - stage_started_at
+        stage_times["Этап 7: Формирование Excel"] = perf_counter() - stage_started_at
 
         print("=====\nГотово")
         logger.info("Script completed successfully")
