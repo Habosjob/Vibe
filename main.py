@@ -164,10 +164,11 @@ def load_dataframe_snapshot(path: Path, logger: logging.Logger) -> pd.DataFrame:
 
 
 class ProxyRotatingSession(requests.Session):
-    def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
+    def __init__(self, logger: logging.Logger, proxies: list[str], prefer_proxies: bool = False) -> None:
         super().__init__()
         self.logger = logger
         self.proxy_pool = proxies.copy()
+        self.prefer_proxies = prefer_proxies
         self._proxy_index = 0
         self._proxy_lock = threading.Lock()
         self._proxy_failures: dict[str, int] = {}
@@ -197,6 +198,9 @@ class ProxyRotatingSession(requests.Session):
                 self.proxy_pool.remove(proxy)
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        if not self.prefer_proxies or not self.proxy_pool:
+            return super().request(method, url, **kwargs)
+
         max_attempts = min(PROXY_MAX_ATTEMPTS, max(1, len(self.proxy_pool))) if self.proxy_pool else 0
         last_error: Exception | None = None
         base_timeout = kwargs.get("timeout", REQUEST_TIMEOUT)
@@ -1030,11 +1034,17 @@ def enrich_emitters(
     if "EMITTER_ID" not in bonds.columns:
         bonds["EMITTER_ID"] = pd.NA
 
+    shares_emitter_ids = pd.to_numeric(shares["EMITTER_ID"], errors="coerce")
+    bonds_emitter_ids = pd.to_numeric(bonds["EMITTER_ID"], errors="coerce")
+    shares["EMITTER_ID"] = shares_emitter_ids
+    bonds["EMITTER_ID"] = bonds_emitter_ids
+
     existing_pairs = pd.concat([shares[["SECID", "EMITTER_ID"]], bonds[["SECID", "EMITTER_ID"]]], ignore_index=True)
     cached_pairs = pd.DataFrame(
         [{"SECID": secid, "EMITTER_ID": emitter_id} for secid, emitter_id in cache.get("secid_to_emitter", {}).items()]
     )
     existing_pairs = pd.concat([existing_pairs, cached_pairs], ignore_index=True)
+    existing_pairs["EMITTER_ID"] = pd.to_numeric(existing_pairs["EMITTER_ID"], errors="coerce")
     existing_pairs = existing_pairs.dropna(subset=["EMITTER_ID"]).drop_duplicates(subset=["SECID"], keep="first")
     existing_secids = set(existing_pairs["SECID"].tolist())
 
@@ -1371,11 +1381,6 @@ def run() -> None:
     shares = pd.DataFrame()
     bonds = pd.DataFrame()
     emitters = pd.DataFrame()
-    moex_alive = True
-    expert_ra_alive = True
-    acra_alive = True
-    nkr_alive = True
-    nra_alive = True
 
     try:
         def fetch_shares_online() -> pd.DataFrame:
@@ -1395,21 +1400,14 @@ def run() -> None:
 
         bonds_future = None
         moex_prefetch_executor = ThreadPoolExecutor(max_workers=1)
-        if moex_alive:
-            bonds_future = moex_prefetch_executor.submit(fetch_bonds_online)
+        bonds_future = moex_prefetch_executor.submit(fetch_bonds_online)
 
         print("=====\nЭтап 1: Сбор акций")
         stage_started_at = perf_counter()
-        if moex_alive:
-            try:
-                shares = fetch_shares_online()
-            except requests.RequestException as error:
-                logger.warning("Shares stage failed, trying cache: %s", error)
-                skipped_sources.append("MOEX (акции)")
-                shares = load_dataframe_snapshot(SHARES_CACHE_FILE, logger)
-                if not shares.empty:
-                    restored_sources.append("MOEX (акции)")
-        else:
+        try:
+            shares = fetch_shares_online()
+        except requests.RequestException as error:
+            logger.warning("Shares stage failed, trying cache: %s", error)
             skipped_sources.append("MOEX (акции)")
             shares = load_dataframe_snapshot(SHARES_CACHE_FILE, logger)
             if not shares.empty:
@@ -1418,16 +1416,10 @@ def run() -> None:
 
         print("Этап 2: Сбор облигаций")
         stage_started_at = perf_counter()
-        if moex_alive:
-            try:
-                bonds = bonds_future.result() if bonds_future is not None else fetch_bonds_online()
-            except requests.RequestException as error:
-                logger.warning("Bonds stage failed, trying cache: %s", error)
-                skipped_sources.append("MOEX (облигации)")
-                bonds = load_dataframe_snapshot(BONDS_CACHE_FILE, logger)
-                if not bonds.empty:
-                    restored_sources.append("MOEX (облигации)")
-        else:
+        try:
+            bonds = bonds_future.result() if bonds_future is not None else fetch_bonds_online()
+        except requests.RequestException as error:
+            logger.warning("Bonds stage failed, trying cache: %s", error)
             skipped_sources.append("MOEX (облигации)")
             bonds = load_dataframe_snapshot(BONDS_CACHE_FILE, logger)
             if not bonds.empty:
@@ -1437,7 +1429,7 @@ def run() -> None:
 
         print("Этап 3: Обогащение эмитентов")
         stage_started_at = perf_counter()
-        if not shares.empty and not bonds.empty and moex_alive:
+        if not shares.empty and not bonds.empty:
             shares, bonds = enrich_emitters(client, shares, bonds, logger, cache)
             save_dataframe_snapshot(SHARES_CACHE_FILE, shares, logger)
             save_dataframe_snapshot(BONDS_CACHE_FILE, bonds, logger)
@@ -1458,28 +1450,22 @@ def run() -> None:
 
         expert_ra_ratings: dict[str, str] = {}
         rating_executor = ThreadPoolExecutor(max_workers=3)
-        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if (acra_alive and not acra_cached_today) else None
-        nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if (nkr_alive and not nkr_cached_today) else None
-        nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if (nra_alive and not nra_cached_today) else None
-        if expert_ra_alive:
-            if expert_ra_cached_today:
-                expert_ra_ratings = expert_ra_cached
-                restored_sources.append("Эксперт РА (дневной кэш)")
-            else:
-                try:
-                    expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
-                    save_daily_ratings_cache(EXPERT_RA_CACHE_FILE, expert_ra_ratings, logger)
-                except requests.RequestException as error:
-                    logger.warning("Expert RA stage failed, trying cache: %s", error)
-                    skipped_sources.append("Эксперт РА")
-                    expert_ra_ratings = expert_ra_cached
-                    if expert_ra_ratings:
-                        restored_sources.append("Эксперт РА")
-        else:
-            skipped_sources.append("Эксперт РА")
+        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if not acra_cached_today else None
+        nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if not nkr_cached_today else None
+        nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if not nra_cached_today else None
+        if expert_ra_cached_today:
             expert_ra_ratings = expert_ra_cached
-            if expert_ra_ratings:
-                restored_sources.append("Эксперт РА")
+            restored_sources.append("Эксперт РА (дневной кэш)")
+        else:
+            try:
+                expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
+                save_daily_ratings_cache(EXPERT_RA_CACHE_FILE, expert_ra_ratings, logger)
+            except requests.RequestException as error:
+                logger.warning("Expert RA stage failed, trying cache: %s", error)
+                skipped_sources.append("Эксперт РА")
+                expert_ra_ratings = expert_ra_cached
+                if expert_ra_ratings:
+                    restored_sources.append("Эксперт РА")
 
         if not emitters.empty:
             emitters = apply_expert_ra_ratings(emitters, expert_ra_ratings)
@@ -1492,7 +1478,7 @@ def run() -> None:
         if acra_cached_today:
             acra_ratings = acra_cached
             restored_sources.append("АКРА (дневной кэш)")
-        elif acra_alive:
+        else:
             try:
                 acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
                 save_daily_ratings_cache(ACRA_CACHE_FILE, acra_ratings, logger)
@@ -1502,11 +1488,6 @@ def run() -> None:
                 acra_ratings = acra_cached
                 if acra_ratings:
                     restored_sources.append("АКРА")
-        else:
-            skipped_sources.append("АКРА")
-            acra_ratings = acra_cached
-            if acra_ratings:
-                restored_sources.append("АКРА")
         if not emitters.empty:
             emitters = apply_acra_ratings(emitters, acra_ratings)
             save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
@@ -1519,7 +1500,7 @@ def run() -> None:
         if nkr_cached_today:
             nkr_ratings = nkr_cached
             restored_sources.append("НКР (дневной кэш)")
-        elif nkr_alive:
+        else:
             try:
                 nkr_ratings = nkr_future.result() if nkr_future is not None else nkr_client.fetch_latest_ratings_by_inn(inns)
                 save_daily_ratings_cache(NKR_CACHE_FILE, nkr_ratings, logger)
@@ -1529,11 +1510,6 @@ def run() -> None:
                 nkr_ratings = nkr_cached
                 if nkr_ratings:
                     restored_sources.append("НКР")
-        else:
-            skipped_sources.append("НКР")
-            nkr_ratings = nkr_cached
-            if nkr_ratings:
-                restored_sources.append("НКР")
         rating_executor.shutdown(wait=False)
 
         if not emitters.empty:
@@ -1548,7 +1524,7 @@ def run() -> None:
         if nra_cached_today:
             nra_ratings = nra_cached
             restored_sources.append("НРА (дневной кэш)")
-        elif nra_alive:
+        else:
             try:
                 nra_ratings = nra_future.result() if nra_future is not None else nra_client.fetch_latest_ratings_by_inn(inns)
                 save_daily_ratings_cache(NRA_CACHE_FILE, nra_ratings, logger)
@@ -1558,11 +1534,6 @@ def run() -> None:
                 nra_ratings = nra_cached
                 if nra_ratings:
                     restored_sources.append("НРА")
-        else:
-            skipped_sources.append("НРА")
-            nra_ratings = nra_cached
-            if nra_ratings:
-                restored_sources.append("НРА")
 
         if not emitters.empty:
             emitters = apply_nra_ratings(emitters, nra_ratings)
