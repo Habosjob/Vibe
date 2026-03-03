@@ -14,6 +14,7 @@ from typing import Any
 
 import pandas as pd
 import requests
+import urllib3
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -41,6 +42,7 @@ THIN_BORDER = Border(
     bottom=Side(style="thin", color="000000"),
 )
 CENTERED_WRAP_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def progress(total: int, desc: str, unit: str):
@@ -294,18 +296,42 @@ class AcraClient:
         return f"{int(day):02d}.{month}.{year}"
 
     def _get_page_text(self, path: str, params: dict[str, Any] | None = None) -> str:
+        request_params = params or {}
         url = f"{ACRA_BASE_URL}{path}"
+        errors: list[str] = []
+
         try:
-            response = self.session.get(url, params=params or {}, timeout=REQUEST_TIMEOUT)
+            response = self.session.get(url, params=request_params, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
-            self.logger.info("GET ACRA %s params=%s status=%s", url, params, response.status_code)
+            self.logger.info("GET ACRA %s params=%s status=%s", url, request_params, response.status_code)
             return response.text
         except requests.RequestException as error:
-            self.logger.warning("ACRA direct request failed, fallback to jina proxy: %s", error)
-            proxy_response = self.session.get(f"{ACRA_PROXY_BASE_URL}{path}", params=params or {}, timeout=REQUEST_TIMEOUT * 2)
+            errors.append(f"direct-verify-on: {error}")
+            self.logger.warning("ACRA direct request failed with certificate verification: %s", error)
+
+        try:
+            response = self.session.get(url, params=request_params, timeout=REQUEST_TIMEOUT, verify=False)
+            response.raise_for_status()
+            self.logger.warning("GET ACRA without SSL verification %s params=%s status=%s", url, request_params, response.status_code)
+            return response.text
+        except requests.RequestException as error:
+            errors.append(f"direct-verify-off: {error}")
+            self.logger.warning("ACRA direct request without certificate verification failed: %s", error)
+
+        try:
+            proxy_response = self.session.get(
+                f"{ACRA_PROXY_BASE_URL}{path}",
+                params=request_params,
+                timeout=REQUEST_TIMEOUT * 2,
+            )
             proxy_response.raise_for_status()
-            self.logger.info("GET ACRA proxy %s params=%s status=%s", path, params, proxy_response.status_code)
+            self.logger.info("GET ACRA proxy %s params=%s status=%s", path, request_params, proxy_response.status_code)
             return proxy_response.text
+        except requests.RequestException as error:
+            errors.append(f"proxy: {error}")
+            self.logger.warning("ACRA proxy request failed: %s", error)
+
+        raise requests.RequestException("; ".join(errors))
 
     def _extract_issuer_links(self, text: str) -> list[str]:
         matches = re.findall(r"/ratings/issuers/(\d+)/", text)
@@ -374,14 +400,25 @@ class AcraClient:
         if not normalized_inns:
             return {}
 
-        first_page = self._get_page_text("/ratings/issuers/", params={"page": 1})
+        try:
+            first_page = self._get_page_text("/ratings/issuers/", params={"page": 1})
+        except requests.RequestException as error:
+            self.logger.warning("ACRA parsing skipped: cannot load issuer list: %s", error)
+            return {}
+
         total_issuers = self._extract_total_issuers(first_page)
         total_pages = max(1, math.ceil(total_issuers / 10)) if total_issuers else 100
 
         issuer_links = set(self._extract_issuer_links(first_page))
         with progress(total=max(total_pages - 1, 0), desc="Сканирование страниц АКРА", unit="страница") as pbar:
             for page in range(2, total_pages + 1):
-                page_text = self._get_page_text("/ratings/issuers/", params={"page": page})
+                try:
+                    page_text = self._get_page_text("/ratings/issuers/", params={"page": page})
+                except requests.RequestException as error:
+                    self.logger.warning("ACRA page skipped page=%s: %s", page, error)
+                    pbar.update(1)
+                    continue
+
                 page_links = self._extract_issuer_links(page_text)
                 if not page_links and not total_issuers:
                     pbar.update(total_pages - page + 1)
