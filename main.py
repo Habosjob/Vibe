@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import signal
+import sqlite3
 import threading
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,6 +38,8 @@ LOG_FILE = LOGS_DIR / "main.log"
 SHARES_FILE = EXPORT_DIR / "moex_shares.xlsx"
 BONDS_FILE = EXPORT_DIR / "moex_bonds.xlsx"
 EMITTERS_FILE = EXPORT_DIR / "moex_emitters.xlsx"
+GREEN_BONDS_FILE = EXPORT_DIR / "GreenBonds.xlsx"
+SQLITE_FILE = OUTPUT_DIR / "vibe_data.sqlite"
 REQUEST_TIMEOUT = 30
 MAX_WORKERS = 64
 PROXY_SOURCE_TIMEOUT = 6
@@ -49,11 +52,12 @@ PROXY_VALIDATION_TIME_BUDGET = 8
 ACRA_PAGE_WORKERS = 24
 ACRA_ISSUER_WORKERS = 64
 PROXYLIST_FILE = OUTPUT_DIR / "proxylist.csv"
-USE_CACHE = False
+USE_CACHE = True
 CACHE_FILE = CACHE_DIR / "emitter_cache.json"
 SHARES_CACHE_FILE = CACHE_DIR / "shares_snapshot.json"
 BONDS_CACHE_FILE = CACHE_DIR / "bonds_snapshot.json"
 EMITTERS_CACHE_FILE = CACHE_DIR / "emitters_snapshot.json"
+GREEN_BONDS_CACHE_FILE = CACHE_DIR / "green_bonds_snapshot.json"
 EXPERT_RA_CACHE_FILE = CACHE_DIR / "expert_ra_ratings.json"
 ACRA_CACHE_FILE = CACHE_DIR / "acra_ratings.json"
 NKR_CACHE_FILE = CACHE_DIR / "nkr_ratings.json"
@@ -116,6 +120,62 @@ def progress(total: int, desc: str, unit: str):
 def ensure_project_dirs() -> None:
     for directory in [LOGS_DIR, CACHE_DIR, EXPORT_DIR, OUTPUT_DIR / "docs"]:
         directory.mkdir(parents=True, exist_ok=True)
+
+
+def open_sqlite_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(SQLITE_FILE)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+
+def _serialize_sql_value(value: Any) -> Any:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return pd.Timestamp(value).isoformat()
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def upsert_dataframe_sqlite(
+    conn: sqlite3.Connection,
+    table_name: str,
+    frame: pd.DataFrame,
+    key_columns: list[str],
+    logger: logging.Logger,
+) -> None:
+    if frame.empty:
+        logger.info("SQLite upsert skipped table=%s (empty frame)", table_name)
+        return
+
+    columns = list(frame.columns)
+    quoted_columns = ", ".join(f'"{column}" TEXT' for column in columns)
+    pk = ", ".join(f'"{column}"' for column in key_columns)
+    conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({quoted_columns}, "updated_at" TEXT, PRIMARY KEY ({pk}))')
+
+    insert_columns = columns + ["updated_at"]
+    insert_column_clause = ", ".join([f'"{col}"' for col in insert_columns])
+    placeholders = ", ".join(["?" for _ in insert_columns])
+    conflict_clause = ", ".join([f'"{col}"' for col in key_columns])
+    update_clause = ", ".join([f'"{col}"=excluded."{col}"' for col in columns if col not in key_columns] + ['"updated_at"=excluded."updated_at"'])
+    insert_sql = (
+        f'INSERT INTO "{table_name}" ({insert_column_clause}) '
+        f'VALUES ({placeholders}) '
+        f'ON CONFLICT({conflict_clause}) DO UPDATE SET {update_clause}'
+    )
+
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    records = []
+    for row in frame.to_dict(orient="records"):
+        values = [_serialize_sql_value(row.get(column)) for column in columns]
+        values.append(timestamp)
+        records.append(values)
+
+    conn.executemany(insert_sql, records)
+    conn.commit()
+    logger.info("SQLite upsert done table=%s rows=%s", table_name, len(records))
 
 
 def load_json_dict(path: Path, logger: logging.Logger) -> dict[str, Any]:
@@ -458,6 +518,42 @@ class MoexClient:
         if not row:
             return {"EMITTER_ID": emitter_id, "EMITTER_NAME": None, "INN": None}
         return {"EMITTER_ID": int(row[0][0]), "EMITTER_NAME": row[0][1], "INN": row[0][2]}
+
+    def fetch_security_description(self, secid: str) -> dict[str, Any]:
+        data = self._get(f"/securities/{secid}.json", params={"iss.meta": "off", "iss.only": "description"})
+        rows = data.get("description", {}).get("data", [])
+        description: dict[str, Any] = {}
+        for row in rows:
+            if len(row) >= 3:
+                description[str(row[0]).upper()] = row[2]
+        return description
+
+    def fetch_security_market_snapshot(self, secid: str) -> dict[str, Any]:
+        data = self._get(
+            "/engines/stock/markets/bonds/securities/{secid}.json".format(secid=secid),
+            params={"iss.meta": "off", "iss.only": "securities,marketdata"},
+        )
+        result: dict[str, Any] = {}
+        for block_name in ["securities", "marketdata"]:
+            block = data.get(block_name, {})
+            cols = block.get("columns", [])
+            rows = block.get("data", [])
+            if rows:
+                for idx, col in enumerate(cols):
+                    result[col.upper()] = rows[0][idx] if idx < len(rows[0]) else None
+        return result
+
+    def fetch_bondization(self, secid: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+        data = self._get(
+            f"/statistics/engines/stock/markets/bonds/bondization/{secid}.json",
+            params={"iss.meta": "off", "iss.only": "coupons,amortizations"},
+        )
+        coupons = pd.DataFrame(data.get("coupons", {}).get("data", []), columns=data.get("coupons", {}).get("columns", []))
+        amortizations = pd.DataFrame(
+            data.get("amortizations", {}).get("data", []),
+            columns=data.get("amortizations", {}).get("columns", []),
+        )
+        return coupons, amortizations
 
 
 class ExpertRaClient:
@@ -1306,6 +1402,76 @@ def apply_nra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) ->
     return result
 
 
+def collect_green_bonds(client: MoexClient, emitters: pd.DataFrame, bonds: pd.DataFrame, logger: logging.Logger) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if emitters.empty or bonds.empty or "ScoreList" not in emitters.columns:
+        return pd.DataFrame(), pd.DataFrame()
+
+    green_emitters = emitters[emitters["ScoreList"].fillna("").str.lower() == "green"].copy()
+    if green_emitters.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    green_emitter_ids = set(pd.to_numeric(green_emitters["EMITTER_ID"], errors="coerce").dropna().astype("int64").tolist())
+    scoped_bonds = bonds[pd.to_numeric(bonds["EMITTER_ID"], errors="coerce").fillna(-1).astype("int64").isin(green_emitter_ids)].copy()
+
+    records: list[dict[str, Any]] = []
+    payment_records: list[dict[str, Any]] = []
+
+    with progress(total=len(scoped_bonds), desc="Green bonds", unit="бумага") as pbar:
+        for _, row in scoped_bonds.iterrows():
+            secid = row.get("SECID")
+            try:
+                description = client.fetch_security_description(str(secid))
+                market = client.fetch_security_market_snapshot(str(secid))
+                coupons, amortizations = client.fetch_bondization(str(secid))
+            except Exception as error:
+                logger.exception("Green bond details failed secid=%s: %s", secid, error)
+                pbar.update(1)
+                continue
+
+            amort_startdate = None
+            if not amortizations.empty and "amortdate" in amortizations.columns:
+                amortizations["amortdate"] = pd.to_datetime(amortizations["amortdate"], errors="coerce")
+                value_col = "valueprc" if "valueprc" in amortizations.columns else ("value" if "value" in amortizations.columns else None)
+                if value_col:
+                    non_zero = amortizations[pd.to_numeric(amortizations[value_col], errors="coerce").fillna(0) > 0]
+                    if not non_zero.empty:
+                        amort_startdate = non_zero["amortdate"].min()
+
+            if not coupons.empty:
+                coupons = coupons.copy()
+                coupons["SECID"] = secid
+                payment_records.extend(coupons.where(pd.notna(coupons), None).to_dict(orient="records"))
+
+            record = {
+                "SECID": secid,
+                "ISIN": row.get("ISIN"),
+                "SHORTNAME": row.get("SHORTNAME"),
+                "EMITTER_ID": row.get("EMITTER_ID"),
+                "EMITTER_NAME": row.get("EMITTER_NAME"),
+                "INN": row.get("INN"),
+                "MATDATE": row.get("MATDATE"),
+                "offerdate": description.get("OFFERDATE") or description.get("BUYBACKDATE"),
+                "maturity_date": description.get("MATDATE") or description.get("REPAYDATE"),
+                "is_qualified_investors": description.get("ISQUALIFIEDINVESTORS") or description.get("QUALIFIEDINVESTOR"),
+                "coupon_percent": description.get("COUPONPERCENT") or market.get("COUPONPERCENT"),
+                "coupon_value": description.get("COUPONVALUE") or market.get("COUPONVALUE"),
+                "yield": market.get("YIELD") or market.get("YIELDATWAP"),
+                "accrued_coupon_income": market.get("ACCRUEDINT") or market.get("ACCRUEDINTVALUE"),
+                "last_price": market.get("LAST") or market.get("LASTVALUE"),
+                "close_price": market.get("CLOSE") or market.get("LCLOSE") or market.get("LEGALCLOSEPRICE"),
+                "market_price": market.get("MARKETPRICE"),
+                "amort_startdate": amort_startdate.date().isoformat() if pd.notna(amort_startdate) else None,
+                "coupons_json": coupons.where(pd.notna(coupons), None).to_dict(orient="records"),
+                "amortizations_json": amortizations.where(pd.notna(amortizations), None).to_dict(orient="records"),
+                "description_json": description,
+                "market_json": market,
+            }
+            records.append(record)
+            pbar.update(1)
+
+    return pd.DataFrame(records), pd.DataFrame(payment_records)
+
+
 def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
     for col_idx, column_name in enumerate(df.columns, start=1):
         values = df[column_name]
@@ -1395,6 +1561,9 @@ def run() -> None:
     shares = pd.DataFrame()
     bonds = pd.DataFrame()
     emitters = pd.DataFrame()
+    green_bonds = pd.DataFrame()
+    green_payments = pd.DataFrame()
+    sqlite_conn = open_sqlite_connection()
 
     try:
         def fetch_shares_online() -> pd.DataFrame:
@@ -1556,9 +1725,28 @@ def run() -> None:
         logger.info("NRA coverage: %s/%s", len(nra_ratings), len(inns))
         stage_times["Этап 7: Получение рейтингов НРА"] = perf_counter() - stage_started_at
 
-        print("Этап 8: Формирование Excel")
+        print("Этап 8: Обновление SQLite (инкремент)")
         stage_started_at = perf_counter()
-        excel_exports = [(shares, SHARES_FILE), (bonds, BONDS_FILE), (emitters, EMITTERS_FILE)]
+        upsert_dataframe_sqlite(sqlite_conn, "moex_shares", shares, ["SECID"], logger)
+        upsert_dataframe_sqlite(sqlite_conn, "moex_bonds", bonds, ["SECID"], logger)
+        upsert_dataframe_sqlite(sqlite_conn, "moex_emitters", emitters, ["EMITTER_ID"], logger)
+        stage_times["Этап 8: Обновление SQLite (инкремент)"] = perf_counter() - stage_started_at
+
+        print("Этап 9: Green bonds (ScoreList=Green)")
+        stage_started_at = perf_counter()
+        green_bonds, green_payments = collect_green_bonds(client, emitters, bonds, logger)
+        upsert_dataframe_sqlite(sqlite_conn, "green_bonds", green_bonds, ["SECID"], logger)
+        if not green_payments.empty:
+            if "SECID" not in green_payments.columns:
+                green_payments["SECID"] = pd.NA
+            if "coupondate" not in green_payments.columns:
+                green_payments["coupondate"] = pd.NA
+            upsert_dataframe_sqlite(sqlite_conn, "green_bond_payments", green_payments, ["SECID", "coupondate"], logger)
+        stage_times["Этап 9: Green bonds (ScoreList=Green)"] = perf_counter() - stage_started_at
+
+        print("Этап 10: Формирование Excel")
+        stage_started_at = perf_counter()
+        excel_exports = [(emitters, EMITTERS_FILE), (green_bonds, GREEN_BONDS_FILE)]
         def save_excel_item(item: tuple[pd.DataFrame, Path]) -> None:
             frame, output_path = item
             save_to_excel(frame, output_path, logger)
@@ -1569,7 +1757,7 @@ def run() -> None:
                 for future in as_completed(futures):
                     future.result()
                     pbar.update(1)
-        stage_times["Этап 8: Формирование Excel"] = perf_counter() - stage_started_at
+        stage_times["Этап 10: Формирование Excel"] = perf_counter() - stage_started_at
 
         print("=====\nГотово")
         logger.info("Script completed successfully")
@@ -1581,6 +1769,7 @@ def run() -> None:
         raise
     finally:
         save_cache(cache, logger)
+        sqlite_conn.close()
         logger.info("Script finished. interrupted=%s", interrupted["value"])
 
         total_time = perf_counter() - script_started_at
