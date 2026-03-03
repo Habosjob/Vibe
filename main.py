@@ -39,8 +39,13 @@ BONDS_FILE = EXPORT_DIR / "moex_bonds.xlsx"
 EMITTERS_FILE = EXPORT_DIR / "moex_emitters.xlsx"
 REQUEST_TIMEOUT = 30
 MAX_WORKERS = 24
-PROXY_VALIDATION_TIMEOUT = 6
-PROXY_VALIDATION_WORKERS = 128
+PROXY_SOURCE_TIMEOUT = 12
+PROXY_VALIDATION_TIMEOUT = 3
+PROXY_VALIDATION_WORKERS = 256
+PROXY_VALIDATION_TARGET = 200
+PROXY_CANDIDATE_LIMIT = 1200
+PROXY_REQUEST_TIMEOUT = 8
+PROXY_MAX_ATTEMPTS = 6
 PROXYLIST_FILE = OUTPUT_DIR / "proxylist.csv"
 USE_CACHE = False
 CACHE_FILE = CACHE_DIR / "emitter_cache.json"
@@ -160,36 +165,59 @@ class ProxyRotatingSession(requests.Session):
     def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
         super().__init__()
         self.logger = logger
-        self.proxy_pool = proxies
+        self.proxy_pool = proxies.copy()
         self._proxy_index = 0
         self._proxy_lock = threading.Lock()
+        self._proxy_failures: dict[str, int] = {}
         self.trust_env = False
 
     def _next_proxy(self) -> str | None:
-        if not self.proxy_pool:
-            return None
         with self._proxy_lock:
-            proxy = self.proxy_pool[self._proxy_index % len(self.proxy_pool)]
-            self._proxy_index += 1
-        return proxy
+            if not self.proxy_pool:
+                return None
+            pool_size = len(self.proxy_pool)
+            for _ in range(pool_size):
+                proxy = self.proxy_pool[self._proxy_index % pool_size]
+                self._proxy_index += 1
+                if self._proxy_failures.get(proxy, 0) < 2:
+                    return proxy
+            return self.proxy_pool[self._proxy_index % pool_size]
+
+    def _mark_failed(self, proxy: str | None) -> None:
+        if not proxy:
+            return
+        with self._proxy_lock:
+            self._proxy_failures[proxy] = self._proxy_failures.get(proxy, 0) + 1
+            if self._proxy_failures[proxy] >= 3 and proxy in self.proxy_pool and len(self.proxy_pool) > 10:
+                self.proxy_pool.remove(proxy)
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
-        max_attempts = min(max(4, len(self.proxy_pool)), 16) if self.proxy_pool else 1
+        max_attempts = min(PROXY_MAX_ATTEMPTS, max(1, len(self.proxy_pool))) if self.proxy_pool else 1
         last_error: Exception | None = None
+        base_timeout = kwargs.get("timeout", REQUEST_TIMEOUT)
 
         for _ in range(max_attempts):
             request_kwargs = dict(kwargs)
             proxy = self._next_proxy()
             if proxy:
                 request_kwargs["proxies"] = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+                request_kwargs["timeout"] = min(base_timeout, PROXY_REQUEST_TIMEOUT)
             try:
                 return super().request(method, url, **request_kwargs)
             except requests.RequestException as error:
                 last_error = error
+                self._mark_failed(proxy)
                 if proxy:
                     self.logger.warning("Proxy request failed proxy=%s url=%s error=%s", proxy, url, error)
                 else:
                     self.logger.warning("Direct request failed url=%s error=%s", url, error)
+
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("proxies", None)
+        try:
+            return super().request(method, url, **fallback_kwargs)
+        except requests.RequestException as error:
+            last_error = error
 
         if last_error:
             raise last_error
@@ -199,10 +227,13 @@ class ProxyRotatingSession(requests.Session):
 def _extract_proxies_from_text(text: str) -> set[str]:
     proxy_regex = re.compile(r"\b((?:\d{1,3}\.){3}\d{1,3}):(\d{2,5})\b")
     result: set[str] = set()
-    for ip_port, port in proxy_regex.findall(text):
+    for ip, port in proxy_regex.findall(text):
+        octets = ip.split(".")
+        if len(octets) != 4 or any(int(octet) > 255 for octet in octets):
+            continue
         port_num = int(port)
         if 1 <= port_num <= 65535:
-            result.add(ip_port)
+            result.add(f"{ip}:{port_num}")
     return result
 
 
@@ -212,7 +243,7 @@ def fetch_proxy_candidates(logger: logging.Logger) -> list[str]:
     collected: set[str] = set()
 
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(PROXY_SOURCES))) as executor:
-        futures = {executor.submit(session.get, url, timeout=REQUEST_TIMEOUT): url for url in PROXY_SOURCES}
+        futures = {executor.submit(session.get, url, timeout=PROXY_SOURCE_TIMEOUT): url for url in PROXY_SOURCES}
         with progress(total=len(futures), desc="Сбор прокси", unit="источник") as pbar:
             for future in as_completed(futures):
                 url = futures[future]
@@ -227,6 +258,8 @@ def fetch_proxy_candidates(logger: logging.Logger) -> list[str]:
                 pbar.update(1)
 
     proxies = sorted(collected)
+    if len(proxies) > PROXY_CANDIDATE_LIMIT:
+        proxies = proxies[:PROXY_CANDIDATE_LIMIT]
     logger.info("Proxy candidates collected: %s", len(proxies))
     return proxies
 
@@ -249,16 +282,22 @@ def validate_proxies(proxies: list[str], logger: logging.Logger) -> list[str]:
 
     valid: list[str] = []
     with ThreadPoolExecutor(max_workers=PROXY_VALIDATION_WORKERS) as executor:
-        futures = {executor.submit(check_proxy, proxy): proxy for proxy in proxies}
+        futures = [executor.submit(check_proxy, proxy) for proxy in proxies]
         with progress(total=len(futures), desc="Проверка прокси", unit="прокси") as pbar:
             for future in as_completed(futures):
                 resolved = future.result()
                 if resolved:
                     valid.append(resolved)
+                    if len(valid) >= PROXY_VALIDATION_TARGET:
+                        for pending in futures:
+                            pending.cancel()
+                        pbar.n = len(futures)
+                        pbar.refresh()
+                        break
                 pbar.update(1)
 
     logger.info("Proxy validated: total=%s valid=%s", len(proxies), len(valid))
-    return sorted(valid)
+    return sorted(set(valid))
 
 
 def save_valid_proxies_csv(proxies: list[str], logger: logging.Logger) -> None:
