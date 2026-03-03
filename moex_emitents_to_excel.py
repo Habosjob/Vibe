@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -15,7 +15,7 @@ BASE_URL = "https://iss.moex.com/iss"
 PAGE_LIMIT = 500
 TIMEOUT = 30
 MAX_WORKERS = 10
-OUTPUT_FILE = f"moex_emitents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+OUTPUT_FILE = Path("moex_emitents.xlsx")  # Перезаписываемый файл по требованию.
 
 
 def _build_session() -> requests.Session:
@@ -107,6 +107,30 @@ def fetch_paginated_block(
     return records
 
 
+def is_russian_moex_emitent(row: dict[str, Any]) -> bool:
+    """
+    Фильтрация под задачу:
+    - только реально торгующиеся инструменты MOEX (`is_traded == 1`),
+    - только эмитенты с российским ИНН (10 цифр),
+    - должен быть emitent_id.
+    """
+    if row.get("is_traded") != 1:
+        return False
+
+    if row.get("emitent_id") is None:
+        return False
+
+    inn_raw = row.get("emitent_inn")
+    if inn_raw is None:
+        return False
+
+    inn = "".join(ch for ch in str(inn_raw) if ch.isdigit())
+    if len(inn) != 10:
+        return False
+
+    return True
+
+
 def fetch_emitent_related_blocks(session: requests.Session, emitent_id: int) -> dict[str, list[dict[str, Any]]]:
     block_records: dict[str, list[dict[str, Any]]] = defaultdict(list)
     start = 0
@@ -159,7 +183,7 @@ def _fetch_one_emitent(emitent_id: int) -> dict[str, list[dict[str, Any]]]:
         worker_session.close()
 
 
-def save_to_excel(file_name: str, sheets: dict[str, pd.DataFrame]) -> None:
+def save_to_excel(file_name: Path, sheets: dict[str, pd.DataFrame]) -> None:
     with pd.ExcelWriter(file_name, engine="openpyxl") as writer:
         for sheet_name, df in sheets.items():
             if df.empty:
@@ -176,16 +200,19 @@ def main() -> None:
         if securities_df.empty:
             raise RuntimeError("MOEX ISS вернул пустой список securities.")
 
-        print("Шаг 2/4: Формируем список эмитентов...")
+        print("Шаг 2/4: Оставляем только РФ эмитентов, торгующихся на MOEX...")
+        filtered_df = securities_df[securities_df.apply(is_russian_moex_emitent, axis=1)].copy()
+
         emitents_df = (
-            securities_df.dropna(subset=["emitent_id"])
-            .drop_duplicates(subset=["emitent_id"])
+            filtered_df.drop_duplicates(subset=["emitent_id"])
             .sort_values(by="emitent_id")
             .reset_index(drop=True)
         )
         emitent_ids = emitents_df["emitent_id"].astype(int).tolist()
 
-        print(f"Найдено эмитентов: {len(emitent_ids)}")
+        print(f"Всего бумаг: {len(securities_df)}")
+        print(f"РФ торгуемых бумаг: {len(filtered_df)}")
+        print(f"РФ эмитентов для выгрузки: {len(emitent_ids)}")
         print(f"Шаг 3/4: Собираем дополнительные данные по эмитентам (потоки: {MAX_WORKERS})...")
 
         emitent_blocks: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -203,17 +230,18 @@ def main() -> None:
                 for block_name, rows in blocks.items():
                     emitent_blocks[f"emitent_{block_name}"].extend(rows)
 
-        print("Шаг 4/4: Сохраняем результат в Excel...")
+        print("Шаг 4/4: Сохраняем результат в Excel (с перезаписью)...")
         sheets: dict[str, pd.DataFrame] = {
             "securities_all": securities_df,
-            "emitents": emitents_df,
+            "securities_ru_traded": filtered_df,
+            "emitents_ru": emitents_df,
         }
         for block_name, rows in emitent_blocks.items():
             if rows:
                 sheets[block_name] = pd.DataFrame(rows)
 
         save_to_excel(OUTPUT_FILE, sheets)
-        print(f"Готово. Файл: {OUTPUT_FILE}")
+        print(f"Готово. Файл обновлен: {OUTPUT_FILE.resolve()}")
     finally:
         session.close()
 
