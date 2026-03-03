@@ -1,17 +1,35 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
 from tqdm import tqdm
+from urllib3.util.retry import Retry
 
 BASE_URL = "https://iss.moex.com/iss"
-PAGE_LIMIT = 100
+PAGE_LIMIT = 500
 TIMEOUT = 30
+MAX_WORKERS = 10
 OUTPUT_FILE = f"moex_emitents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+
+def _build_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=4,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=MAX_WORKERS * 2, pool_maxsize=MAX_WORKERS * 2)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
 def _get_block(payload: dict[str, Any], block_name: str) -> list[dict[str, Any]]:
@@ -60,25 +78,31 @@ def fetch_paginated_block(
 
     effective_limit = int(params.get("limit", PAGE_LIMIT))
 
-    while True:
-        params["start"] = start
-        payload = _fetch_json(session, path, params)
-        chunk = _get_block(payload, block_name)
-        records.extend(chunk)
+    with tqdm(desc=f"Загрузка {block_name}", unit="строк", leave=False) as progress:
+        while True:
+            params["start"] = start
+            payload = _fetch_json(session, path, params)
+            chunk = _get_block(payload, block_name)
+            records.extend(chunk)
+            progress.update(len(chunk))
 
-        cursor = _extract_cursor(payload, block_name)
-        if cursor:
-            total = int(cursor.get("TOTAL", 0) or cursor.get("total", 0) or 0)
-            pagesize = int(cursor.get("PAGESIZE", 0) or cursor.get("pagesize", 0) or effective_limit)
-            start += pagesize
-            if start >= total:
+            cursor = _extract_cursor(payload, block_name)
+            if cursor:
+                total = int(cursor.get("TOTAL", 0) or cursor.get("total", 0) or 0)
+                pagesize = int(cursor.get("PAGESIZE", 0) or cursor.get("pagesize", 0) or effective_limit)
+                if total and progress.total != total:
+                    progress.total = total
+                    progress.refresh()
+
+                start += pagesize
+                if start >= total:
+                    break
+                continue
+
+            if len(chunk) < effective_limit:
                 break
-            continue
 
-        if len(chunk) < effective_limit:
-            break
-
-        start += effective_limit
+            start += effective_limit
 
     return records
 
@@ -127,6 +151,14 @@ def fetch_emitent_related_blocks(session: requests.Session, emitent_id: int) -> 
     return block_records
 
 
+def _fetch_one_emitent(emitent_id: int) -> dict[str, list[dict[str, Any]]]:
+    worker_session = _build_session()
+    try:
+        return fetch_emitent_related_blocks(worker_session, emitent_id)
+    finally:
+        worker_session.close()
+
+
 def save_to_excel(file_name: str, sheets: dict[str, pd.DataFrame]) -> None:
     with pd.ExcelWriter(file_name, engine="openpyxl") as writer:
         for sheet_name, df in sheets.items():
@@ -136,43 +168,54 @@ def save_to_excel(file_name: str, sheets: dict[str, pd.DataFrame]) -> None:
 
 
 def main() -> None:
-    session = requests.Session()
+    session = _build_session()
+    try:
+        print("Шаг 1/4: Загружаем общий список бумаг MOEX...")
+        securities = fetch_paginated_block(session, "securities.json", "securities")
+        securities_df = pd.DataFrame(securities)
+        if securities_df.empty:
+            raise RuntimeError("MOEX ISS вернул пустой список securities.")
 
-    print("Шаг 1/4: Загружаем общий список бумаг MOEX...")
-    securities = fetch_paginated_block(session, "securities.json", "securities")
-    securities_df = pd.DataFrame(securities)
-    if securities_df.empty:
-        raise RuntimeError("MOEX ISS вернул пустой список securities.")
+        print("Шаг 2/4: Формируем список эмитентов...")
+        emitents_df = (
+            securities_df.dropna(subset=["emitent_id"])
+            .drop_duplicates(subset=["emitent_id"])
+            .sort_values(by="emitent_id")
+            .reset_index(drop=True)
+        )
+        emitent_ids = emitents_df["emitent_id"].astype(int).tolist()
 
-    print("Шаг 2/4: Формируем список эмитентов...")
-    emitents_df = (
-        securities_df.dropna(subset=["emitent_id"])
-        .drop_duplicates(subset=["emitent_id"])
-        .sort_values(by="emitent_id")
-        .reset_index(drop=True)
-    )
-    emitent_ids = emitents_df["emitent_id"].astype(int).tolist()
+        print(f"Найдено эмитентов: {len(emitent_ids)}")
+        print(f"Шаг 3/4: Собираем дополнительные данные по эмитентам (потоки: {MAX_WORKERS})...")
 
-    print(f"Найдено эмитентов: {len(emitent_ids)}")
-    print("Шаг 3/4: Собираем дополнительные данные по эмитентам...")
+        emitent_blocks: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(_fetch_one_emitent, emitent_id): emitent_id for emitent_id in emitent_ids}
 
-    emitent_blocks: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for emitent_id in tqdm(emitent_ids, desc="Эмитенты", unit="эмитент"):
-        blocks = fetch_emitent_related_blocks(session, emitent_id)
-        for block_name, rows in blocks.items():
-            emitent_blocks[f"emitent_{block_name}"].extend(rows)
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Эмитенты", unit="эмитент"):
+                emitent_id = futures[future]
+                try:
+                    blocks = future.result()
+                except Exception as exc:
+                    print(f"⚠️ Ошибка по эмитенту {emitent_id}: {exc}")
+                    continue
 
-    print("Шаг 4/4: Сохраняем результат в Excel...")
-    sheets: dict[str, pd.DataFrame] = {
-        "securities_all": securities_df,
-        "emitents": emitents_df,
-    }
-    for block_name, rows in emitent_blocks.items():
-        if rows:
-            sheets[block_name] = pd.DataFrame(rows)
+                for block_name, rows in blocks.items():
+                    emitent_blocks[f"emitent_{block_name}"].extend(rows)
 
-    save_to_excel(OUTPUT_FILE, sheets)
-    print(f"Готово. Файл: {OUTPUT_FILE}")
+        print("Шаг 4/4: Сохраняем результат в Excel...")
+        sheets: dict[str, pd.DataFrame] = {
+            "securities_all": securities_df,
+            "emitents": emitents_df,
+        }
+        for block_name, rows in emitent_blocks.items():
+            if rows:
+                sheets[block_name] = pd.DataFrame(rows)
+
+        save_to_excel(OUTPUT_FILE, sheets)
+        print(f"Готово. Файл: {OUTPUT_FILE}")
+    finally:
+        session.close()
 
 
 if __name__ == "__main__":
