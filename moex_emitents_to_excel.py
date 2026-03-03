@@ -15,7 +15,10 @@ BASE_URL = "https://iss.moex.com/iss"
 PAGE_LIMIT = 500
 TIMEOUT = 30
 MAX_WORKERS = 10
-OUTPUT_FILE = Path("moex_emitents.xlsx")  # Перезаписываемый файл по требованию.
+
+STOCKS_FILE = Path("moex_stocks_ru.xlsx")
+BONDS_FILE = Path("moex_bonds_ru.xlsx")
+EMITENTS_FILE = Path("moex_emitents_ru.xlsx")
 
 
 def _build_session() -> requests.Session:
@@ -64,24 +67,18 @@ def _fetch_json(session: requests.Session, path: str, params: dict[str, Any]) ->
     return response.json()
 
 
-def fetch_paginated_block(
-    session: requests.Session,
-    path: str,
-    block_name: str,
-    extra_params: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+def fetch_paginated_block(session: requests.Session, path: str, block_name: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     start = 0
-    params: dict[str, Any] = {"iss.meta": "off", "limit": PAGE_LIMIT}
-    if extra_params:
-        params.update(extra_params)
+    prev_signature: tuple[Any, Any, int] | None = None
 
-    effective_limit = int(params.get("limit", PAGE_LIMIT))
-
-    with tqdm(desc=f"Загрузка {block_name}", unit="строк", leave=False) as progress:
+    with tqdm(desc=f"Загрузка {block_name} ({path})", unit="строк", leave=False) as progress:
         while True:
-            params["start"] = start
-            payload = _fetch_json(session, path, params)
+            payload = _fetch_json(
+                session,
+                path,
+                {"iss.meta": "off", "limit": PAGE_LIMIT, "start": start},
+            )
             chunk = _get_block(payload, block_name)
             records.extend(chunk)
             progress.update(len(chunk))
@@ -89,7 +86,7 @@ def fetch_paginated_block(
             cursor = _extract_cursor(payload, block_name)
             if cursor:
                 total = int(cursor.get("TOTAL", 0) or cursor.get("total", 0) or 0)
-                pagesize = int(cursor.get("PAGESIZE", 0) or cursor.get("pagesize", 0) or effective_limit)
+                pagesize = int(cursor.get("PAGESIZE", 0) or cursor.get("pagesize", 0) or PAGE_LIMIT)
                 if total and progress.total != total:
                     progress.total = total
                     progress.refresh()
@@ -99,36 +96,96 @@ def fetch_paginated_block(
                     break
                 continue
 
-            if len(chunk) < effective_limit:
+            if not chunk:
                 break
 
-            start += effective_limit
+            signature = (chunk[0], chunk[-1], len(chunk))
+            if prev_signature == signature:
+                break
+            prev_signature = signature
+            start += len(chunk)
 
     return records
 
 
-def is_russian_moex_emitent(row: dict[str, Any]) -> bool:
-    """
-    Фильтрация под задачу:
-    - только реально торгующиеся инструменты MOEX (`is_traded == 1`),
-    - только эмитенты с российским ИНН (10 цифр),
-    - должен быть emitent_id.
-    """
+def fetch_market_dataset(session: requests.Session, market_path: str) -> dict[str, list[dict[str, Any]]]:
+    """Собирает все блоки из market endpoint с постраничной загрузкой."""
+    collected: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    start = 0
+    prev_signature: tuple[Any, Any, int] | None = None
+
+    with tqdm(desc=f"Загрузка рынка {market_path}", unit="строк", leave=False) as progress:
+        while True:
+            payload = _fetch_json(
+                session,
+                market_path,
+                {"iss.meta": "off", "limit": PAGE_LIMIT, "start": start},
+            )
+
+            securities_chunk = _get_block(payload, "securities")
+            progress.update(len(securities_chunk))
+
+            for key in payload.keys():
+                if key.endswith(".cursor"):
+                    continue
+                rows = _get_block(payload, key)
+                if rows:
+                    collected[key].extend(rows)
+
+            cursor = _extract_cursor(payload, "securities")
+            if cursor:
+                total = int(cursor.get("TOTAL", 0) or cursor.get("total", 0) or 0)
+                pagesize = int(cursor.get("PAGESIZE", 0) or cursor.get("pagesize", 0) or PAGE_LIMIT)
+                if total and progress.total != total:
+                    progress.total = total
+                    progress.refresh()
+
+                start += pagesize
+                if start >= total:
+                    break
+                continue
+
+            if not securities_chunk:
+                break
+
+            signature = (securities_chunk[0], securities_chunk[-1], len(securities_chunk))
+            if prev_signature == signature:
+                break
+            prev_signature = signature
+            start += len(securities_chunk)
+
+    return collected
+
+
+def _secid_from_row(row: dict[str, Any]) -> str | None:
+    return row.get("SECID") or row.get("secid")
+
+
+def is_russian_traded(row: dict[str, Any]) -> bool:
     if row.get("is_traded") != 1:
         return False
-
     if row.get("emitent_id") is None:
         return False
-
     inn_raw = row.get("emitent_inn")
     if inn_raw is None:
         return False
-
     inn = "".join(ch for ch in str(inn_raw) if ch.isdigit())
-    if len(inn) != 10:
-        return False
+    return len(inn) == 10
 
-    return True
+
+def filter_market_blocks_by_secids(
+    blocks: dict[str, list[dict[str, Any]]],
+    allowed_secids: set[str],
+) -> dict[str, list[dict[str, Any]]]:
+    filtered: dict[str, list[dict[str, Any]]] = {}
+    for block_name, rows in blocks.items():
+        kept: list[dict[str, Any]] = []
+        for row in rows:
+            secid = _secid_from_row(row)
+            if secid is None or secid in allowed_secids:
+                kept.append(row)
+        filtered[block_name] = kept
+    return filtered
 
 
 def fetch_emitent_related_blocks(session: requests.Session, emitent_id: int) -> dict[str, list[dict[str, Any]]]:
@@ -136,29 +193,24 @@ def fetch_emitent_related_blocks(session: requests.Session, emitent_id: int) -> 
     start = 0
 
     while True:
-        params = {
-            "iss.meta": "off",
-            "limit": PAGE_LIMIT,
-            "start": start,
-            "emitent_id": emitent_id,
-        }
-        payload = _fetch_json(session, "securities.json", params)
+        payload = _fetch_json(
+            session,
+            "securities.json",
+            {"iss.meta": "off", "limit": PAGE_LIMIT, "start": start, "emitent_id": emitent_id},
+        )
 
         for key in payload.keys():
             if key.endswith(".cursor"):
                 continue
-
             rows = _get_block(payload, key)
             if not rows:
                 continue
-
             for row in rows:
                 row["emitent_id"] = emitent_id
             block_records[key].extend(rows)
 
         securities_chunk = _get_block(payload, "securities")
         cursor = _extract_cursor(payload, "securities")
-
         if cursor:
             total = int(cursor.get("TOTAL", 0) or cursor.get("total", 0) or 0)
             pagesize = int(cursor.get("PAGESIZE", 0) or cursor.get("pagesize", 0) or PAGE_LIMIT)
@@ -169,7 +221,6 @@ def fetch_emitent_related_blocks(session: requests.Session, emitent_id: int) -> 
 
         if len(securities_chunk) < PAGE_LIMIT:
             break
-
         start += PAGE_LIMIT
 
     return block_records
@@ -191,34 +242,84 @@ def save_to_excel(file_name: Path, sheets: dict[str, pd.DataFrame]) -> None:
             df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
 
 
+def build_instrument_file(
+    session: requests.Session,
+    market_path: str,
+    output_file: Path,
+    metadata_df: pd.DataFrame,
+    label: str,
+) -> pd.DataFrame:
+    print(f"Шаг: Загружаем {label}...")
+    market_blocks = fetch_market_dataset(session, market_path)
+    market_securities = pd.DataFrame(market_blocks.get("securities", []))
+    if market_securities.empty:
+        raise RuntimeError(f"MOEX ISS вернул пустой блок securities для {label}.")
+
+    merged = market_securities.merge(
+        metadata_df,
+        left_on="SECID",
+        right_on="secid",
+        how="left",
+        suffixes=("_market", "_meta"),
+    )
+
+    filtered_merged = merged[merged.apply(is_russian_traded, axis=1)].copy()
+    allowed_secids = set(filtered_merged["SECID"].astype(str).tolist())
+
+    filtered_blocks = filter_market_blocks_by_secids(market_blocks, allowed_secids)
+
+    sheets: dict[str, pd.DataFrame] = {
+        "securities_merged": filtered_merged,
+    }
+    for block_name, rows in filtered_blocks.items():
+        sheets[f"{block_name}_filtered"] = pd.DataFrame(rows)
+
+    save_to_excel(output_file, sheets)
+    print(f"Готово: {label} сохранены в {output_file.resolve()}")
+
+    return filtered_merged
+
+
 def main() -> None:
     session = _build_session()
     try:
-        print("Шаг 1/4: Загружаем общий список бумаг MOEX...")
-        securities = fetch_paginated_block(session, "securities.json", "securities")
-        securities_df = pd.DataFrame(securities)
-        if securities_df.empty:
-            raise RuntimeError("MOEX ISS вернул пустой список securities.")
+        print("Шаг 1/5: Загружаем метаданные всех бумаг MOEX...")
+        metadata_rows = fetch_paginated_block(session, "securities.json", "securities")
+        metadata_df = pd.DataFrame(metadata_rows)
+        if metadata_df.empty:
+            raise RuntimeError("MOEX ISS вернул пустые метаданные securities.")
 
-        print("Шаг 2/4: Оставляем только РФ эмитентов, торгующихся на MOEX...")
-        filtered_df = securities_df[securities_df.apply(is_russian_moex_emitent, axis=1)].copy()
-
-        emitents_df = (
-            filtered_df.drop_duplicates(subset=["emitent_id"])
-            .sort_values(by="emitent_id")
-            .reset_index(drop=True)
+        print("Шаг 2/5: Формируем Excel по акциям РФ (торгуются сейчас)...")
+        stocks_df = build_instrument_file(
+            session=session,
+            market_path="engines/stock/markets/shares/securities.json",
+            output_file=STOCKS_FILE,
+            metadata_df=metadata_df,
+            label="акции",
         )
-        emitent_ids = emitents_df["emitent_id"].astype(int).tolist()
 
-        print(f"Всего бумаг: {len(securities_df)}")
-        print(f"РФ торгуемых бумаг: {len(filtered_df)}")
-        print(f"РФ эмитентов для выгрузки: {len(emitent_ids)}")
-        print(f"Шаг 3/4: Собираем дополнительные данные по эмитентам (потоки: {MAX_WORKERS})...")
+        print("Шаг 3/5: Формируем Excel по облигациям РФ (торгуются сейчас)...")
+        bonds_df = build_instrument_file(
+            session=session,
+            market_path="engines/stock/markets/bonds/securities.json",
+            output_file=BONDS_FILE,
+            metadata_df=metadata_df,
+            label="облигации",
+        )
 
+        print("Шаг 4/5: Собираем уникальных эмитентов из акций и облигаций...")
+        emitent_ids = sorted(
+            {
+                int(x)
+                for x in pd.concat([stocks_df["emitent_id"], bonds_df["emitent_id"]], ignore_index=True).dropna().tolist()
+            }
+        )
+        print(f"Уникальных эмитентов: {len(emitent_ids)}")
+
+        print("Шаг 5/5: Выгружаем всю информацию по эмитентам в отдельный Excel...")
         emitent_blocks: dict[str, list[dict[str, Any]]] = defaultdict(list)
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(_fetch_one_emitent, emitent_id): emitent_id for emitent_id in emitent_ids}
-
             for future in tqdm(as_completed(futures), total=len(futures), desc="Эмитенты", unit="эмитент"):
                 emitent_id = futures[future]
                 try:
@@ -228,20 +329,16 @@ def main() -> None:
                     continue
 
                 for block_name, rows in blocks.items():
-                    emitent_blocks[f"emitent_{block_name}"].extend(rows)
+                    emitent_blocks[block_name].extend(rows)
 
-        print("Шаг 4/4: Сохраняем результат в Excel (с перезаписью)...")
-        sheets: dict[str, pd.DataFrame] = {
-            "securities_all": securities_df,
-            "securities_ru_traded": filtered_df,
-            "emitents_ru": emitents_df,
+        emitent_sheets: dict[str, pd.DataFrame] = {
+            "emitents_from_stocks_bonds": pd.DataFrame({"emitent_id": emitent_ids}),
         }
         for block_name, rows in emitent_blocks.items():
-            if rows:
-                sheets[block_name] = pd.DataFrame(rows)
+            emitent_sheets[block_name] = pd.DataFrame(rows)
 
-        save_to_excel(OUTPUT_FILE, sheets)
-        print(f"Готово. Файл обновлен: {OUTPUT_FILE.resolve()}")
+        save_to_excel(EMITENTS_FILE, emitent_sheets)
+        print(f"Готово: эмитенты сохранены в {EMITENTS_FILE.resolve()}")
     finally:
         session.close()
 
