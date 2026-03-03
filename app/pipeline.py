@@ -505,6 +505,8 @@ def _calc_ytm_percent(
             if is_floater:
                 annual_rate = _forecast_rate(event.payment_date)
                 coupon_amount = max(outstanding_face * (annual_rate / 100.0) * (period_days / 365.0), 0.0)
+            elif coupon_amount <= 0 and (coupon_percent or 0.0) > 0:
+                coupon_amount = max(outstanding_face * ((coupon_percent or 0.0) / 100.0) * (period_days / 365.0), 0.0)
             if secid.startswith("SU50"):
                 infl_rate = _projected_inflation(event.payment_date)
                 years = max((event.payment_date - valuation_date).days, 0) / 365.0
@@ -516,8 +518,14 @@ def _calc_ytm_percent(
                 flows.append((max((event.payment_date - valuation_date).days, 0), total_flow))
             outstanding_face = max(outstanding_face - max(event.amortization_amount, 0.0), 0.0)
 
-        if outstanding_face > 1e-8 and not any(day == (horizon - valuation_date).days for day, _ in flows):
-            flows.append((max((horizon - valuation_date).days, 0), outstanding_face))
+        horizon_day = max((horizon - valuation_date).days, 0)
+        if outstanding_face > 1e-8:
+            horizon_idx = next((idx for idx, (day, _) in enumerate(flows) if day == horizon_day), None)
+            if horizon_idx is None:
+                flows.append((horizon_day, outstanding_face))
+            else:
+                day, amount = flows[horizon_idx]
+                flows[horizon_idx] = (day, amount + outstanding_face)
     else:
         if coupon_period is None or coupon_period <= 0:
             return None, "NO_CASHFLOWS"
