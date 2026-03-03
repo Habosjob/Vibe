@@ -46,15 +46,15 @@ SQLITE_FILE = DB_DIR / "vibe_data.sqlite"
 REQUEST_TIMEOUT = 30
 MAX_WORKERS = 64
 PROXY_SOURCE_TIMEOUT = 6
-PROXY_VALIDATION_TIMEOUT = 1.5
+PROXY_VALIDATION_TIMEOUT = 2.0
 PROXY_VALIDATION_WORKERS = 512
-PROXY_VALIDATION_TARGET = 80
+PROXY_VALIDATION_TARGET = 200
 PROXY_REQUEST_TIMEOUT = 2.5
 PROXY_MAX_ATTEMPTS = 2
-PROXY_VALIDATION_TIME_BUDGET = 8
+PROXY_VALIDATION_TIME_BUDGET = 15
 ACRA_PAGE_WORKERS = 24
 ACRA_ISSUER_WORKERS = 64
-ACRA_SEARCH_WORKERS = 80
+ACRA_SEARCH_WORKERS = 120
 NKR_PLAYWRIGHT_TIMEOUT_MS = 60_000
 PROXYLIST_FILE = OUTPUT_DIR / "proxylist.csv"
 USE_CACHE = True
@@ -392,7 +392,8 @@ def validate_proxies(proxies: list[str], logger: logging.Logger) -> list[str]:
     if not proxies:
         return []
 
-    def check_proxy(proxy: str) -> str | None:
+    def check_proxy(proxy: str) -> tuple[str, float] | None:
+        started = perf_counter()
         try:
             response = requests.get(
                 "http://httpbin.org/ip",
@@ -400,11 +401,11 @@ def validate_proxies(proxies: list[str], logger: logging.Logger) -> list[str]:
                 proxies={"http": f"http://{proxy}", "https": f"http://{proxy}"},
             )
             response.raise_for_status()
-            return proxy
+            return proxy, perf_counter() - started
         except Exception:
             return None
 
-    valid: set[str] = set()
+    valid_latency: dict[str, float] = {}
     started_at = perf_counter()
     total = len(proxies)
     max_pending = max(PROXY_VALIDATION_WORKERS * 2, 1)
@@ -428,7 +429,7 @@ def validate_proxies(proxies: list[str], logger: logging.Logger) -> list[str]:
         with progress(total=total, desc="Проверка прокси", unit="прокси") as pbar:
             while in_flight:
                 timed_out = (perf_counter() - started_at) >= PROXY_VALIDATION_TIME_BUDGET
-                if timed_out or len(valid) >= PROXY_VALIDATION_TARGET:
+                if timed_out or len(valid_latency) >= PROXY_VALIDATION_TARGET:
                     completed += len(in_flight)
                     for pending_future in list(in_flight):
                         pending_future.cancel()
@@ -441,19 +442,25 @@ def validate_proxies(proxies: list[str], logger: logging.Logger) -> list[str]:
                 in_flight.pop(done_future, None)
                 resolved = done_future.result()
                 if resolved:
-                    valid.add(resolved)
+                    proxy, latency = resolved
+                    previous = valid_latency.get(proxy)
+                    if previous is None or latency < previous:
+                        valid_latency[proxy] = latency
                 completed += 1
                 pbar.update(1)
 
                 while len(in_flight) < max_pending and submit_next():
                     pass
 
-    logger.info("Proxy validated: total=%s valid=%s", len(proxies), len(valid))
-    return sorted(valid)
+    ordered = sorted(valid_latency.items(), key=lambda item: item[1])
+    fastest = [proxy for proxy, _ in ordered[:PROXY_VALIDATION_TARGET]]
+    logger.info("Proxy validated: total=%s valid=%s selected=%s", len(proxies), len(valid_latency), len(fastest))
+    logger.info("Fastest proxies sample: %s", ordered[:10])
+    return fastest
 
 
 def save_valid_proxies_csv(proxies: list[str], logger: logging.Logger) -> None:
-    frame = pd.DataFrame([{"proxy": proxy} for proxy in proxies])
+    frame = pd.DataFrame([{"proxy": proxy, "priority": idx + 1} for idx, proxy in enumerate(proxies)])
     frame.to_csv(PROXYLIST_FILE, index=False, encoding="utf-8-sig")
     logger.info("Proxy list saved to %s rows=%s", PROXYLIST_FILE, len(frame))
 
@@ -1036,28 +1043,51 @@ class NkrClient:
         return fallback.group(1) if fallback else None
 
     def _download_excel_report(self) -> Path:
+        final_path = CACHE_DIR / "nkr_issuers_latest.xlsx"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+
         with TemporaryDirectory(prefix="nkr_export_") as temp_dir:
             temp_path = Path(temp_dir)
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
-                context = browser.new_context(accept_downloads=True)
-                page = context.new_page()
-                page.goto(f"{NKR_BASE_URL}/ratings/issuers/", wait_until="domcontentloaded", timeout=NKR_PLAYWRIGHT_TIMEOUT_MS)
-                export_button = page.get_by_role("button", name="Выгрузить в Excel")
-                export_button.wait_for(timeout=NKR_PLAYWRIGHT_TIMEOUT_MS)
-                with page.expect_download(timeout=NKR_PLAYWRIGHT_TIMEOUT_MS) as download_info:
-                    export_button.click()
-                download = download_info.value
-                suggested = download.suggested_filename or "nkr_issuers.xlsx"
-                downloaded_path = temp_path / suggested
-                download.save_as(str(downloaded_path))
-                context.close()
-                browser.close()
+            try:
+                with sync_playwright() as playwright:
+                    browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                    context = browser.new_context(accept_downloads=True)
+                    page = context.new_page()
+                    page.goto(f"{NKR_BASE_URL}/ratings/issuers/", wait_until="networkidle", timeout=NKR_PLAYWRIGHT_TIMEOUT_MS)
 
-            final_path = CACHE_DIR / "nkr_issuers_latest.xlsx"
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            downloaded_path.replace(final_path)
-            return final_path
+                    export_locator = page.get_by_role("button", name="Выгрузить в Excel")
+                    if export_locator.count() == 0:
+                        export_locator = page.get_by_role("link", name="Выгрузить в Excel")
+                    if export_locator.count() == 0:
+                        export_locator = page.locator("a[href*='issuers.php'], button:has-text('Выгрузить в Excel')").first
+                    export_locator.wait_for(state="visible", timeout=NKR_PLAYWRIGHT_TIMEOUT_MS)
+
+                    with page.expect_download(timeout=NKR_PLAYWRIGHT_TIMEOUT_MS) as download_info:
+                        export_locator.click(force=True)
+                    download = download_info.value
+                    suggested = download.suggested_filename or "nkr_issuers.xlsx"
+                    downloaded_path = temp_path / suggested
+                    download.save_as(str(downloaded_path))
+
+                    context.close()
+                    browser.close()
+
+                if downloaded_path.exists() and downloaded_path.stat().st_size > 0:
+                    downloaded_path.replace(final_path)
+                    self.logger.info("NKR report downloaded via Playwright")
+                    return final_path
+                raise ValueError("NKR Playwright downloaded empty file")
+            except Exception as error:
+                self.logger.warning("NKR Playwright export failed, fallback to direct endpoint: %s", error)
+
+        direct_url = f"{NKR_BASE_URL}/issuers.php"
+        response = self.session.get(direct_url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        if not response.content:
+            raise ValueError("NKR direct export returned empty content")
+        final_path.write_bytes(response.content)
+        self.logger.info("NKR report downloaded directly (fallback): %s", direct_url)
+        return final_path
 
     def _build_ratings_from_excel(self, excel_path: Path, target_inns: set[str]) -> dict[str, str]:
         frame = pd.read_excel(excel_path)
@@ -1616,17 +1646,97 @@ def collect_green_bonds(
     return pd.DataFrame(records), pd.DataFrame(payment_records)
 
 
+def _is_missing_scalar(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple, set, dict)):
+        return False
+    if hasattr(value, "shape") and not isinstance(value, (str, bytes, pd.Series, pd.DataFrame)):
+        return False
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        return False
+    return bool(missing) if isinstance(missing, (bool, int)) else False
+
+
 def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
     for col_idx, column_name in enumerate(df.columns, start=1):
         values = df[column_name]
         if values.empty:
             max_len = len(str(column_name))
         else:
-            series_len = values.map(lambda value: len(str(value)) if pd.notna(value) else 0)
+            series_len = values.map(lambda value: 0 if _is_missing_scalar(value) else len(str(value)))
             max_len = max(len(str(column_name)), int(series_len.max()))
 
         adjusted_width = min(max_len + 2, 80)
         worksheet.column_dimensions[get_column_letter(col_idx)].width = max(10, adjusted_width)
+
+
+def _extract_coupon_summary(coupons: Any) -> dict[str, Any]:
+    if not isinstance(coupons, list) or not coupons:
+        return {"coupons_count": 0, "next_coupon_date": None, "next_coupon_value": None, "last_coupon_date": None}
+
+    rows = pd.DataFrame(coupons)
+    if rows.empty:
+        return {"coupons_count": 0, "next_coupon_date": None, "next_coupon_value": None, "last_coupon_date": None}
+
+    rows["coupondate_ts"] = pd.to_datetime(rows.get("coupondate"), errors="coerce")
+    now = pd.Timestamp.now().normalize()
+    future_rows = rows[rows["coupondate_ts"] >= now].sort_values("coupondate_ts")
+    latest_rows = rows.sort_values("coupondate_ts")
+    next_row = future_rows.iloc[0] if not future_rows.empty else None
+    last_row = latest_rows.iloc[-1] if not latest_rows.empty else None
+    return {
+        "coupons_count": int(len(rows)),
+        "next_coupon_date": next_row["coupondate_ts"].date().isoformat() if next_row is not None and pd.notna(next_row["coupondate_ts"]) else None,
+        "next_coupon_value": next_row.get("value") if next_row is not None else None,
+        "last_coupon_date": last_row["coupondate_ts"].date().isoformat() if last_row is not None and pd.notna(last_row["coupondate_ts"]) else None,
+    }
+
+
+def _extract_amortization_summary(amortizations: Any) -> dict[str, Any]:
+    if not isinstance(amortizations, list) or not amortizations:
+        return {"amortizations_count": 0, "next_amort_date": None, "next_amort_value": None}
+
+    rows = pd.DataFrame(amortizations)
+    if rows.empty:
+        return {"amortizations_count": 0, "next_amort_date": None, "next_amort_value": None}
+
+    rows["amortdate_ts"] = pd.to_datetime(rows.get("amortdate"), errors="coerce")
+    now = pd.Timestamp.now().normalize()
+    future_rows = rows[rows["amortdate_ts"] >= now].sort_values("amortdate_ts")
+    next_row = future_rows.iloc[0] if not future_rows.empty else rows.sort_values("amortdate_ts").iloc[-1]
+    return {
+        "amortizations_count": int(len(rows)),
+        "next_amort_date": next_row["amortdate_ts"].date().isoformat() if pd.notna(next_row["amortdate_ts"]) else None,
+        "next_amort_value": next_row.get("value") if next_row is not None else None,
+    }
+
+
+def prepare_green_bonds_for_export(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+
+    result = frame.copy()
+    coupon_summary = result["coupons_json"].map(_extract_coupon_summary) if "coupons_json" in result.columns else pd.Series([{} for _ in range(len(result))])
+    amort_summary = result["amortizations_json"].map(_extract_amortization_summary) if "amortizations_json" in result.columns else pd.Series([{} for _ in range(len(result))])
+
+    result = pd.concat([result, pd.json_normalize(coupon_summary), pd.json_normalize(amort_summary)], axis=1)
+
+    if "description_json" in result.columns:
+        result["bond_type"] = result["description_json"].map(lambda payload: payload.get("BOND_TYPE") if isinstance(payload, dict) else None)
+        result["bond_subtype"] = result["description_json"].map(lambda payload: payload.get("BOND_SUBTYPE") if isinstance(payload, dict) else None)
+    if "market_json" in result.columns:
+        result["market_board"] = result["market_json"].map(lambda payload: payload.get("BOARDID") if isinstance(payload, dict) else None)
+        result["bid"] = result["market_json"].map(lambda payload: payload.get("BID") if isinstance(payload, dict) else None)
+        result["offer"] = result["market_json"].map(lambda payload: payload.get("OFFER") if isinstance(payload, dict) else None)
+
+    for column in ["coupons_json", "amortizations_json", "description_json", "market_json"]:
+        if column in result.columns:
+            result = result.drop(columns=column)
+
+    return result
 
 
 def save_to_excel(df: pd.DataFrame, path: Path, logger: logging.Logger) -> None:
@@ -1900,7 +2010,9 @@ def run() -> None:
 
         print("Этап 10: Формирование Excel")
         stage_started_at = perf_counter()
-        excel_exports = [(emitters, EMITTERS_FILE), (green_bonds, GREEN_BONDS_FILE)]
+        green_bonds_export = prepare_green_bonds_for_export(green_bonds)
+        excel_exports = [(emitters, EMITTERS_FILE), (green_bonds_export, GREEN_BONDS_FILE)]
+
         def save_excel_item(item: tuple[pd.DataFrame, Path]) -> None:
             frame, output_path = item
             save_to_excel(frame, output_path, logger)
