@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import signal
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -17,6 +19,7 @@ from openpyxl.utils import get_column_letter
 from tqdm import tqdm
 
 BASE_URL = "https://iss.moex.com/iss"
+EXPERT_RA_BASE_URL = "https://raexpert.ru"
 OUTPUT_DIR = Path(__file__).resolve().parent
 LOG_FILE = OUTPUT_DIR / "main.log"
 SHARES_FILE = OUTPUT_DIR / "moex_shares.xlsx"
@@ -147,6 +150,115 @@ class MoexClient:
         return {"EMITTER_ID": int(row[0][0]), "EMITTER_NAME": row[0][1], "INN": row[0][2]}
 
 
+class ExpertRaClient:
+    def __init__(self, logger: logging.Logger) -> None:
+        self.logger = logger
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
+
+    def _normalize_inn(self, value: Any) -> str | None:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
+        return digits or None
+
+    def _clean_text(self, value: Any) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        text = str(value).strip()
+        return "" if text.lower() == "nan" else text
+
+    def _format_date(self, value: Any) -> str:
+        if value is None or pd.isna(value):
+            return ""
+        if isinstance(value, datetime):
+            return value.strftime("%d.%m.%Y")
+        if isinstance(value, date):
+            return value.strftime("%d.%m.%Y")
+        text = str(value).strip()
+        if not text:
+            return ""
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+        if pd.notna(parsed):
+            return parsed.strftime("%d.%m.%Y")
+        return text
+
+    def _fetch_export_paths(self) -> list[str]:
+        response = self.session.get(f"{EXPERT_RA_BASE_URL}/ratings/", timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        found_paths = set(re.findall(r'data-path="/([^/"]+)/"', response.text))
+        paths = sorted(path for path in found_paths if path)
+        self.logger.info("Expert RA export paths resolved: %s", len(paths))
+        return paths
+
+    def _download_ratings_workbook(self, paths: list[str]) -> bytes:
+        labels = [f"Категория {path}" for path in paths]
+        payload = {"all": {"labels": labels, "paths": paths}}
+        virtual_date = date.today().strftime("%d.%m.%Y")
+        response = self.session.post(
+            f"{EXPERT_RA_BASE_URL}/ratings/ratings-xlsx-export",
+            params={"isSinglePage": 1, "virtual_date": virtual_date},
+            json=payload,
+            timeout=REQUEST_TIMEOUT * 3,
+        )
+        response.raise_for_status()
+        self.logger.info(
+            "Expert RA export downloaded: status=%s size=%s",
+            response.status_code,
+            len(response.content),
+        )
+        return response.content
+
+    def fetch_latest_ratings_by_inn(self, inns: set[str]) -> dict[str, str]:
+        normalized_inns = {self._normalize_inn(inn) for inn in inns}
+        normalized_inns = {inn for inn in normalized_inns if inn}
+        if not normalized_inns:
+            return {}
+
+        paths = self._fetch_export_paths()
+        if not paths:
+            self.logger.warning("Expert RA export paths not found")
+            return {}
+
+        workbook_bytes = self._download_ratings_workbook(paths)
+        workbook = pd.read_excel(BytesIO(workbook_bytes), header=5)
+        workbook.columns = [str(col).strip() for col in workbook.columns]
+
+        required_columns = {"ИНН", "Рейтинг", "Прогноз", "Дата присвоения/актуализации/изменения рейтинга"}
+        missing_columns = required_columns - set(workbook.columns)
+        if missing_columns:
+            self.logger.warning("Expert RA missing columns in export: %s", sorted(missing_columns))
+            return {}
+
+        ratings_by_inn: dict[str, dict[str, Any]] = {}
+
+        with progress(total=len(workbook), desc="Парсинг Эксперт РА", unit="строка") as pbar:
+            for _, row in workbook.iterrows():
+                inn = self._normalize_inn(row.get("ИНН"))
+                if not inn or inn not in normalized_inns:
+                    pbar.update(1)
+                    continue
+
+                row_date = pd.to_datetime(row.get("Дата присвоения/актуализации/изменения рейтинга"), errors="coerce", dayfirst=True)
+                row_date_for_sort = row_date if pd.notna(row_date) else pd.Timestamp.min
+                current_best = ratings_by_inn.get(inn)
+
+                if current_best is None or row_date_for_sort > current_best["_sort_date"]:
+                    rating = self._clean_text(row.get("Рейтинг"))
+                    forecast = self._clean_text(row.get("Прогноз"))
+                    date_text = self._format_date(row.get("Дата присвоения/актуализации/изменения рейтинга"))
+                    ratings_by_inn[inn] = {
+                        "_sort_date": row_date_for_sort,
+                        "value": f"{rating}\n{forecast}\n{date_text}".strip(),
+                    }
+
+                pbar.update(1)
+
+        result = {inn: payload["value"] for inn, payload in ratings_by_inn.items()}
+        self.logger.info("Expert RA ratings matched by INN: %s", len(result))
+        return result
+
+
 def enrich_emitters(
     client: MoexClient,
     shares: pd.DataFrame,
@@ -274,6 +386,21 @@ def build_emitters_table(shares: pd.DataFrame, bonds: pd.DataFrame) -> pd.DataFr
     )
 
 
+def apply_expert_ra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) -> pd.DataFrame:
+    result = emitters.copy()
+
+    def rating_for_row(inn: Any) -> Any:
+        if pd.isna(inn):
+            return pd.NA
+        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        if not normalized:
+            return pd.NA
+        return ratings_by_inn.get(normalized, pd.NA)
+
+    result["Рейтинг Эксперт РА"] = result["INN"].map(rating_for_row)
+    return result
+
+
 def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
     for col_idx, column_name in enumerate(df.columns, start=1):
         values = df[column_name]
@@ -325,6 +452,7 @@ def run() -> None:
 
     signal.signal(signal.SIGINT, handle_sigint)
     client = MoexClient(logger)
+    expert_ra_client = ExpertRaClient(logger)
     cache = load_cache(logger)
 
     try:
@@ -348,9 +476,16 @@ def run() -> None:
         shares, bonds = enrich_emitters(client, shares, bonds, logger, cache)
         stage_times["Этап 3: Обогащение эмитентов"] = perf_counter() - stage_started_at
 
-        print("Этап 4: Формирование Excel")
+        print("Этап 4: Получение рейтингов Эксперт РА")
         stage_started_at = perf_counter()
         emitters = build_emitters_table(shares, bonds)
+        inns = set(emitters["INN"].dropna().astype(str).tolist())
+        expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
+        emitters = apply_expert_ra_ratings(emitters, expert_ra_ratings)
+        stage_times["Этап 4: Получение рейтингов Эксперт РА"] = perf_counter() - stage_started_at
+
+        print("Этап 5: Формирование Excel")
+        stage_started_at = perf_counter()
 
         excel_exports = [
             (shares, SHARES_FILE),
@@ -362,7 +497,7 @@ def run() -> None:
                 save_to_excel(df, output_path, logger)
                 pbar.update(1)
 
-        stage_times["Этап 4: Формирование Excel"] = perf_counter() - stage_started_at
+        stage_times["Этап 5: Формирование Excel"] = perf_counter() - stage_started_at
 
         print("=====\nГотово")
         logger.info("Script completed successfully")
