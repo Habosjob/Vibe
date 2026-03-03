@@ -478,7 +478,11 @@ def _calc_ytm_percent(
     zcyc_term_a, zcyc_term_b = _extract_zcyc_terms(coupon_formula)
     is_floater = "флоатер" in lower_coupon_type or index_type in {"RUONIA", "KEYRATE", "ZCYC"}
     if is_floater and index_type not in {"RUONIA", "KEYRATE", "ZCYC"}:
-        return None, "FLOAT_FORMULA_PARSE_FAIL"
+        compact_formula = _sanitize_coupon_formula(coupon_formula).replace(" ", "")
+        if "RUON" in compact_formula:
+            index_type = "RUONIA"
+        else:
+            index_type = "KEYRATE"
 
     def _projected_key_rate(payment_date: date) -> float:
         year_index = max((payment_date - valuation_date).days, 0) // 365
@@ -543,23 +547,28 @@ def _calc_ytm_percent(
                 flows[horizon_idx] = (day, amount + outstanding_face)
     else:
         if coupon_period is None or coupon_period <= 0:
-            return None, "NO_CASHFLOWS"
-        cursor = valuation_date + timedelta(days=coupon_period)
-        while cursor < horizon:
-            annual_rate = _forecast_rate(cursor)
-            coupon_amount = max(outstanding_face * (annual_rate / 100.0) * (coupon_period / 365.0), 0.0)
-            if secid.startswith("SU50"):
-                infl_rate = _projected_inflation(cursor)
-                years = max((cursor - valuation_date).days, 0) / 365.0
-                indexed_face = face_value * ((1 + infl_rate / 100.0) ** years)
-                coupon_rate = coupon_percent or 0.0
-                coupon_amount = max(indexed_face * (coupon_rate / 100.0) * (coupon_period / 365.0), 0.0)
-            flows.append((max((cursor - valuation_date).days, 0), coupon_amount))
-            cursor += timedelta(days=coupon_period)
+            horizon_day = max((horizon - valuation_date).days, 0)
+            final_coupon = 0.0
+            if (coupon_percent or 0.0) > 0 and horizon_day > 0:
+                final_coupon = max(outstanding_face * ((coupon_percent or 0.0) / 100.0) * (horizon_day / 365.0), 0.0)
+            flows.append((horizon_day, outstanding_face + final_coupon))
+        else:
+            cursor = valuation_date + timedelta(days=coupon_period)
+            while cursor < horizon:
+                annual_rate = _forecast_rate(cursor)
+                coupon_amount = max(outstanding_face * (annual_rate / 100.0) * (coupon_period / 365.0), 0.0)
+                if secid.startswith("SU50"):
+                    infl_rate = _projected_inflation(cursor)
+                    years = max((cursor - valuation_date).days, 0) / 365.0
+                    indexed_face = face_value * ((1 + infl_rate / 100.0) ** years)
+                    coupon_rate = coupon_percent or 0.0
+                    coupon_amount = max(indexed_face * (coupon_rate / 100.0) * (coupon_period / 365.0), 0.0)
+                flows.append((max((cursor - valuation_date).days, 0), coupon_amount))
+                cursor += timedelta(days=coupon_period)
 
-        horizon_rate = _forecast_rate(horizon)
-        horizon_coupon = max(outstanding_face * (horizon_rate / 100.0) * (coupon_period / 365.0), 0.0)
-        flows.append((max((horizon - valuation_date).days, 0), outstanding_face + horizon_coupon))
+            horizon_rate = _forecast_rate(horizon)
+            horizon_coupon = max(outstanding_face * (horizon_rate / 100.0) * (coupon_period / 365.0), 0.0)
+            flows.append((max((horizon - valuation_date).days, 0), outstanding_face + horizon_coupon))
 
     if not flows:
         return None, "NO_CASHFLOWS"
