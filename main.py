@@ -83,6 +83,32 @@ PROXY_SOURCES = [
 ]
 
 
+
+
+def normalize_inn(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+
+    if isinstance(value, float):
+        if value.is_integer():
+            text = str(int(value))
+        else:
+            text = format(value, "f")
+    else:
+        text = str(value).strip()
+
+    if text.endswith('.0') and text.replace('.', '', 1).isdigit():
+        text = text[:-2]
+
+    digits = ''.join(ch for ch in text if ch.isdigit())
+    if len(digits) in {10, 12}:
+        return digits
+
+    if digits.endswith('0') and len(digits[:-1]) in {10, 12}:
+        return digits[:-1]
+
+    return digits if len(digits) in {10, 12} else None
+
 def progress(total: int, desc: str, unit: str):
     return tqdm(total=total, desc=desc, unit=unit, position=0, leave=False, dynamic_ncols=True)
 
@@ -441,10 +467,7 @@ class ExpertRaClient:
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
-        return digits or None
+        return normalize_inn(value)
 
     def _clean_text(self, value: Any) -> str:
         if value is None or pd.isna(value):
@@ -561,10 +584,7 @@ class AcraClient:
         self._request_mode_lock = threading.Lock()
 
     def _normalize_inn(self, value: Any) -> str | None:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
-        return digits or None
+        return normalize_inn(value)
 
     def _clean_text(self, value: str) -> str:
         return re.sub(r"\s+", " ", value).strip()
@@ -828,10 +848,7 @@ class NkrClient:
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
-        return digits or None
+        return normalize_inn(value)
 
     def _clean_text(self, value: str) -> str:
         text = html.unescape(value)
@@ -921,10 +938,7 @@ class NraClient:
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
-        return digits or None
+        return normalize_inn(value)
 
     def _clean_text(self, value: str) -> str:
         text = html.unescape(value)
@@ -1238,7 +1252,7 @@ def apply_expert_ra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, st
     def rating_for_row(inn: Any) -> Any:
         if pd.isna(inn):
             return pd.NA
-        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        normalized = normalize_inn(inn)
         if not normalized:
             return pd.NA
         return ratings_by_inn.get(normalized, pd.NA)
@@ -1253,7 +1267,7 @@ def apply_acra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) -
     def rating_for_row(inn: Any) -> Any:
         if pd.isna(inn):
             return pd.NA
-        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        normalized = normalize_inn(inn)
         if not normalized:
             return pd.NA
         return ratings_by_inn.get(normalized, pd.NA)
@@ -1268,7 +1282,7 @@ def apply_nkr_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) ->
     def rating_for_row(inn: Any) -> Any:
         if pd.isna(inn):
             return pd.NA
-        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        normalized = normalize_inn(inn)
         if not normalized:
             return pd.NA
         return ratings_by_inn.get(normalized, pd.NA)
@@ -1283,7 +1297,7 @@ def apply_nra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) ->
     def rating_for_row(inn: Any) -> Any:
         if pd.isna(inn):
             return pd.NA
-        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        normalized = normalize_inn(inn)
         if not normalized:
             return pd.NA
         return ratings_by_inn.get(normalized, pd.NA)
@@ -1441,7 +1455,8 @@ def run() -> None:
         stage_started_at = perf_counter()
         emitters = build_emitters_table(shares, bonds) if not shares.empty or not bonds.empty else load_dataframe_snapshot(EMITTERS_CACHE_FILE, logger)
         emitters = apply_manual_score_columns(emitters, logger)
-        inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
+        inns = {normalize_inn(value) for value in emitters["INN"].tolist()} if not emitters.empty and "INN" in emitters.columns else set()
+        inns = {inn for inn in inns if inn}
         logger.info("Emitters scope: rows=%s unique_inn=%s", len(emitters), len(inns))
         expert_ra_cached, expert_ra_cached_today = load_daily_ratings_cache(EXPERT_RA_CACHE_FILE, logger)
         acra_cached, acra_cached_today = load_daily_ratings_cache(ACRA_CACHE_FILE, logger)
