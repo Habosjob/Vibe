@@ -56,6 +56,7 @@ THIN_BORDER = Border(
 )
 CENTERED_WRAP_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+ALLOWED_SCORE_VALUES = {"Red", "Yellow", "Green"}
 
 
 def progress(total: int, desc: str, unit: str):
@@ -889,6 +890,83 @@ def build_emitters_table(shares: pd.DataFrame, bonds: pd.DataFrame) -> pd.DataFr
     )
 
 
+def _normalize_score_value(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _normalize_date_score_value(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
+    if pd.notna(parsed):
+        return parsed.strftime("%Y-%m-%d")
+    text = str(value).strip()
+    return text or None
+
+
+def _load_manual_scores(logger: logging.Logger) -> pd.DataFrame:
+    if not EMITTERS_FILE.exists():
+        return pd.DataFrame(columns=["EMITTER_ID", "ScoreList", "DateScore"])
+
+    try:
+        existing = pd.read_excel(EMITTERS_FILE, sheet_name="Data")
+    except Exception as error:
+        logger.exception("Failed to load manual scores from %s: %s", EMITTERS_FILE, error)
+        return pd.DataFrame(columns=["EMITTER_ID", "ScoreList", "DateScore"])
+
+    if "EMITTER_ID" not in existing.columns:
+        logger.warning("Manual scores source without EMITTER_ID column: %s", EMITTERS_FILE)
+        return pd.DataFrame(columns=["EMITTER_ID", "ScoreList", "DateScore"])
+
+    for column in ["ScoreList", "DateScore"]:
+        if column not in existing.columns:
+            existing[column] = pd.NA
+
+    result = existing[["EMITTER_ID", "ScoreList", "DateScore"]].copy()
+    result["EMITTER_ID"] = pd.to_numeric(result["EMITTER_ID"], errors="coerce")
+    result = result.dropna(subset=["EMITTER_ID"])
+    result["EMITTER_ID"] = result["EMITTER_ID"].astype("int64")
+    result = result.drop_duplicates(subset=["EMITTER_ID"], keep="first")
+    result["ScoreList"] = result["ScoreList"].map(_normalize_score_value)
+    result["DateScore"] = result["DateScore"].map(_normalize_date_score_value)
+    return result
+
+
+def apply_manual_score_columns(emitters: pd.DataFrame, logger: logging.Logger) -> pd.DataFrame:
+    result = emitters.copy()
+    manual_scores = _load_manual_scores(logger)
+
+    if "EMITTER_ID" not in result.columns:
+        result["EMITTER_ID"] = pd.NA
+
+    result["EMITTER_ID"] = pd.to_numeric(result["EMITTER_ID"], errors="coerce")
+    result = result.dropna(subset=["EMITTER_ID"])
+    result["EMITTER_ID"] = result["EMITTER_ID"].astype("int64")
+
+    result = result.merge(manual_scores, on="EMITTER_ID", how="left")
+    result["ScoreList"] = result["ScoreList"].map(_normalize_score_value)
+    result["DateScore"] = result["DateScore"].map(_normalize_date_score_value)
+
+    invalid_mask = result["ScoreList"].notna() & ~result["ScoreList"].isin(ALLOWED_SCORE_VALUES)
+    if invalid_mask.any():
+        invalid_values = sorted(set(result.loc[invalid_mask, "ScoreList"].astype(str).tolist()))
+        raise ValueError(
+            "Недопустимые значения ScoreList: "
+            f"{', '.join(invalid_values)}. Допустимо только: {', '.join(sorted(ALLOWED_SCORE_VALUES))}"
+        )
+
+    today = date.today().isoformat()
+    add_date_mask = result["ScoreList"].notna() & result["DateScore"].isna()
+    result.loc[add_date_mask, "DateScore"] = today
+
+    result["ScoreList"] = result["ScoreList"].where(result["ScoreList"].notna(), pd.NA)
+    result["DateScore"] = result["DateScore"].where(result["DateScore"].notna(), pd.NA)
+    return result
+
+
 def apply_expert_ra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) -> pd.DataFrame:
     result = emitters.copy()
 
@@ -1095,6 +1173,7 @@ def run() -> None:
         print("Этап 4: Получение рейтингов Эксперт РА")
         stage_started_at = perf_counter()
         emitters = build_emitters_table(shares, bonds) if not shares.empty or not bonds.empty else load_dataframe_snapshot(EMITTERS_CACHE_FILE, logger)
+        emitters = apply_manual_score_columns(emitters, logger)
         inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
         expert_ra_ratings: dict[str, str] = {}
         rating_executor = ThreadPoolExecutor(max_workers=3)
