@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import signal
+import threading
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
@@ -37,8 +38,17 @@ SHARES_FILE = EXPORT_DIR / "moex_shares.xlsx"
 BONDS_FILE = EXPORT_DIR / "moex_bonds.xlsx"
 EMITTERS_FILE = EXPORT_DIR / "moex_emitters.xlsx"
 REQUEST_TIMEOUT = 30
-HEALTHCHECK_TIMEOUT = 4
-MAX_WORKERS = 24
+MAX_WORKERS = 64
+PROXY_SOURCE_TIMEOUT = 6
+PROXY_VALIDATION_TIMEOUT = 1.5
+PROXY_VALIDATION_WORKERS = 512
+PROXY_VALIDATION_TARGET = 80
+PROXY_CANDIDATE_LIMIT = 400
+PROXY_REQUEST_TIMEOUT = 2.5
+PROXY_MAX_ATTEMPTS = 2
+PROXY_VALIDATION_TIME_BUDGET = 8
+PROXYLIST_FILE = OUTPUT_DIR / "proxylist.csv"
+USE_CACHE = False
 CACHE_FILE = CACHE_DIR / "emitter_cache.json"
 SHARES_CACHE_FILE = CACHE_DIR / "shares_snapshot.json"
 BONDS_CACHE_FILE = CACHE_DIR / "bonds_snapshot.json"
@@ -59,6 +69,17 @@ THIN_BORDER = Border(
 CENTERED_WRAP_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 ALLOWED_SCORE_VALUES = {"Red", "Yellow", "Green"}
+PROXY_SOURCES = [
+    "https://proxifly.dev/tools/proxy-list",
+    "https://hide-my-name.com/proxy-list/",
+    "https://free.geonix.com/ru/",
+    "https://best-proxies.ru/proxylist/free/",
+    "https://proxyverity.com/free-proxy-list/",
+    "https://geonode.com/free-proxy-list",
+    "https://spys.one/en/",
+    "https://htmlweb.ru/analiz/proxy_list.php",
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt",
+]
 
 
 def progress(total: int, desc: str, unit: str):
@@ -91,6 +112,9 @@ def save_json_dict(path: Path, payload: dict[str, Any], logger: logging.Logger) 
 
 
 def load_daily_ratings_cache(path: Path, logger: logging.Logger) -> tuple[dict[str, str], bool]:
+    if not USE_CACHE:
+        logger.info("Daily rating cache disabled path=%s", path)
+        return {}, False
     payload = load_json_dict(path, logger)
     today = date.today().isoformat()
 
@@ -108,6 +132,9 @@ def load_daily_ratings_cache(path: Path, logger: logging.Logger) -> tuple[dict[s
 
 
 def save_daily_ratings_cache(path: Path, ratings: dict[str, str], logger: logging.Logger) -> None:
+    if not USE_CACHE:
+        logger.info("Daily rating cache save skipped path=%s", path)
+        return
     payload = {
         "cached_on": date.today().isoformat(),
         "ratings": ratings,
@@ -116,11 +143,17 @@ def save_daily_ratings_cache(path: Path, ratings: dict[str, str], logger: loggin
 
 
 def save_dataframe_snapshot(path: Path, frame: pd.DataFrame, logger: logging.Logger) -> None:
+    if not USE_CACHE:
+        logger.info("Dataframe snapshot save skipped path=%s", path)
+        return
     payload = {"columns": frame.columns.tolist(), "records": frame.where(pd.notna(frame), None).to_dict(orient="records")}
     save_json_dict(path, payload, logger)
 
 
 def load_dataframe_snapshot(path: Path, logger: logging.Logger) -> pd.DataFrame:
+    if not USE_CACHE:
+        logger.info("Dataframe snapshot disabled path=%s", path)
+        return pd.DataFrame()
     payload = load_json_dict(path, logger)
     columns = payload.get("columns")
     records = payload.get("records")
@@ -129,73 +162,156 @@ def load_dataframe_snapshot(path: Path, logger: logging.Logger) -> pd.DataFrame:
     return pd.DataFrame(records, columns=columns)
 
 
-def is_source_alive(url: str, logger: logging.Logger) -> bool:
-    try:
-        response = requests.get(url, timeout=HEALTHCHECK_TIMEOUT)
-        response.raise_for_status()
-        logger.info("Source health OK: %s status=%s", url, response.status_code)
-        return True
-    except requests.RequestException as error:
-        logger.warning("Source health FAILED: %s error=%s", url, error)
-        return False
+class ProxyRotatingSession(requests.Session):
+    def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
+        super().__init__()
+        self.logger = logger
+        self.proxy_pool = proxies.copy()
+        self._proxy_index = 0
+        self._proxy_lock = threading.Lock()
+        self._proxy_failures: dict[str, int] = {}
+        self.trust_env = False
+
+    def _next_proxy(self) -> str | None:
+        with self._proxy_lock:
+            if not self.proxy_pool:
+                return None
+            pool_size = len(self.proxy_pool)
+            for _ in range(pool_size):
+                proxy = self.proxy_pool[self._proxy_index % pool_size]
+                self._proxy_index += 1
+                if self._proxy_failures.get(proxy, 0) < 2:
+                    return proxy
+            return self.proxy_pool[self._proxy_index % pool_size]
+
+    def _mark_failed(self, proxy: str | None) -> None:
+        if not proxy:
+            return
+        with self._proxy_lock:
+            self._proxy_failures[proxy] = self._proxy_failures.get(proxy, 0) + 1
+            if self._proxy_failures[proxy] >= 3 and proxy in self.proxy_pool and len(self.proxy_pool) > 10:
+                self.proxy_pool.remove(proxy)
+
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        max_attempts = min(PROXY_MAX_ATTEMPTS, max(1, len(self.proxy_pool))) if self.proxy_pool else 0
+        last_error: Exception | None = None
+        base_timeout = kwargs.get("timeout", REQUEST_TIMEOUT)
+
+        for _ in range(max_attempts):
+            request_kwargs = dict(kwargs)
+            proxy = self._next_proxy()
+            if not proxy:
+                break
+            request_kwargs["proxies"] = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+            request_kwargs["timeout"] = min(base_timeout, PROXY_REQUEST_TIMEOUT)
+            try:
+                return super().request(method, url, **request_kwargs)
+            except requests.RequestException as error:
+                last_error = error
+                self._mark_failed(proxy)
+                self.logger.warning("Proxy request failed proxy=%s url=%s error=%s", proxy, url, error)
+
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("proxies", None)
+        try:
+            return super().request(method, url, **fallback_kwargs)
+        except requests.RequestException as error:
+            last_error = error
+
+        if last_error:
+            raise last_error
+        raise requests.RequestException(f"Request failed without attempts url={url}")
 
 
-def is_acra_source_alive(logger: logging.Logger) -> bool:
-    def _looks_like_issuers_page(response_text: str) -> bool:
-        normalized = response_text.lower()
-        return "ratings/issuers/" in normalized or "найдено:" in normalized
+def _extract_proxies_from_text(text: str) -> set[str]:
+    proxy_regex = re.compile(r"\b((?:\d{1,3}\.){3}\d{1,3}):(\d{2,5})\b")
+    result: set[str] = set()
+    for ip, port in proxy_regex.findall(text):
+        octets = ip.split(".")
+        if len(octets) != 4 or any(int(octet) > 255 for octet in octets):
+            continue
+        port_num = int(port)
+        if 1 <= port_num <= 65535:
+            result.add(f"{ip}:{port_num}")
+    return result
 
-    checks = [
-        (f"{ACRA_BASE_URL}/ratings/issuers/", True, HEALTHCHECK_TIMEOUT, "direct"),
-        (f"{ACRA_PROXY_BASE_URL}/ratings/issuers/", True, HEALTHCHECK_TIMEOUT + 2, "proxy"),
-    ]
 
+def fetch_proxy_candidates(logger: logging.Logger) -> list[str]:
     session = requests.Session()
     session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
+    collected: set[str] = set()
 
-    for url, verify_ssl, timeout, label in checks:
-        try:
-            response = session.get(url, timeout=timeout, verify=verify_ssl)
-            response.raise_for_status()
-            if not _looks_like_issuers_page(response.text):
-                logger.warning("ACRA source health %s failed: unexpected response content", label)
-                continue
-            logger.info("ACRA source health OK %s status=%s", label, response.status_code)
-            return True
-        except requests.RequestException as error:
-            logger.warning("ACRA source health %s failed: %s", label, error)
-
-    return False
-
-
-def check_sources_health(logger: logging.Logger) -> dict[str, bool]:
-    checks = {
-        "moex": f"{BASE_URL}/engines/stock/markets/shares/securities.json",
-        "expert_ra": f"{EXPERT_RA_BASE_URL}/ratings/",
-        "acra": f"{ACRA_BASE_URL}/ratings/issuers/",
-        "nkr": f"{NKR_BASE_URL}/ratings/issuers/",
-        "nra": f"{NRA_BASE_URL}/list-of-credit-ratings/",
-    }
-    statuses: dict[str, bool] = {}
-    with ThreadPoolExecutor(max_workers=len(checks)) as executor:
-        futures = {
-            executor.submit(is_acra_source_alive, logger) if name == "acra" else executor.submit(is_source_alive, url, logger): name
-            for name, url in checks.items()
-        }
-        with progress(total=len(futures), desc="Проверка источников", unit="источник") as pbar:
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(PROXY_SOURCES))) as executor:
+        futures = {executor.submit(session.get, url, timeout=PROXY_SOURCE_TIMEOUT): url for url in PROXY_SOURCES}
+        with progress(total=len(futures), desc="Сбор прокси", unit="источник") as pbar:
             for future in as_completed(futures):
-                name = futures[future]
+                url = futures[future]
                 try:
-                    statuses[name] = future.result()
+                    response = future.result()
+                    response.raise_for_status()
+                    found = _extract_proxies_from_text(response.text)
+                    collected.update(found)
+                    logger.info("Proxy source parsed: %s proxies=%s", url, len(found))
                 except Exception as error:
-                    logger.exception("Source health failed name=%s: %s", name, error)
-                    statuses[name] = False
+                    logger.warning("Proxy source failed: %s error=%s", url, error)
                 pbar.update(1)
 
-    return statuses
+    proxies = sorted(collected)
+    if len(proxies) > PROXY_CANDIDATE_LIMIT:
+        proxies = proxies[:PROXY_CANDIDATE_LIMIT]
+    logger.info("Proxy candidates collected: %s", len(proxies))
+    return proxies
+
+
+def validate_proxies(proxies: list[str], logger: logging.Logger) -> list[str]:
+    if not proxies:
+        return []
+
+    def check_proxy(proxy: str) -> str | None:
+        try:
+            response = requests.get(
+                "http://httpbin.org/ip",
+                timeout=PROXY_VALIDATION_TIMEOUT,
+                proxies={"http": f"http://{proxy}", "https": f"http://{proxy}"},
+            )
+            response.raise_for_status()
+            return proxy
+        except Exception:
+            return None
+
+    valid: list[str] = []
+    started_at = perf_counter()
+    with ThreadPoolExecutor(max_workers=PROXY_VALIDATION_WORKERS) as executor:
+        futures = [executor.submit(check_proxy, proxy) for proxy in proxies]
+        with progress(total=len(futures), desc="Проверка прокси", unit="прокси") as pbar:
+            for future in as_completed(futures):
+                resolved = future.result()
+                if resolved:
+                    valid.append(resolved)
+                pbar.update(1)
+
+                if len(valid) >= PROXY_VALIDATION_TARGET or (perf_counter() - started_at) >= PROXY_VALIDATION_TIME_BUDGET:
+                    for pending in futures:
+                        pending.cancel()
+                    pbar.n = len(futures)
+                    pbar.refresh()
+                    break
+
+    logger.info("Proxy validated: total=%s valid=%s", len(proxies), len(valid))
+    return sorted(set(valid))
+
+
+def save_valid_proxies_csv(proxies: list[str], logger: logging.Logger) -> None:
+    frame = pd.DataFrame([{"proxy": proxy} for proxy in proxies])
+    frame.to_csv(PROXYLIST_FILE, index=False, encoding="utf-8-sig")
+    logger.info("Proxy list saved to %s rows=%s", PROXYLIST_FILE, len(frame))
 
 
 def load_cache(logger: logging.Logger) -> dict[str, dict[str, Any]]:
+    if not USE_CACHE:
+        logger.info("Cache disabled by USE_CACHE flag")
+        return {"secid_to_emitter": {}, "emitters": {}}
+
     if not CACHE_FILE.exists():
         return {"secid_to_emitter": {}, "emitters": {}}
 
@@ -214,6 +330,10 @@ def load_cache(logger: logging.Logger) -> dict[str, dict[str, Any]]:
 
 
 def save_cache(cache: dict[str, dict[str, Any]], logger: logging.Logger) -> None:
+    if not USE_CACHE:
+        logger.info("Cache save skipped by USE_CACHE flag")
+        return
+
     try:
         with CACHE_FILE.open("w", encoding="utf-8") as file:
             json.dump(cache, file, ensure_ascii=False, indent=2)
@@ -233,9 +353,9 @@ def setup_logging() -> logging.Logger:
 
 
 class MoexClient:
-    def __init__(self, logger: logging.Logger) -> None:
+    def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
         self.logger = logger
-        self.session = requests.Session()
+        self.session = ProxyRotatingSession(logger, proxies)
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
         adapter = requests.adapters.HTTPAdapter(pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
         self.session.mount("https://", adapter)
@@ -283,9 +403,9 @@ class MoexClient:
 
 
 class ExpertRaClient:
-    def __init__(self, logger: logging.Logger) -> None:
+    def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
         self.logger = logger
-        self.session = requests.Session()
+        self.session = ProxyRotatingSession(logger, proxies)
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
@@ -397,9 +517,9 @@ class ExpertRaClient:
 
 
 class AcraClient:
-    def __init__(self, logger: logging.Logger) -> None:
+    def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
         self.logger = logger
-        self.session = requests.Session()
+        self.session = ProxyRotatingSession(logger, proxies)
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
@@ -621,9 +741,9 @@ class AcraClient:
 
 
 class NkrClient:
-    def __init__(self, logger: logging.Logger) -> None:
+    def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
         self.logger = logger
-        self.session = requests.Session()
+        self.session = ProxyRotatingSession(logger, proxies)
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
@@ -714,9 +834,9 @@ class NkrClient:
 
 
 class NraClient:
-    def __init__(self, logger: logging.Logger) -> None:
+    def __init__(self, logger: logging.Logger, proxies: list[str]) -> None:
         self.logger = logger
-        self.session = requests.Session()
+        self.session = ProxyRotatingSession(logger, proxies)
         self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
 
     def _normalize_inn(self, value: Any) -> str | None:
@@ -1156,23 +1276,29 @@ def run() -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, handle_sigint)
-    client = MoexClient(logger)
-    expert_ra_client = ExpertRaClient(logger)
-    acra_client = AcraClient(logger)
-    nkr_client = NkrClient(logger)
-    nra_client = NraClient(logger)
+
+    print("=====\nЭтап 0: Сбор и проверка прокси")
+    stage_started_at = perf_counter()
+    proxy_candidates = fetch_proxy_candidates(logger)
+    valid_proxies = validate_proxies(proxy_candidates, logger)
+    save_valid_proxies_csv(valid_proxies, logger)
+    stage_times["Этап 0: Сбор и проверка прокси"] = perf_counter() - stage_started_at
+
+    client = MoexClient(logger, valid_proxies)
+    expert_ra_client = ExpertRaClient(logger, valid_proxies)
+    acra_client = AcraClient(logger, valid_proxies)
+    nkr_client = NkrClient(logger, valid_proxies)
+    nra_client = NraClient(logger, valid_proxies)
     cache = load_cache(logger)
 
     shares = pd.DataFrame()
     bonds = pd.DataFrame()
     emitters = pd.DataFrame()
-
-    health = check_sources_health(logger)
-    moex_alive = health.get("moex", False)
-    expert_ra_alive = health.get("expert_ra", False)
-    acra_alive = health.get("acra", False)
-    nkr_alive = health.get("nkr", False)
-    nra_alive = health.get("nra", False)
+    moex_alive = True
+    expert_ra_alive = True
+    acra_alive = True
+    nkr_alive = True
+    nra_alive = True
 
     try:
         def fetch_shares_online() -> pd.DataFrame:
