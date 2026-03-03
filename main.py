@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import signal
 from io import BytesIO
@@ -20,6 +21,8 @@ from tqdm import tqdm
 
 BASE_URL = "https://iss.moex.com/iss"
 EXPERT_RA_BASE_URL = "https://raexpert.ru"
+ACRA_BASE_URL = "https://www.acra-ratings.ru"
+ACRA_PROXY_BASE_URL = "https://r.jina.ai/http://www.acra-ratings.ru"
 OUTPUT_DIR = Path(__file__).resolve().parent
 LOG_FILE = OUTPUT_DIR / "main.log"
 SHARES_FILE = OUTPUT_DIR / "moex_shares.xlsx"
@@ -244,6 +247,167 @@ class ExpertRaClient:
         return result
 
 
+class AcraClient:
+    def __init__(self, logger: logging.Logger) -> None:
+        self.logger = logger
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "Vibe-MOEX-Collector/5.0"})
+
+    def _normalize_inn(self, value: Any) -> str | None:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        digits = "".join(ch for ch in str(value).strip() if ch.isdigit())
+        return digits or None
+
+    def _clean_text(self, value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip()
+
+    def _extract_total_issuers(self, text: str) -> int | None:
+        match = re.search(r"Найдено:\s*(\d+)", text)
+        return int(match.group(1)) if match else None
+
+    def _parse_ru_date(self, raw_value: str) -> str:
+        month_map = {
+            "янв": "01",
+            "фев": "02",
+            "мар": "03",
+            "апр": "04",
+            "мая": "05",
+            "май": "05",
+            "июн": "06",
+            "июл": "07",
+            "авг": "08",
+            "сен": "09",
+            "окт": "10",
+            "ноя": "11",
+            "дек": "12",
+        }
+        normalized = self._clean_text(raw_value.lower())
+        match = re.search(r"(\d{1,2})\s+([а-я]+)\s+(\d{4})", normalized)
+        if not match:
+            return self._clean_text(raw_value)
+
+        day, month_text, year = match.groups()
+        month = month_map.get(month_text[:3])
+        if not month:
+            return self._clean_text(raw_value)
+        return f"{int(day):02d}.{month}.{year}"
+
+    def _get_page_text(self, path: str, params: dict[str, Any] | None = None) -> str:
+        url = f"{ACRA_BASE_URL}{path}"
+        try:
+            response = self.session.get(url, params=params or {}, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            self.logger.info("GET ACRA %s params=%s status=%s", url, params, response.status_code)
+            return response.text
+        except requests.RequestException as error:
+            self.logger.warning("ACRA direct request failed, fallback to jina proxy: %s", error)
+            proxy_response = self.session.get(f"{ACRA_PROXY_BASE_URL}{path}", params=params or {}, timeout=REQUEST_TIMEOUT * 2)
+            proxy_response.raise_for_status()
+            self.logger.info("GET ACRA proxy %s params=%s status=%s", path, params, proxy_response.status_code)
+            return proxy_response.text
+
+    def _extract_issuer_links(self, text: str) -> list[str]:
+        matches = re.findall(r"/ratings/issuers/(\d+)/", text)
+        unique_ids = sorted(set(matches), key=lambda value: int(value))
+        return [f"/ratings/issuers/{issuer_id}/" for issuer_id in unique_ids]
+
+    def _parse_issuer_card(self, text: str) -> tuple[str | None, str | None]:
+        lines = [self._clean_text(line) for line in text.splitlines() if self._clean_text(line)]
+        if not lines:
+            return None, None
+
+        inn: str | None = None
+        for index, line in enumerate(lines):
+            if line.upper() == "ИНН" and index + 1 < len(lines):
+                candidate = self._normalize_inn(lines[index + 1])
+                if candidate:
+                    inn = candidate
+                    break
+
+        if not inn:
+            return None, None
+
+        current_start: int | None = None
+        for index, line in enumerate(lines):
+            if line.lower() == "текущий рейтинг":
+                current_start = index
+                break
+
+        if current_start is None:
+            return inn, None
+
+        end_index = len(lines)
+        for index in range(current_start + 1, len(lines)):
+            if lines[index].lower() == "история рейтингов":
+                end_index = index
+                break
+
+        current_block = lines[current_start:end_index]
+        rating = next((line for line in current_block if re.fullmatch(r"[A-Z]{1,4}[+-]?\(RU\)", line)), None)
+
+        forecast: str | None = None
+        for line in current_block:
+            lower_line = line.lower()
+            if lower_line.startswith("прогноз "):
+                forecast = self._clean_text(line[8:])
+                break
+            if "под наблюдением" in lower_line or lower_line in {"позитивный", "стабильный", "негативный", "развивающийся"}:
+                forecast = line
+                break
+
+        date_value: str | None = None
+        for line in current_block:
+            if re.search(r"\b\d{1,2}\s+[а-я]+\s+\d{4}\b", line.lower()):
+                date_value = self._parse_ru_date(line)
+                break
+
+        if not rating:
+            return inn, None
+
+        rating_parts = [part for part in [rating, forecast, date_value] if part]
+        return inn, "\n".join(rating_parts) if rating_parts else None
+
+    def fetch_latest_ratings_by_inn(self, inns: set[str]) -> dict[str, str]:
+        normalized_inns = {self._normalize_inn(value) for value in inns}
+        normalized_inns = {inn for inn in normalized_inns if inn}
+        if not normalized_inns:
+            return {}
+
+        first_page = self._get_page_text("/ratings/issuers/", params={"page": 1})
+        total_issuers = self._extract_total_issuers(first_page)
+        total_pages = max(1, math.ceil(total_issuers / 10)) if total_issuers else 100
+
+        issuer_links = set(self._extract_issuer_links(first_page))
+        with progress(total=max(total_pages - 1, 0), desc="Сканирование страниц АКРА", unit="страница") as pbar:
+            for page in range(2, total_pages + 1):
+                page_text = self._get_page_text("/ratings/issuers/", params={"page": page})
+                page_links = self._extract_issuer_links(page_text)
+                if not page_links and not total_issuers:
+                    pbar.update(total_pages - page + 1)
+                    break
+                issuer_links.update(page_links)
+                pbar.update(1)
+
+        ratings_by_inn: dict[str, str] = {}
+        sorted_links = sorted(issuer_links, key=lambda link: int(link.rstrip("/").split("/")[-1]))
+        with progress(total=len(sorted_links), desc="Парсинг АКРА", unit="эмитент") as pbar:
+            for issuer_path in sorted_links:
+                try:
+                    issuer_text = self._get_page_text(issuer_path)
+                    inn, value = self._parse_issuer_card(issuer_text)
+                    if inn and inn in normalized_inns and value:
+                        ratings_by_inn[inn] = value
+                except requests.RequestException as error:
+                    self.logger.exception("ACRA issuer fetch failed path=%s: %s", issuer_path, error)
+                except Exception as error:
+                    self.logger.exception("ACRA issuer parse failed path=%s: %s", issuer_path, error)
+                pbar.update(1)
+
+        self.logger.info("ACRA ratings matched by INN: %s", len(ratings_by_inn))
+        return ratings_by_inn
+
+
 def enrich_emitters(
     client: MoexClient,
     shares: pd.DataFrame,
@@ -386,6 +550,21 @@ def apply_expert_ra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, st
     return result
 
 
+def apply_acra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) -> pd.DataFrame:
+    result = emitters.copy()
+
+    def rating_for_row(inn: Any) -> Any:
+        if pd.isna(inn):
+            return pd.NA
+        normalized = "".join(ch for ch in str(inn) if ch.isdigit())
+        if not normalized:
+            return pd.NA
+        return ratings_by_inn.get(normalized, pd.NA)
+
+    result["Рейтинг Акра"] = result["INN"].map(rating_for_row)
+    return result
+
+
 def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
     for col_idx, column_name in enumerate(df.columns, start=1):
         values = df[column_name]
@@ -443,6 +622,7 @@ def run() -> None:
     signal.signal(signal.SIGINT, handle_sigint)
     client = MoexClient(logger)
     expert_ra_client = ExpertRaClient(logger)
+    acra_client = AcraClient(logger)
     cache = load_cache(logger)
 
     try:
@@ -474,7 +654,13 @@ def run() -> None:
         emitters = apply_expert_ra_ratings(emitters, expert_ra_ratings)
         stage_times["Этап 4: Получение рейтингов Эксперт РА"] = perf_counter() - stage_started_at
 
-        print("Этап 5: Формирование Excel")
+        print("Этап 5: Получение рейтингов АКРА")
+        stage_started_at = perf_counter()
+        acra_ratings = acra_client.fetch_latest_ratings_by_inn(inns)
+        emitters = apply_acra_ratings(emitters, acra_ratings)
+        stage_times["Этап 5: Получение рейтингов АКРА"] = perf_counter() - stage_started_at
+
+        print("Этап 6: Формирование Excel")
         stage_started_at = perf_counter()
 
         excel_exports = [
@@ -487,7 +673,7 @@ def run() -> None:
                 save_to_excel(df, output_path, logger)
                 pbar.update(1)
 
-        stage_times["Этап 5: Формирование Excel"] = perf_counter() - stage_started_at
+        stage_times["Этап 6: Формирование Excel"] = perf_counter() - stage_started_at
 
         print("=====\nГотово")
         logger.info("Script completed successfully")
