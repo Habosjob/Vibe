@@ -14,7 +14,7 @@ from typing import Any
 import pandas as pd
 import requests
 from openpyxl.formatting.rule import FormulaRule
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from tqdm import tqdm
 
@@ -31,6 +31,13 @@ CACHE_FILE = OUTPUT_DIR / "emitter_cache.json"
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ZEBRA_FILL = PatternFill(fill_type="solid", fgColor="E8F2FF")
+THIN_BORDER = Border(
+    left=Side(style="thin", color="000000"),
+    right=Side(style="thin", color="000000"),
+    top=Side(style="thin", color="000000"),
+    bottom=Side(style="thin", color="000000"),
+)
+CENTERED_WRAP_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 
 def progress(total: int, desc: str, unit: str):
@@ -62,33 +69,6 @@ def save_cache(cache: dict[str, dict[str, Any]], logger: logging.Logger) -> None
     except Exception as error:
         logger.exception("Cache save failed: %s", error)
 
-
-
-
-def load_cache(logger: logging.Logger) -> dict[str, dict[str, Any]]:
-    if not CACHE_FILE.exists():
-        return {"secid_to_emitter": {}, "emitters": {}}
-
-    try:
-        with CACHE_FILE.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-        if isinstance(data, dict):
-            return {
-                "secid_to_emitter": data.get("secid_to_emitter", {}),
-                "emitters": data.get("emitters", {}),
-            }
-    except Exception as error:
-        logger.exception("Cache load failed: %s", error)
-
-    return {"secid_to_emitter": {}, "emitters": {}}
-
-
-def save_cache(cache: dict[str, dict[str, Any]], logger: logging.Logger) -> None:
-    try:
-        with CACHE_FILE.open("w", encoding="utf-8") as file:
-            json.dump(cache, file, ensure_ascii=False, indent=2)
-    except Exception as error:
-        logger.exception("Cache save failed: %s", error)
 
 def setup_logging() -> logging.Logger:
     logger = logging.getLogger("moex_export")
@@ -245,11 +225,16 @@ class ExpertRaClient:
 
                 if current_best is None or row_date_for_sort > current_best["_sort_date"]:
                     rating = self._clean_text(row.get("Рейтинг"))
+                    if not rating or not rating.lower().startswith("ru"):
+                        pbar.update(1)
+                        continue
+
                     forecast = self._clean_text(row.get("Прогноз"))
                     date_text = self._format_date(row.get("Дата присвоения/актуализации/изменения рейтинга"))
+                    rating_parts = [part for part in [rating, forecast, date_text] if part]
                     ratings_by_inn[inn] = {
                         "_sort_date": row_date_for_sort,
-                        "value": f"{rating}\n{forecast}\n{date_text}".strip(),
+                        "value": "\n".join(rating_parts),
                     }
 
                 pbar.update(1)
@@ -421,6 +406,11 @@ def save_to_excel(df: pd.DataFrame, path: Path, logger: logging.Logger) -> None:
 
         worksheet.freeze_panes = "A2"
         worksheet.auto_filter.ref = worksheet.dimensions
+
+        for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
+            for cell in row:
+                cell.alignment = CENTERED_WRAP_ALIGNMENT
+                cell.border = THIN_BORDER
 
         for cell in worksheet[1]:
             cell.fill = HEADER_FILL
