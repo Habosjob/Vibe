@@ -1225,7 +1225,7 @@ def run() -> None:
         inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
         expert_ra_ratings: dict[str, str] = {}
         rating_executor = ThreadPoolExecutor(max_workers=3)
-        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if acra_alive else None
+        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns)
         nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if nkr_alive else None
         nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if nra_alive else None
         if expert_ra_alive:
@@ -1251,17 +1251,13 @@ def run() -> None:
         print("Этап 5: Получение рейтингов АКРА")
         stage_started_at = perf_counter()
         acra_ratings: dict[str, str] = {}
-        if acra_alive:
-            try:
-                acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
-                save_json_dict(ACRA_CACHE_FILE, acra_ratings, logger)
-            except requests.RequestException as error:
-                logger.warning("ACRA stage failed, trying cache: %s", error)
-                skipped_sources.append("АКРА")
-                acra_ratings = {k: str(v) for k, v in load_json_dict(ACRA_CACHE_FILE, logger).items()}
-                if acra_ratings:
-                    restored_sources.append("АКРА")
-        else:
+        if not acra_alive:
+            logger.warning("ACRA health check is negative, but fetching is still attempted")
+        try:
+            acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
+            save_json_dict(ACRA_CACHE_FILE, acra_ratings, logger)
+        except requests.RequestException as error:
+            logger.warning("ACRA stage failed, trying cache: %s", error)
             skipped_sources.append("АКРА")
             acra_ratings = {k: str(v) for k, v in load_json_dict(ACRA_CACHE_FILE, logger).items()}
             if acra_ratings:
