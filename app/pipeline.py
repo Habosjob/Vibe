@@ -83,6 +83,20 @@ class CorpBondRow:
     ladder_coupon: str
 
 
+@dataclass
+class BondizationEvent:
+    payment_date: date
+    coupon_amount: float
+    amortization_amount: float
+
+
+@dataclass
+class CbrSnapshot:
+    key_rate_today: float
+    ruonia_today: float
+    zcyc_today: dict[float, float]
+
+
 class MoexClient:
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
@@ -237,6 +251,16 @@ def _is_rub_currency(currency: Any) -> bool:
     return any(token in rub_markers for token in tokens)
 
 
+def _currencies_compatible(face_currency: str, nominal_currency: str) -> bool:
+    if not face_currency or not nominal_currency:
+        return False
+    left = face_currency.strip().upper()
+    right = nominal_currency.strip().upper()
+    if left == right:
+        return True
+    return _is_rub_currency(left) and _is_rub_currency(right)
+
+
 def _forecast_value(forecast: dict[int, float], years_ahead: int) -> float:
     if years_ahead <= 0:
         return float(forecast[0])
@@ -245,37 +269,58 @@ def _forecast_value(forecast: dict[int, float], years_ahead: int) -> float:
     return float(forecast[max(forecast.keys())])
 
 
-def _extract_formula_rate(
-    formula: str,
-    key_rate: float,
-    ruonia: float,
-    gcurve_5y: float,
-    gcurve_7y: float,
-) -> float | None:
+def _sanitize_coupon_formula(formula: str) -> str:
+    prepared = formula.upper().replace(",", ".")
+    prepared = re.sub(r"\b(?:MAX|MIN)\s*\([^)]*\)", " ", prepared)
+    prepared = re.sub(r"\b(?:MAX|MIN)\s*[-+]?\d+(?:\.\d+)?%?", " ", prepared)
+    prepared = prepared.replace("Σ", " ").replace("∑", " ")
+    prepared = re.sub(r"\((?:[^)]*(?:MAX|MIN|КАП|ФЛОР|ОГРАНИЧ)[^)]*)\)", " ", prepared)
+    prepared = re.sub(r"\s+", " ", prepared).strip()
+    return prepared
+
+
+def _extract_index_premium(formula: str) -> tuple[str | None, float]:
     if not formula:
-        return None
-    normalized = formula.upper().replace(" ", "").replace(",", ".")
-    numbers = [float(x) for x in re.findall(r"[+-]?\d+(?:\.\d+)?", normalized)]
-    spread = numbers[-1] if numbers else 0.0
-    base = None
-    if "RUONIA" in normalized:
-        base = ruonia
-    elif "G-CURVE7Y" in normalized or "G-CURVE7" in normalized:
-        base = gcurve_7y
-    elif "G-CURVE5Y" in normalized or "G-CURVE5" in normalized:
-        base = gcurve_5y
-    elif "КС" in normalized or "KC" in normalized:
-        base = key_rate
-    if base is None:
-        return None
-    rate = base + spread
-    max_match = re.search(r"MAX\(?([\d.]+)%?\)?", normalized)
-    if max_match:
-        try:
-            rate = min(rate, float(max_match.group(1)))
-        except Exception:
-            pass
-    return rate
+        return None, 0.0
+    normalized = _sanitize_coupon_formula(formula)
+    compact = normalized.replace(" ", "")
+
+    index_type: str | None = None
+    if "RUONIA" in compact:
+        index_type = "RUONIA"
+    elif "КС" in compact or "KC" in compact or "KEYRATE" in compact:
+        index_type = "KEYRATE"
+    elif "ИПЦ" in compact or "CPI" in compact:
+        index_type = "CPI"
+    elif "G-CURVE" in compact or "КБД" in compact:
+        index_type = "ZCYC"
+
+    premium = 0.0
+    premium_match = re.search(r"([+-])\s*(\d+(?:\.\d+)?)\s*(BPS|Б\.П\.|П\.П\.|%)?", normalized)
+    if premium_match:
+        sign = -1.0 if premium_match.group(1) == "-" else 1.0
+        value = float(premium_match.group(2))
+        unit = (premium_match.group(3) or "").upper()
+        if "BPS" in unit:
+            value /= 100.0
+        premium = sign * value
+
+    return index_type, premium
+
+
+def _extract_zcyc_terms(formula: str) -> tuple[float | None, float | None]:
+    normalized = _sanitize_coupon_formula(formula)
+    compact = normalized.replace(" ", "")
+    spread_match = re.search(r"(\d+(?:\.\d+)?)Y\s*[-]\s*(\d+(?:\.\d+)?)Y", compact)
+    if spread_match:
+        return float(spread_match.group(1)), float(spread_match.group(2))
+    terms = re.findall(r"(\d+(?:\.\d+)?)\s*Y", compact)
+    if terms:
+        return float(terms[0]), None
+    years_match = re.search(r"КБД\s*(\d+(?:\.\d+)?)", normalized)
+    if years_match:
+        return float(years_match.group(1)), None
+    return None, None
 
 
 def _extract_last_row_numbers(page_html: str) -> list[float]:
@@ -295,7 +340,7 @@ def _extract_last_row_numbers(page_html: str) -> list[float]:
     return []
 
 
-async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, float]:
+async def _fetch_cbr_curve(client: MoexClient) -> CbrSnapshot:
     urls = {
         "key": "https://cbr.ru/hd_base/KeyRate/",
         "ruonia": "https://cbr.ru/hd_base/ruonia/",
@@ -304,8 +349,7 @@ async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, flo
     pages = await asyncio.gather(*(client.get_text(url) for url in urls.values()), return_exceptions=True)
     key_rate = config.YTM_KEY_RATE_FORECAST[0]
     ruonia = key_rate - config.YTM_RUONIA_KEY_SPREAD_DEFAULT
-    gcurve_5y = key_rate
-    gcurve_7y = key_rate
+    zcyc_terms = {0.5: key_rate, 2.0: key_rate, 5.0: key_rate, 7.0: key_rate}
 
     if not isinstance(pages[0], Exception):
         try:
@@ -321,127 +365,147 @@ async def _fetch_cbr_curve(client: MoexClient) -> tuple[float, float, float, flo
             if ruonia_values:
                 ruonia = ruonia_values[-1]
         except Exception:
-            LOGGER.warning("Не удалось распарсить RUONIA, используем спред к КС")
-    else:
-        ruonia = key_rate - config.YTM_RUONIA_KEY_SPREAD_DEFAULT
+            LOGGER.warning("Не удалось распарсить RUONIA, используем fallback-спред")
 
     if not isinstance(pages[2], Exception):
         try:
             zcyc_values = _extract_last_row_numbers(str(pages[2]))
-            if len(zcyc_values) >= 7:
-                gcurve_5y = zcyc_values[4]
-                gcurve_7y = zcyc_values[6]
+            if len(zcyc_values) >= 12:
+                terms = [0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0]
+                zcyc_terms = {term: zcyc_values[idx] for idx, term in enumerate(terms)}
         except Exception:
-            LOGGER.warning("Не удалось распарсить КБД ОФЗ, используем КС")
-    else:
-        gcurve_5y = key_rate
-        gcurve_7y = key_rate
+            LOGGER.warning("Не удалось распарсить КБД ОФЗ, используем fallback")
 
-    return key_rate, ruonia, gcurve_5y, gcurve_7y
+    spread_key_ruonia = key_rate - ruonia
+    if abs(spread_key_ruonia) > config.YTM_MAX_ABS_SPREAD_SANITY:
+        spread_key_ruonia = config.YTM_RUONIA_KEY_SPREAD_DEFAULT
+    ruonia = key_rate - spread_key_ruonia
+    return CbrSnapshot(key_rate_today=key_rate, ruonia_today=ruonia, zcyc_today=zcyc_terms)
 
 
 def _calc_ytm_percent(
     clean_price: float | None,
     accrued_int: float | None,
     face_value: float | None,
-    cashflow_schedule: list[tuple[date, float]],
+    cashflow_schedule: list[BondizationEvent],
     coupon_type: str,
     coupon_formula: str,
     secid: str,
-    end_date: date | None,
+    offer_date: date | None,
+    maturity_date: date | None,
     coupon_period: int | None,
     coupon_percent: float | None,
-    key_rate: float,
-    ruonia: float,
-    gcurve_5y: float,
-    gcurve_7y: float,
+    valuation_date: date,
+    cbr_snapshot: CbrSnapshot,
+    face_currency: str,
+    nominal_currency: str,
 ) -> float | None:
     if clean_price is None or face_value is None or face_value <= 0:
         return None
-    today = date.today()
-    horizon = end_date if end_date and end_date > today else None
-    dirty_price = (clean_price / 100.0) * face_value + max(accrued_int or 0.0, 0.0)
+    if not _currencies_compatible(face_currency, nominal_currency):
+        return None
+
+    if offer_date and maturity_date:
+        horizon = offer_date if offer_date < maturity_date else maturity_date
+    else:
+        horizon = offer_date or maturity_date
+    if horizon is None or horizon <= valuation_date:
+        return None
+
+    clean_price_money = (clean_price / 100.0) * face_value
+    dirty_price = clean_price_money + max(accrued_int or 0.0, 0.0)
     if dirty_price <= 0:
         return None
 
-    lower_coupon_type = coupon_type.lower()
-    spread_key_ruonia = key_rate - ruonia
+    spread_key_ruonia = cbr_snapshot.key_rate_today - cbr_snapshot.ruonia_today
     if abs(spread_key_ruonia) > config.YTM_MAX_ABS_SPREAD_SANITY:
         spread_key_ruonia = config.YTM_RUONIA_KEY_SPREAD_DEFAULT
-    spread_g5 = gcurve_5y - key_rate
-    spread_g7 = gcurve_7y - key_rate
-    if abs(spread_g5) > config.YTM_MAX_ABS_SPREAD_SANITY:
-        spread_g5 = 0.0
-    if abs(spread_g7) > config.YTM_MAX_ABS_SPREAD_SANITY:
-        spread_g7 = 0.0
 
-    def _projected_coupon_amount(payment_day: int, period_days: int) -> float:
-        year_index = max(payment_day - 1, 0) // 365
-        projected_key = _forecast_value(config.YTM_KEY_RATE_FORECAST, year_index)
-        projected_infl = _forecast_value(config.YTM_INFLATION_FORECAST, year_index)
-        projected_ruonia = projected_key - spread_key_ruonia
-        projected_g5 = projected_key + spread_g5
-        projected_g7 = projected_key + spread_g7
-        annual_rate = coupon_percent or 0.0
-        if secid.startswith("SU50"):
-            annual_rate = projected_infl
-        if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
-            parsed = _extract_formula_rate(coupon_formula, projected_key, projected_ruonia, projected_g5, projected_g7)
-            if parsed is not None:
-                annual_rate = parsed
-        return max(face_value * (annual_rate / 100.0) * (period_days / 365.0), 0.0)
+    spread_zcyc = {term: value - cbr_snapshot.key_rate_today for term, value in cbr_snapshot.zcyc_today.items()}
 
-    def _baseline_coupon_amount(payment_day: int, period_days: int) -> float:
-        if "флоатер" in lower_coupon_type or secid.startswith("SU50"):
-            return _projected_coupon_amount(payment_day, period_days)
-        fixed_rate = coupon_percent or 0.0
-        return max(face_value * (fixed_rate / 100.0) * (period_days / 365.0), 0.0)
+    lower_coupon_type = coupon_type.lower()
+    index_type, premium = _extract_index_premium(coupon_formula)
+    zcyc_term_a, zcyc_term_b = _extract_zcyc_terms(coupon_formula)
 
-    filtered_schedule: list[tuple[date, float]] = []
-    for payment_date, amount in cashflow_schedule:
-        if payment_date <= today or amount <= 0:
-            continue
-        if horizon is not None and payment_date > horizon:
-            continue
-        filtered_schedule.append((payment_date, float(amount)))
+    def _projected_key_rate(payment_date: date) -> float:
+        year_index = max((payment_date - valuation_date).days, 0) // 365
+        return _forecast_value(config.YTM_KEY_RATE_FORECAST, year_index)
 
-    if not filtered_schedule:
-        if horizon is None or coupon_period is None or coupon_period <= 0:
+    def _projected_inflation(payment_date: date) -> float:
+        year_index = max((payment_date - valuation_date).days, 0) // 365
+        return _forecast_value(config.YTM_INFLATION_FORECAST, year_index)
+
+    def _projected_zcyc(payment_date: date, term: float) -> float:
+        base = _projected_key_rate(payment_date)
+        nearest_term = min(spread_zcyc.keys(), key=lambda x: abs(x - term)) if spread_zcyc else term
+        return base + spread_zcyc.get(nearest_term, 0.0)
+
+    def _forecast_rate(payment_date: date) -> float:
+        key_forecast = _projected_key_rate(payment_date)
+        if index_type == "RUONIA":
+            return key_forecast - spread_key_ruonia + premium
+        if index_type == "ZCYC":
+            if zcyc_term_a is not None and zcyc_term_b is not None:
+                return (_projected_zcyc(payment_date, zcyc_term_a) - _projected_zcyc(payment_date, zcyc_term_b)) + premium
+            if zcyc_term_a is not None:
+                return _projected_zcyc(payment_date, zcyc_term_a) + premium
+        if index_type == "KEYRATE":
+            return key_forecast + premium
+        if index_type == "CPI":
+            return _projected_inflation(payment_date) + premium
+        return (coupon_percent or 0.0)
+
+    flows: list[tuple[int, float]] = []
+    outstanding_face = face_value
+
+    if cashflow_schedule:
+        for event in sorted(cashflow_schedule, key=lambda item: item.payment_date):
+            if event.payment_date <= valuation_date or event.payment_date > horizon:
+                continue
+            period_days = coupon_period if coupon_period and coupon_period > 0 else 91
+            coupon_amount = event.coupon_amount
+            if "флоатер" in lower_coupon_type or index_type in {"RUONIA", "KEYRATE", "ZCYC"}:
+                annual_rate = _forecast_rate(event.payment_date)
+                coupon_amount = max(outstanding_face * (annual_rate / 100.0) * (period_days / 365.0), 0.0)
+            if secid.startswith("SU50"):
+                infl_rate = _projected_inflation(event.payment_date)
+                years = max((event.payment_date - valuation_date).days, 0) / 365.0
+                indexed_face = face_value * ((1 + infl_rate / 100.0) ** years)
+                coupon_rate = coupon_percent or 0.0
+                coupon_amount = max(indexed_face * (coupon_rate / 100.0) * (period_days / 365.0), 0.0)
+            total_flow = coupon_amount + max(event.amortization_amount, 0.0)
+            if total_flow > 0:
+                flows.append((max((event.payment_date - valuation_date).days, 0), total_flow))
+            outstanding_face = max(outstanding_face - max(event.amortization_amount, 0.0), 0.0)
+
+        if outstanding_face > 1e-8 and not any(day == (horizon - valuation_date).days for day, _ in flows):
+            flows.append((max((horizon - valuation_date).days, 0), outstanding_face))
+    else:
+        if coupon_period is None or coupon_period <= 0:
             return None
-        cursor = today + timedelta(days=coupon_period)
+        cursor = valuation_date + timedelta(days=coupon_period)
         while cursor < horizon:
-            payment_day = max((cursor - today).days, 0)
-            estimated_coupon = _projected_coupon_amount(payment_day, coupon_period)
-            filtered_schedule.append((cursor, estimated_coupon))
+            annual_rate = _forecast_rate(cursor)
+            coupon_amount = max(outstanding_face * (annual_rate / 100.0) * (coupon_period / 365.0), 0.0)
+            if secid.startswith("SU50"):
+                infl_rate = _projected_inflation(cursor)
+                years = max((cursor - valuation_date).days, 0) / 365.0
+                indexed_face = face_value * ((1 + infl_rate / 100.0) ** years)
+                coupon_rate = coupon_percent or 0.0
+                coupon_amount = max(indexed_face * (coupon_rate / 100.0) * (coupon_period / 365.0), 0.0)
+            flows.append((max((cursor - valuation_date).days, 0), coupon_amount))
             cursor += timedelta(days=coupon_period)
-        horizon_day = max((horizon - today).days, 0)
-        estimated_coupon = _projected_coupon_amount(horizon_day, coupon_period)
-        filtered_schedule.append((horizon, face_value + estimated_coupon))
 
-    if horizon is not None:
-        has_redemption_on_horizon = any(abs((payment_date - horizon).days) <= 1 for payment_date, _ in filtered_schedule)
-        if not has_redemption_on_horizon:
-            filtered_schedule.append((horizon, face_value))
+        horizon_rate = _forecast_rate(horizon)
+        horizon_coupon = max(outstanding_face * (horizon_rate / 100.0) * (coupon_period / 365.0), 0.0)
+        flows.append((max((horizon - valuation_date).days, 0), outstanding_face + horizon_coupon))
 
-    normalized_flows = [(max((dt - today).days, 0), amount) for dt, amount in sorted(filtered_schedule, key=lambda i: i[0])]
-    if not normalized_flows:
-        return None
-
-    adjusted_flows: list[tuple[int, float]] = []
-    for payment_day, amount in normalized_flows:
-        adjusted_amount = float(amount)
-        period_days = coupon_period if coupon_period is not None and coupon_period > 0 else 91
-        min_expected_coupon = _baseline_coupon_amount(payment_day, period_days)
-        if min_expected_coupon > 0 and adjusted_amount < (min_expected_coupon * 0.5):
-            adjusted_amount = min_expected_coupon
-        adjusted_flows.append((payment_day, adjusted_amount))
-
-    if not adjusted_flows:
+    if not flows:
         return None
 
     def npv(rate: float) -> float:
         total = -dirty_price
-        for payment_day, amount in adjusted_flows:
+        for payment_day, amount in flows:
             total += amount / ((1.0 + rate) ** (payment_day / 365.0))
         return total
 
@@ -646,8 +710,8 @@ async def _fetch_emitters_with_cache(
     return result, len(cached), errors
 
 
-def _parse_bondization_cashflow_payload(payload: dict[str, Any]) -> tuple[list[tuple[date, float]], date | None]:
-    schedule: dict[date, float] = {}
+def _parse_bondization_cashflow_payload(payload: dict[str, Any]) -> tuple[list[BondizationEvent], date | None]:
+    events: dict[date, BondizationEvent] = {}
     amortization_start: date | None = None
 
     coupons = payload.get("coupons", {})
@@ -658,12 +722,14 @@ def _parse_bondization_cashflow_payload(payload: dict[str, Any]) -> tuple[list[t
         payment_date = _as_date(data.get("coupondate"))
         if payment_date is None:
             continue
-        amount = _parse_float(data.get("value_rub"))
-        if amount is None:
-            amount = _parse_float(data.get("value"))
-        if amount is None:
+        amount = _parse_float(data.get("value"))
+        if amount is None or amount <= 0:
             continue
-        schedule[payment_date] = schedule.get(payment_date, 0.0) + amount
+        existing = events.get(payment_date)
+        if existing is None:
+            events[payment_date] = BondizationEvent(payment_date=payment_date, coupon_amount=amount, amortization_amount=0.0)
+        else:
+            existing.coupon_amount += amount
 
     amortizations = payload.get("amortizations", {})
     amort_rows = amortizations.get("data", [])
@@ -673,17 +739,18 @@ def _parse_bondization_cashflow_payload(payload: dict[str, Any]) -> tuple[list[t
         payment_date = _as_date(data.get("amortdate"))
         if payment_date is None:
             continue
-        amount = _parse_float(data.get("value_rub"))
-        if amount is None:
-            amount = _parse_float(data.get("value"))
+        amount = _parse_float(data.get("value"))
         if amount is None or amount <= 0:
             continue
-        schedule[payment_date] = schedule.get(payment_date, 0.0) + amount
+        existing = events.get(payment_date)
+        if existing is None:
+            events[payment_date] = BondizationEvent(payment_date=payment_date, coupon_amount=0.0, amortization_amount=amount)
+        else:
+            existing.amortization_amount += amount
         if amortization_start is None or payment_date < amortization_start:
             amortization_start = payment_date
 
-    sorted_schedule = sorted(schedule.items(), key=lambda item: item[0])
-    return sorted_schedule, amortization_start
+    return sorted(events.values(), key=lambda item: item.payment_date), amortization_start
 
 
 async def _fetch_amortizations_with_cache(
@@ -691,12 +758,12 @@ async def _fetch_amortizations_with_cache(
     db: Database,
     secids: list[str],
     semaphore: asyncio.Semaphore,
-) -> tuple[dict[str, date | None], dict[str, list[tuple[date, float]]], int, int]:
+) -> tuple[dict[str, date | None], dict[str, list[BondizationEvent]], int, int]:
     min_ts = int(time.time()) - config.CACHE_TTL_SEC
     cached_raw, missing = db.get_cached_bondization_cashflows(secids, min_ts)
 
     amortization_dates: dict[str, date | None] = {}
-    schedules: dict[str, list[tuple[date, float]]] = {}
+    schedules: dict[str, list[BondizationEvent]] = {}
     for secid, payload_raw in cached_raw.items():
         payload = json.loads(payload_raw)
         schedule, amort_start = _parse_bondization_cashflow_payload(payload)
@@ -1286,12 +1353,14 @@ async def run_pipeline(db: Database) -> RunSummary:
     descriptions: dict[str, dict[str, Any]] = {}
     emitters: dict[int, dict[str, str]] = {}
     amortizations: dict[str, date | None] = {}
-    bond_cashflows: dict[str, list[tuple[date, float]]] = {}
+    bond_cashflows: dict[str, list[BondizationEvent]] = {}
     corpbonds_data: dict[str, dict[str, str]] = {}
-    key_rate = config.YTM_KEY_RATE_FORECAST[0]
-    ruonia = key_rate
-    gcurve_5y = key_rate
-    gcurve_7y = key_rate
+    cbr_snapshot = CbrSnapshot(
+        key_rate_today=config.YTM_KEY_RATE_FORECAST[0],
+        ruonia_today=config.YTM_KEY_RATE_FORECAST[0] - config.YTM_RUONIA_KEY_SPREAD_DEFAULT,
+        zcyc_today={0.5: config.YTM_KEY_RATE_FORECAST[0], 2.0: config.YTM_KEY_RATE_FORECAST[0], 5.0: config.YTM_KEY_RATE_FORECAST[0], 7.0: config.YTM_KEY_RATE_FORECAST[0]},
+    )
+    valuation_date = date.today()
 
     async with MoexClient() as client:
         LOGGER.info("Этап 1/5: загрузка списка облигаций")
@@ -1333,7 +1402,7 @@ async def run_pipeline(db: Database) -> RunSummary:
         errors_count += corp_errors
 
         LOGGER.info("Загрузка индикаторов ЦБ для YTM")
-        key_rate, ruonia, gcurve_5y, gcurve_7y = await _fetch_cbr_curve(client)
+        cbr_snapshot = await _fetch_cbr_curve(client)
 
     duration_load = time.perf_counter() - load_start
 
@@ -1369,12 +1438,7 @@ async def run_pipeline(db: Database) -> RunSummary:
         accrued_int = float(bond.get("ACCRUEDINT")) if bond.get("ACCRUEDINT") is not None else None
         coupon_percent = float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None
 
-        currency = desc.get("FACEUNIT") or desc.get("CURRENCYID") or bond.get("FACEUNIT") or bond.get("CURRENCYID")
-        is_rub_bond = _is_rub_currency(currency)
-
-        ytm_value: float | None = None
-        if is_rub_bond:
-            ytm_value = _calc_ytm_percent(
+        ytm_value: float | None = _calc_ytm_percent(
                 clean_price=_select_last_price(current_price, corp.get("price", "")),
                 accrued_int=accrued_int,
                 face_value=_parse_float(bond.get("FACEVALUE")),
@@ -1382,13 +1446,14 @@ async def run_pipeline(db: Database) -> RunSummary:
                 coupon_type=corp.get("coupon_type", ""),
                 coupon_formula=corp.get("coupon_formula", ""),
                 secid=secid,
-                end_date=_as_date(bond.get("OFFERDATE")) or _as_date(corp.get("nearest_offer_date")) or _as_date(bond.get("MATDATE")),
+                offer_date=_as_date(bond.get("OFFERDATE")) or _as_date(corp.get("nearest_offer_date")),
+                maturity_date=_as_date(bond.get("MATDATE")),
                 coupon_period=int(bond.get("COUPONPERIOD")) if bond.get("COUPONPERIOD") is not None else None,
                 coupon_percent=coupon_percent,
-                key_rate=key_rate,
-                ruonia=ruonia,
-                gcurve_5y=gcurve_5y,
-                gcurve_7y=gcurve_7y,
+                valuation_date=valuation_date,
+                cbr_snapshot=cbr_snapshot,
+                face_currency=str(desc.get("FACEUNIT") or bond.get("FACEUNIT") or ""),
+                nominal_currency=str(desc.get("CURRENCYID") or bond.get("CURRENCYID") or desc.get("FACEUNIT") or bond.get("FACEUNIT") or ""),
             )
         ytm_from_moex = False
         if ytm_value is None:
