@@ -5,9 +5,6 @@
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/README.md
 https://raw.githubusercontent.com/Habosjob/Vibe/main/generate_raw_links.py
-https://raw.githubusercontent.com/Habosjob/Vibe/main/pytest.ini
-https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links.txt
-https://raw.githubusercontent.com/Habosjob/Vibe/main/raw_links_latest.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
 
 ============================================================
