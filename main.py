@@ -60,6 +60,33 @@ def save_cache(cache: dict[str, dict[str, Any]], logger: logging.Logger) -> None
         logger.exception("Cache save failed: %s", error)
 
 
+
+
+def load_cache(logger: logging.Logger) -> dict[str, dict[str, Any]]:
+    if not CACHE_FILE.exists():
+        return {"secid_to_emitter": {}, "emitters": {}}
+
+    try:
+        with CACHE_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        if isinstance(data, dict):
+            return {
+                "secid_to_emitter": data.get("secid_to_emitter", {}),
+                "emitters": data.get("emitters", {}),
+            }
+    except Exception as error:
+        logger.exception("Cache load failed: %s", error)
+
+    return {"secid_to_emitter": {}, "emitters": {}}
+
+
+def save_cache(cache: dict[str, dict[str, Any]], logger: logging.Logger) -> None:
+    try:
+        with CACHE_FILE.open("w", encoding="utf-8") as file:
+            json.dump(cache, file, ensure_ascii=False, indent=2)
+    except Exception as error:
+        logger.exception("Cache save failed: %s", error)
+
 def setup_logging() -> logging.Logger:
     logger = logging.getLogger("moex_export")
     logger.setLevel(logging.INFO)
