@@ -204,16 +204,33 @@ def _pick_price(row: dict[str, Any]) -> float | None:
     return numeric_prev if numeric_prev > 0 else None
 
 
-def _get_effective_price_pct(secid: str, board: str, valuation_date: date, market_row: dict[str, Any]) -> float | None:
+def _get_effective_price_pct(
+    secid: str,
+    board: str,
+    valuation_date: date,
+    market_row: dict[str, Any],
+    security_row: dict[str, Any] | None = None,
+) -> float | None:
     del secid, board, valuation_date
     numtrades = _parse_float(market_row.get("NUMTRADES"))
     last_price = _parse_float(market_row.get("LAST"))
     if numtrades is not None and numtrades > 0 and last_price is not None and last_price > 0:
         return last_price
-    for key in ("PREVADMITTEDQUOTE", "PREVLEGALCLOSEPRICE", "WAPRICE", "PREVPRICE", "LCLOSEPRICE"):
+    for key in (
+        "PREVADMITTEDQUOTE",
+        "PREVLEGALCLOSEPRICE",
+        "WAPRICE",
+        "PREVPRICE",
+        "LCLOSEPRICE",
+        "LCURRENTPRICE",
+    ):
         value = _parse_float(market_row.get(key))
         if value is not None and value > 0:
             return value
+    if security_row is not None:
+        sec_prev = _parse_float(security_row.get("PREVPRICE"))
+        if sec_prev is not None and sec_prev > 0:
+            return sec_prev
     return None
 
 
@@ -503,7 +520,7 @@ def _calc_ytm_percent(
             flows.append((max((horizon - valuation_date).days, 0), outstanding_face))
     else:
         if coupon_period is None or coupon_period <= 0:
-            return None
+            return None, "NO_CASHFLOWS"
         cursor = valuation_date + timedelta(days=coupon_period)
         while cursor < horizon:
             annual_rate = _forecast_rate(cursor)
@@ -759,6 +776,8 @@ def _parse_bondization_cashflow_payload(payload: dict[str, Any]) -> tuple[list[B
         if payment_date is None:
             continue
         amount = _parse_float(data.get("value"))
+        if amount is None:
+            amount = _parse_float(data.get("value_rub"))
         if amount is None or amount <= 0:
             continue
         existing = events.get(payment_date)
@@ -776,6 +795,8 @@ def _parse_bondization_cashflow_payload(payload: dict[str, Any]) -> tuple[list[B
         if payment_date is None:
             continue
         amount = _parse_float(data.get("value"))
+        if amount is None:
+            amount = _parse_float(data.get("value_rub"))
         if amount is None or amount <= 0:
             continue
         existing = events.get(payment_date)
@@ -1472,6 +1493,7 @@ async def run_pipeline(db: Database) -> RunSummary:
             board=str(bond.get("BOARDID") or ""),
             valuation_date=valuation_date,
             market_row=bond.get("marketdata", {}),
+            security_row=bond,
         )
         previous_price = previous_prices.get(secid)
         if previous_price not in (None, 0) and current_price is not None:
