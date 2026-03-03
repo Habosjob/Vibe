@@ -12,6 +12,7 @@ from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import perf_counter
 from typing import Any
 
@@ -22,6 +23,7 @@ from openpyxl.formatting.rule import FormulaRule
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from playwright.sync_api import sync_playwright
 from tqdm import tqdm
 
 BASE_URL = "https://iss.moex.com/iss"
@@ -52,6 +54,8 @@ PROXY_MAX_ATTEMPTS = 2
 PROXY_VALIDATION_TIME_BUDGET = 8
 ACRA_PAGE_WORKERS = 24
 ACRA_ISSUER_WORKERS = 64
+ACRA_SEARCH_WORKERS = 80
+NKR_PLAYWRIGHT_TIMEOUT_MS = 60_000
 PROXYLIST_FILE = OUTPUT_DIR / "proxylist.csv"
 USE_CACHE = True
 CACHE_FILE = CACHE_DIR / "emitter_cache.json"
@@ -953,7 +957,7 @@ class AcraClient:
 
         ordered_inns = sorted(normalized_inns)
         with progress(total=len(ordered_inns), desc="Парсинг АКРА", unit="ИНН") as pbar:
-            with ThreadPoolExecutor(max_workers=min(ACRA_PAGE_WORKERS, max(len(ordered_inns), 1))) as executor:
+            with ThreadPoolExecutor(max_workers=min(ACRA_SEARCH_WORKERS, max(len(ordered_inns), 1))) as executor:
                 futures = {executor.submit(fetch_for_inn, inn): inn for inn in ordered_inns}
                 for future in as_completed(futures):
                     inn = futures[future]
@@ -981,6 +985,14 @@ class NkrClient:
     def _normalize_inn(self, value: Any) -> str | None:
         return normalize_inn(value)
 
+    def _normalize_date(self, value: Any) -> str:
+        parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
+        if pd.notna(parsed):
+            return parsed.strftime("%d.%m.%Y")
+        if value is None or pd.isna(value):
+            return ""
+        return str(value).strip()
+
     def _clean_text(self, value: str) -> str:
         text = html.unescape(value)
         return re.sub(r"\s+", " ", text).strip()
@@ -1002,7 +1014,6 @@ class NkrClient:
                 continue
             forecast = self._clean_text(re.sub(r"<[^>]+>", " ", cells[2]))
             date_value = self._clean_text(re.sub(r"<[^>]+>", " ", cells[5]))
-
             rows.append({"issuer_path": href_match.group(1), "rating": rating, "forecast": forecast, "date": date_value})
 
         self.logger.info("NKR issuer rows parsed: %s", len(rows))
@@ -1024,12 +1035,67 @@ class NkrClient:
         fallback = re.search(r"ИНН\D{0,30}(\d{10,12})", re.sub(r"<[^>]+>", " ", text), flags=re.IGNORECASE)
         return fallback.group(1) if fallback else None
 
-    def fetch_latest_ratings_by_inn(self, inns: set[str]) -> dict[str, str]:
-        normalized_inns = {self._normalize_inn(value) for value in inns}
-        normalized_inns = {inn for inn in normalized_inns if inn}
-        if not normalized_inns:
+    def _download_excel_report(self) -> Path:
+        with TemporaryDirectory(prefix="nkr_export_") as temp_dir:
+            temp_path = Path(temp_dir)
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                context = browser.new_context(accept_downloads=True)
+                page = context.new_page()
+                page.goto(f"{NKR_BASE_URL}/ratings/issuers/", wait_until="domcontentloaded", timeout=NKR_PLAYWRIGHT_TIMEOUT_MS)
+                export_button = page.get_by_role("button", name="Выгрузить в Excel")
+                export_button.wait_for(timeout=NKR_PLAYWRIGHT_TIMEOUT_MS)
+                with page.expect_download(timeout=NKR_PLAYWRIGHT_TIMEOUT_MS) as download_info:
+                    export_button.click()
+                download = download_info.value
+                suggested = download.suggested_filename or "nkr_issuers.xlsx"
+                downloaded_path = temp_path / suggested
+                download.save_as(str(downloaded_path))
+                context.close()
+                browser.close()
+
+            final_path = CACHE_DIR / "nkr_issuers_latest.xlsx"
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            downloaded_path.replace(final_path)
+            return final_path
+
+    def _build_ratings_from_excel(self, excel_path: Path, target_inns: set[str]) -> dict[str, str]:
+        frame = pd.read_excel(excel_path)
+        if frame.empty:
             return {}
 
+        frame.columns = [str(column).strip() for column in frame.columns]
+        required_columns = {"Date", "TIN", "Rating", "Outlook"}
+        missing = required_columns.difference(frame.columns)
+        if missing:
+            raise ValueError(f"NKR export missing columns: {sorted(missing)}")
+
+        frame = frame[["Date", "TIN", "Rating", "Outlook"]].copy()
+        frame["INN"] = frame["TIN"].map(self._normalize_inn)
+        frame = frame[frame["INN"].isin(target_inns)]
+        if frame.empty:
+            return {}
+
+        frame["DATE_TS"] = pd.to_datetime(frame["Date"], errors="coerce", dayfirst=True)
+        frame["SORT_DATE"] = frame["DATE_TS"].fillna(pd.Timestamp.min)
+        frame = frame.sort_values(by=["INN", "SORT_DATE"], ascending=[True, False])
+        latest_rows = frame.drop_duplicates(subset=["INN"], keep="first")
+
+        ratings_by_inn: dict[str, str] = {}
+        for row in latest_rows.to_dict(orient="records"):
+            inn = row.get("INN")
+            if not inn:
+                continue
+            rating = str(row.get("Rating") or "").strip()
+            outlook = str(row.get("Outlook") or "").strip()
+            normalized_date = self._normalize_date(row.get("Date"))
+            parts = [part for part in [rating, outlook, normalized_date] if part]
+            if parts:
+                ratings_by_inn[inn] = "\n".join(parts)
+
+        return ratings_by_inn
+
+    def _fetch_latest_ratings_by_inn_fallback(self, normalized_inns: set[str]) -> dict[str, str]:
         response = self.session.get(f"{NKR_BASE_URL}/ratings/issuers/", timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         rows = self._parse_issuers_rows(response.text)
@@ -1039,7 +1105,7 @@ class NkrClient:
         ratings_by_inn: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(self._fetch_issuer_inn, row["issuer_path"]): row for row in rows}
-            with progress(total=len(futures), desc="Парсинг НКР", unit="эмитент") as pbar:
+            with progress(total=len(futures), desc="Парсинг НКР (fallback)", unit="эмитент") as pbar:
                 for future in as_completed(futures):
                     row = futures[future]
                     try:
@@ -1057,6 +1123,26 @@ class NkrClient:
                         rating_parts = [part for part in [row["rating"], row["forecast"], row["date"] if row["date"] else ""] if part]
                         ratings_by_inn[inn] = "\n".join(rating_parts)
                     pbar.update(1)
+
+        return ratings_by_inn
+
+    def fetch_latest_ratings_by_inn(self, inns: set[str]) -> dict[str, str]:
+        normalized_inns = {self._normalize_inn(value) for value in inns}
+        normalized_inns = {inn for inn in normalized_inns if inn}
+        if not normalized_inns:
+            return {}
+
+        try:
+            with progress(total=3, desc="Парсинг НКР", unit="этап") as pbar:
+                excel_path = self._download_excel_report()
+                pbar.update(1)
+                ratings_by_inn = self._build_ratings_from_excel(excel_path, normalized_inns)
+                pbar.update(1)
+                self.logger.info("NKR excel parsed target_inn=%s matched=%s file=%s", len(normalized_inns), len(ratings_by_inn), excel_path)
+                pbar.update(1)
+        except Exception as error:
+            self.logger.warning("NKR Playwright export failed, using fallback parser: %s", error)
+            ratings_by_inn = self._fetch_latest_ratings_by_inn_fallback(normalized_inns)
 
         self.logger.info("NKR ratings matched by INN: %s", len(ratings_by_inn))
         return ratings_by_inn
