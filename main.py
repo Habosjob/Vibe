@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import signal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ SHARES_FILE = OUTPUT_DIR / "moex_shares.xlsx"
 BONDS_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
 EMITTERS_FILE = OUTPUT_DIR / "moex_emitters.xlsx"
 REQUEST_TIMEOUT = 30
-PAGE_SIZE = 100
+MAX_WORKERS = 24
 
 
 def setup_logging() -> logging.Logger:
@@ -51,35 +52,18 @@ class MoexClient:
             )
         return pd.DataFrame(data.get("securities", {}).get("data", []), columns=data.get("securities", {}).get("columns", []))
 
-    def fetch_securities_reference(self) -> pd.DataFrame:
-        rows: list[list[Any]] = []
-        columns: list[str] = []
-        start = 0
-
-        with tqdm(desc="Справочник ISS", unit="стр") as progress:
-            while True:
-                data = self._get(
-                    "/securities.json",
-                    params={
-                        "iss.meta": "off",
-                        "iss.only": "securities",
-                        "securities.columns": "secid,emitent_id,emitent_title,emitent_inn",
-                        "start": start,
-                    },
-                )
-                sec = data.get("securities", {})
-                page = sec.get("data", [])
-                if not page:
-                    break
-                if not columns:
-                    columns = sec.get("columns", [])
-                rows.extend(page)
-                start += PAGE_SIZE
-                progress.update(1)
-
-        frame = pd.DataFrame(rows, columns=columns)
-        self.logger.info("Reference loaded rows=%s", len(frame))
-        return frame
+    def fetch_emitter_id_by_secid(self, secid: str) -> int | None:
+        data = self._get(
+            f"/securities/{secid}.json",
+            params={"iss.meta": "off", "iss.only": "description"},
+        )
+        rows = data.get("description", {}).get("data", [])
+        mapping = {row[0]: row[2] for row in rows if len(row) >= 3}
+        emitter_id = mapping.get("EMITTER_ID") or mapping.get("EMITENT_ID")
+        try:
+            return int(emitter_id) if emitter_id is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def fetch_emitter_info(self, emitter_id: int) -> dict[str, Any]:
         data = self._get(
@@ -93,43 +77,46 @@ class MoexClient:
 
 
 def enrich_emitters(client: MoexClient, shares: pd.DataFrame, bonds: pd.DataFrame, logger: logging.Logger) -> tuple[pd.DataFrame, pd.DataFrame]:
-    reference = client.fetch_securities_reference()
-    reference = reference.rename(
-        columns={
-            "secid": "SECID",
-            "emitent_id": "EMITTER_ID",
-            "emitent_title": "EMITTER_NAME",
-            "emitent_inn": "INN",
-        }
-    )
-    reference = reference.drop_duplicates(subset=["SECID"], keep="first")
+    secids = sorted(set(shares["SECID"].tolist()) | set(bonds["SECID"].tolist()))
+    logger.info("Emitter enrichment start for secids=%s", len(secids))
 
-    shares = shares.merge(reference[["SECID", "EMITTER_ID", "EMITTER_NAME", "INN"]], on="SECID", how="left")
-    bonds = bonds.merge(reference[["SECID", "EMITTER_ID", "EMITTER_NAME", "INN"]], on="SECID", how="left")
+    secid_rows: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(client.fetch_emitter_id_by_secid, secid): secid for secid in secids}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Определение EMITTER_ID", unit="бумага"):
+            secid = futures[future]
+            try:
+                emitter_id = future.result()
+            except requests.RequestException as error:
+                logger.exception("Emitter id fetch failed secid=%s: %s", secid, error)
+                emitter_id = None
+            except Exception as error:
+                logger.exception("Unexpected emitter id error secid=%s: %s", secid, error)
+                emitter_id = None
+            secid_rows.append({"SECID": secid, "EMITTER_ID": emitter_id})
 
-    combined = pd.concat([shares[["EMITTER_ID", "EMITTER_NAME", "INN"]], bonds[["EMITTER_ID", "EMITTER_NAME", "INN"]]], ignore_index=True)
-    missing_ids = sorted({int(x) for x in combined[(combined["EMITTER_ID"].notna()) & ((combined["EMITTER_NAME"].isna()) | (combined["INN"].isna()))]["EMITTER_ID"].tolist()})
+    secid_map = pd.DataFrame(secid_rows).drop_duplicates(subset=["SECID"], keep="first")
+    emitter_ids = sorted({int(x) for x in secid_map["EMITTER_ID"].dropna().tolist()})
+    logger.info("Resolved emitter ids=%s", len(emitter_ids))
 
-    filled_rows: list[dict[str, Any]] = []
-    for emitter_id in tqdm(missing_ids, desc="Дозагрузка эмитентов", unit="эмитент"):
-        try:
-            filled_rows.append(client.fetch_emitter_info(emitter_id))
-        except requests.RequestException as error:
-            logger.exception("Emitter info failed id=%s: %s", emitter_id, error)
-            filled_rows.append({"EMITTER_ID": emitter_id, "EMITTER_NAME": None, "INN": None})
+    emitter_rows: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(client.fetch_emitter_info, emitter_id): emitter_id for emitter_id in emitter_ids}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Дозагрузка эмитентов", unit="эмитент"):
+            emitter_id = futures[future]
+            try:
+                emitter_rows.append(future.result())
+            except requests.RequestException as error:
+                logger.exception("Emitter info failed id=%s: %s", emitter_id, error)
+                emitter_rows.append({"EMITTER_ID": emitter_id, "EMITTER_NAME": None, "INN": None})
+            except Exception as error:
+                logger.exception("Unexpected emitter info error id=%s: %s", emitter_id, error)
+                emitter_rows.append({"EMITTER_ID": emitter_id, "EMITTER_NAME": None, "INN": None})
 
-    if filled_rows:
-        fill_df = pd.DataFrame(filled_rows).drop_duplicates(subset=["EMITTER_ID"], keep="first")
+    emitters_df = pd.DataFrame(emitter_rows).drop_duplicates(subset=["EMITTER_ID"], keep="first")
 
-        shares = shares.merge(fill_df, on="EMITTER_ID", how="left", suffixes=("", "_FILL"))
-        shares["EMITTER_NAME"] = shares["EMITTER_NAME"].fillna(shares["EMITTER_NAME_FILL"])
-        shares["INN"] = shares["INN"].fillna(shares["INN_FILL"])
-        shares = shares.drop(columns=["EMITTER_NAME_FILL", "INN_FILL"])
-
-        bonds = bonds.merge(fill_df, on="EMITTER_ID", how="left", suffixes=("", "_FILL"))
-        bonds["EMITTER_NAME"] = bonds["EMITTER_NAME"].fillna(bonds["EMITTER_NAME_FILL"])
-        bonds["INN"] = bonds["INN"].fillna(bonds["INN_FILL"])
-        bonds = bonds.drop(columns=["EMITTER_NAME_FILL", "INN_FILL"])
+    shares = shares.merge(secid_map, on="SECID", how="left").merge(emitters_df, on="EMITTER_ID", how="left")
+    bonds = bonds.merge(secid_map, on="SECID", how="left").merge(emitters_df, on="EMITTER_ID", how="left")
 
     logger.info(
         "Emitter fill ratio: shares(name=%s inn=%s), bonds(name=%s inn=%s)",
