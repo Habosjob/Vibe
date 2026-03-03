@@ -37,6 +37,7 @@ SHARES_FILE = EXPORT_DIR / "moex_shares.xlsx"
 BONDS_FILE = EXPORT_DIR / "moex_bonds.xlsx"
 EMITTERS_FILE = EXPORT_DIR / "moex_emitters.xlsx"
 REQUEST_TIMEOUT = 30
+HEALTHCHECK_TIMEOUT = 4
 MAX_WORKERS = 24
 CACHE_FILE = CACHE_DIR / "emitter_cache.json"
 SHARES_CACHE_FILE = CACHE_DIR / "shares_snapshot.json"
@@ -130,7 +131,7 @@ def load_dataframe_snapshot(path: Path, logger: logging.Logger) -> pd.DataFrame:
 
 def is_source_alive(url: str, logger: logging.Logger) -> bool:
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=HEALTHCHECK_TIMEOUT)
         response.raise_for_status()
         logger.info("Source health OK: %s status=%s", url, response.status_code)
         return True
@@ -145,10 +146,8 @@ def is_acra_source_alive(logger: logging.Logger) -> bool:
         return "ratings/issuers/" in normalized or "найдено:" in normalized
 
     checks = [
-        (f"{ACRA_BASE_URL}/ratings/issuers/", True, 10, "direct"),
-        (f"{ACRA_BASE_URL}/ratings/issuers/?page=1", True, 10, "direct-page-1"),
-        (f"{ACRA_BASE_URL}/ratings/issuers/", False, 10, "direct-no-verify"),
-        (f"{ACRA_PROXY_BASE_URL}/ratings/issuers/", True, 20, "proxy"),
+        (f"{ACRA_BASE_URL}/ratings/issuers/", True, HEALTHCHECK_TIMEOUT, "direct"),
+        (f"{ACRA_PROXY_BASE_URL}/ratings/issuers/", True, HEALTHCHECK_TIMEOUT + 2, "proxy"),
     ]
 
     session = requests.Session()
@@ -173,16 +172,17 @@ def check_sources_health(logger: logging.Logger) -> dict[str, bool]:
     checks = {
         "moex": f"{BASE_URL}/engines/stock/markets/shares/securities.json",
         "expert_ra": f"{EXPERT_RA_BASE_URL}/ratings/",
+        "acra": f"{ACRA_BASE_URL}/ratings/issuers/",
         "nkr": f"{NKR_BASE_URL}/ratings/issuers/",
         "nra": f"{NRA_BASE_URL}/list-of-credit-ratings/",
     }
     statuses: dict[str, bool] = {}
-    acra_status = is_acra_source_alive(logger)
-    statuses["acra"] = acra_status
     with ThreadPoolExecutor(max_workers=len(checks)) as executor:
-        futures = {executor.submit(is_source_alive, url, logger): name for name, url in checks.items()}
-        with progress(total=len(futures) + 1, desc="Проверка источников", unit="источник") as pbar:
-            pbar.update(1)
+        futures = {
+            executor.submit(is_acra_source_alive, logger) if name == "acra" else executor.submit(is_source_alive, url, logger): name
+            for name, url in checks.items()
+        }
+        with progress(total=len(futures), desc="Проверка источников", unit="источник") as pbar:
             for future in as_completed(futures):
                 name = futures[future]
                 try:
