@@ -283,10 +283,15 @@ def _is_rub_currency(currency: Any) -> bool:
 
 
 def _currencies_compatible(face_currency: str, nominal_currency: str) -> bool:
-    if not face_currency or not nominal_currency:
-        return False
-    left = face_currency.strip().upper()
-    right = nominal_currency.strip().upper()
+    left_raw = (face_currency or "").strip()
+    right_raw = (nominal_currency or "").strip()
+    if not left_raw and not right_raw:
+        return True
+    if not left_raw or not right_raw:
+        known = left_raw or right_raw
+        return _is_rub_currency(known) or True
+    left = left_raw.upper()
+    right = right_raw.upper()
     if left == right:
         return True
     return _is_rub_currency(left) and _is_rub_currency(right)
@@ -319,7 +324,14 @@ def _extract_index_premium(formula: str) -> tuple[str | None, float]:
     index_type: str | None = None
     if "RUONIA" in compact:
         index_type = "RUONIA"
-    elif "КС" in compact or "KC" in compact or "KEYRATE" in compact:
+    elif (
+        "КС" in compact
+        or "KC" in compact
+        or "KEYRATE" in compact
+        or "КЛЮЧ" in compact
+        or "ЦБ" in compact
+        or "BANKOFRUSSIA" in compact
+    ):
         index_type = "KEYRATE"
     elif "ИПЦ" in compact or "CPI" in compact:
         index_type = "CPI"
@@ -444,6 +456,9 @@ def _calc_ytm_percent(
         horizon = offer_date if offer_date < maturity_date else maturity_date
     else:
         horizon = offer_date or maturity_date
+    if horizon is None and cashflow_schedule:
+        future_dates = [event.payment_date for event in cashflow_schedule if event.payment_date > valuation_date]
+        horizon = max(future_dates) if future_dates else None
     if horizon is None or horizon <= valuation_date:
         return None, "NO_CASHFLOWS"
 
@@ -1513,8 +1528,12 @@ async def run_pipeline(db: Database) -> RunSummary:
         accrued_int = float(bond.get("ACCRUEDINT")) if bond.get("ACCRUEDINT") is not None else None
         coupon_percent = float(bond.get("COUPONPERCENT")) if bond.get("COUPONPERCENT") is not None else None
 
+        selected_price_pct = effective_price_pct
+        if selected_price_pct is None:
+            selected_price_pct = _select_last_price(current_price, corp.get("price", ""))
+
         ytm_value, ytm_reason = _calc_ytm_percent(
-                clean_price=effective_price_pct,
+                clean_price=selected_price_pct,
                 accrued_int=accrued_int,
                 face_value=_parse_float(bond.get("FACEVALUE")),
                 cashflow_schedule=bond_cashflows.get(secid, []),
