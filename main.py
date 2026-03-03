@@ -26,13 +26,21 @@ EXPERT_RA_BASE_URL = "https://raexpert.ru"
 ACRA_BASE_URL = "https://www.acra-ratings.ru"
 ACRA_PROXY_BASE_URL = "https://r.jina.ai/http://www.acra-ratings.ru"
 OUTPUT_DIR = Path(__file__).resolve().parent
-LOG_FILE = OUTPUT_DIR / "main.log"
-SHARES_FILE = OUTPUT_DIR / "moex_shares.xlsx"
-BONDS_FILE = OUTPUT_DIR / "moex_bonds.xlsx"
-EMITTERS_FILE = OUTPUT_DIR / "moex_emitters.xlsx"
+LOGS_DIR = OUTPUT_DIR / "logs"
+CACHE_DIR = OUTPUT_DIR / "cache"
+EXPORT_DIR = OUTPUT_DIR / "output"
+LOG_FILE = LOGS_DIR / "main.log"
+SHARES_FILE = EXPORT_DIR / "moex_shares.xlsx"
+BONDS_FILE = EXPORT_DIR / "moex_bonds.xlsx"
+EMITTERS_FILE = EXPORT_DIR / "moex_emitters.xlsx"
 REQUEST_TIMEOUT = 30
 MAX_WORKERS = 24
-CACHE_FILE = OUTPUT_DIR / "emitter_cache.json"
+CACHE_FILE = CACHE_DIR / "emitter_cache.json"
+SHARES_CACHE_FILE = CACHE_DIR / "shares_snapshot.json"
+BONDS_CACHE_FILE = CACHE_DIR / "bonds_snapshot.json"
+EMITTERS_CACHE_FILE = CACHE_DIR / "emitters_snapshot.json"
+EXPERT_RA_CACHE_FILE = CACHE_DIR / "expert_ra_ratings.json"
+ACRA_CACHE_FILE = CACHE_DIR / "acra_ratings.json"
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 ZEBRA_FILL = PatternFill(fill_type="solid", fgColor="E8F2FF")
@@ -48,6 +56,56 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def progress(total: int, desc: str, unit: str):
     return tqdm(total=total, desc=desc, unit=unit, position=0, leave=False, dynamic_ncols=True)
+
+
+def ensure_project_dirs() -> None:
+    for directory in [LOGS_DIR, CACHE_DIR, EXPORT_DIR, OUTPUT_DIR / "docs"]:
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+def load_json_dict(path: Path, logger: logging.Logger) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        return data if isinstance(data, dict) else {}
+    except Exception as error:
+        logger.exception("JSON cache load failed path=%s: %s", path, error)
+        return {}
+
+
+def save_json_dict(path: Path, payload: dict[str, Any], logger: logging.Logger) -> None:
+    try:
+        with path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+    except Exception as error:
+        logger.exception("JSON cache save failed path=%s: %s", path, error)
+
+
+def save_dataframe_snapshot(path: Path, frame: pd.DataFrame, logger: logging.Logger) -> None:
+    payload = {"columns": frame.columns.tolist(), "records": frame.where(pd.notna(frame), None).to_dict(orient="records")}
+    save_json_dict(path, payload, logger)
+
+
+def load_dataframe_snapshot(path: Path, logger: logging.Logger) -> pd.DataFrame:
+    payload = load_json_dict(path, logger)
+    columns = payload.get("columns")
+    records = payload.get("records")
+    if not isinstance(columns, list) or not isinstance(records, list):
+        return pd.DataFrame()
+    return pd.DataFrame(records, columns=columns)
+
+
+def is_source_alive(url: str, logger: logging.Logger) -> bool:
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        logger.info("Source health OK: %s status=%s", url, response.status_code)
+        return True
+    except requests.RequestException as error:
+        logger.warning("Source health FAILED: %s error=%s", url, error)
+        return False
 
 
 def load_cache(logger: logging.Logger) -> dict[str, dict[str, Any]]:
@@ -77,6 +135,7 @@ def save_cache(cache: dict[str, dict[str, Any]], logger: logging.Logger) -> None
 
 
 def setup_logging() -> logging.Logger:
+    ensure_project_dirs()
     logger = logging.getLogger("moex_export")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
@@ -678,6 +737,8 @@ def run() -> None:
 
     interrupted = {"value": False}
     stage_times: dict[str, float] = {}
+    skipped_sources: list[str] = []
+    restored_sources: list[str] = []
     script_started_at = perf_counter()
 
     def handle_sigint(signum: int, frame: Any) -> None:
@@ -691,54 +752,124 @@ def run() -> None:
     acra_client = AcraClient(logger)
     cache = load_cache(logger)
 
+    shares = pd.DataFrame()
+    bonds = pd.DataFrame()
+    emitters = pd.DataFrame()
+
+    moex_alive = is_source_alive(f"{BASE_URL}/engines/stock/markets/shares/securities.json", logger)
+    expert_ra_alive = is_source_alive(f"{EXPERT_RA_BASE_URL}/ratings/", logger)
+    acra_alive = is_source_alive(f"{ACRA_BASE_URL}/ratings/issuers/", logger)
+
     try:
         print("=====\nЭтап 1: Сбор акций")
         stage_started_at = perf_counter()
-        shares = client.fetch_market_securities("shares", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "LISTLEVEL", "STATUS", "EMITTER_ID"])
-        shares = shares[(shares["BOARDID"] == "TQBR") & (shares["STATUS"].fillna("") != "N")].copy()
+        if moex_alive:
+            try:
+                shares = client.fetch_market_securities("shares", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "LISTLEVEL", "STATUS", "EMITTER_ID"])
+                shares = shares[(shares["BOARDID"] == "TQBR") & (shares["STATUS"].fillna("") != "N")].copy()
+                save_dataframe_snapshot(SHARES_CACHE_FILE, shares, logger)
+            except requests.RequestException as error:
+                logger.warning("Shares stage failed, trying cache: %s", error)
+                skipped_sources.append("MOEX (акции)")
+                shares = load_dataframe_snapshot(SHARES_CACHE_FILE, logger)
+                if not shares.empty:
+                    restored_sources.append("MOEX (акции)")
+        else:
+            skipped_sources.append("MOEX (акции)")
+            shares = load_dataframe_snapshot(SHARES_CACHE_FILE, logger)
+            if not shares.empty:
+                restored_sources.append("MOEX (акции)")
         stage_times["Этап 1: Сбор акций"] = perf_counter() - stage_started_at
 
         print("Этап 2: Сбор облигаций")
         stage_started_at = perf_counter()
-        bonds = client.fetch_market_securities("bonds", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "MATDATE", "LISTLEVEL", "STATUS", "EMITTER_ID"])
-        bonds = bonds[bonds["BOARDID"].isin(["TQCB", "TQOB", "TQOD", "TQIR", "TQOE"])].copy()
-        bonds = bonds[bonds["STATUS"].fillna("") != "N"].copy()
-        bonds["MATDATE"] = pd.to_datetime(bonds["MATDATE"], errors="coerce").dt.date
-        bonds = bonds[(bonds["MATDATE"].isna()) | (bonds["MATDATE"] >= date.today())].copy()
+        if moex_alive:
+            try:
+                bonds = client.fetch_market_securities("bonds", ["SECID", "BOARDID", "SHORTNAME", "ISIN", "MATDATE", "LISTLEVEL", "STATUS", "EMITTER_ID"])
+                bonds = bonds[bonds["BOARDID"].isin(["TQCB", "TQOB", "TQOD", "TQIR", "TQOE"])].copy()
+                bonds = bonds[bonds["STATUS"].fillna("") != "N"].copy()
+                bonds["MATDATE"] = pd.to_datetime(bonds["MATDATE"], errors="coerce").dt.date
+                bonds = bonds[(bonds["MATDATE"].isna()) | (bonds["MATDATE"] >= date.today())].copy()
+                save_dataframe_snapshot(BONDS_CACHE_FILE, bonds, logger)
+            except requests.RequestException as error:
+                logger.warning("Bonds stage failed, trying cache: %s", error)
+                skipped_sources.append("MOEX (облигации)")
+                bonds = load_dataframe_snapshot(BONDS_CACHE_FILE, logger)
+                if not bonds.empty:
+                    restored_sources.append("MOEX (облигации)")
+        else:
+            skipped_sources.append("MOEX (облигации)")
+            bonds = load_dataframe_snapshot(BONDS_CACHE_FILE, logger)
+            if not bonds.empty:
+                restored_sources.append("MOEX (облигации)")
         stage_times["Этап 2: Сбор облигаций"] = perf_counter() - stage_started_at
 
         print("Этап 3: Обогащение эмитентов")
         stage_started_at = perf_counter()
-        shares, bonds = enrich_emitters(client, shares, bonds, logger, cache)
+        if not shares.empty and not bonds.empty and moex_alive:
+            shares, bonds = enrich_emitters(client, shares, bonds, logger, cache)
+            save_dataframe_snapshot(SHARES_CACHE_FILE, shares, logger)
+            save_dataframe_snapshot(BONDS_CACHE_FILE, bonds, logger)
+        else:
+            skipped_sources.append("MOEX (обогащение эмитентов)")
         stage_times["Этап 3: Обогащение эмитентов"] = perf_counter() - stage_started_at
 
         print("Этап 4: Получение рейтингов Эксперт РА")
         stage_started_at = perf_counter()
-        emitters = build_emitters_table(shares, bonds)
-        inns = set(emitters["INN"].dropna().astype(str).tolist())
-        expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
-        emitters = apply_expert_ra_ratings(emitters, expert_ra_ratings)
+        emitters = build_emitters_table(shares, bonds) if not shares.empty or not bonds.empty else load_dataframe_snapshot(EMITTERS_CACHE_FILE, logger)
+        inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
+        expert_ra_ratings: dict[str, str] = {}
+        if expert_ra_alive:
+            try:
+                expert_ra_ratings = expert_ra_client.fetch_latest_ratings_by_inn(inns)
+                save_json_dict(EXPERT_RA_CACHE_FILE, expert_ra_ratings, logger)
+            except requests.RequestException as error:
+                logger.warning("Expert RA stage failed, trying cache: %s", error)
+                skipped_sources.append("Эксперт РА")
+                expert_ra_ratings = {k: str(v) for k, v in load_json_dict(EXPERT_RA_CACHE_FILE, logger).items()}
+                if expert_ra_ratings:
+                    restored_sources.append("Эксперт РА")
+        else:
+            skipped_sources.append("Эксперт РА")
+            expert_ra_ratings = {k: str(v) for k, v in load_json_dict(EXPERT_RA_CACHE_FILE, logger).items()}
+            if expert_ra_ratings:
+                restored_sources.append("Эксперт РА")
+
+        if not emitters.empty:
+            emitters = apply_expert_ra_ratings(emitters, expert_ra_ratings)
         stage_times["Этап 4: Получение рейтингов Эксперт РА"] = perf_counter() - stage_started_at
 
         print("Этап 5: Получение рейтингов АКРА")
         stage_started_at = perf_counter()
-        acra_ratings = acra_client.fetch_latest_ratings_by_inn(inns)
-        emitters = apply_acra_ratings(emitters, acra_ratings)
+        acra_ratings: dict[str, str] = {}
+        if acra_alive:
+            try:
+                acra_ratings = acra_client.fetch_latest_ratings_by_inn(inns)
+                save_json_dict(ACRA_CACHE_FILE, acra_ratings, logger)
+            except requests.RequestException as error:
+                logger.warning("ACRA stage failed, trying cache: %s", error)
+                skipped_sources.append("АКРА")
+                acra_ratings = {k: str(v) for k, v in load_json_dict(ACRA_CACHE_FILE, logger).items()}
+                if acra_ratings:
+                    restored_sources.append("АКРА")
+        else:
+            skipped_sources.append("АКРА")
+            acra_ratings = {k: str(v) for k, v in load_json_dict(ACRA_CACHE_FILE, logger).items()}
+            if acra_ratings:
+                restored_sources.append("АКРА")
+
+        if not emitters.empty:
+            emitters = apply_acra_ratings(emitters, acra_ratings)
+            save_dataframe_snapshot(EMITTERS_CACHE_FILE, emitters, logger)
         stage_times["Этап 5: Получение рейтингов АКРА"] = perf_counter() - stage_started_at
 
         print("Этап 6: Формирование Excel")
         stage_started_at = perf_counter()
-
-        excel_exports = [
-            (shares, SHARES_FILE),
-            (bonds, BONDS_FILE),
-            (emitters, EMITTERS_FILE),
-        ]
+        excel_exports = [(shares, SHARES_FILE), (bonds, BONDS_FILE), (emitters, EMITTERS_FILE)]
         with progress(total=len(excel_exports), desc="Экспорт Excel", unit="файл") as pbar:
             for df, output_path in excel_exports:
                 save_to_excel(df, output_path, logger)
                 pbar.update(1)
-
         stage_times["Этап 6: Формирование Excel"] = perf_counter() - stage_started_at
 
         print("=====\nГотово")
@@ -757,6 +888,21 @@ def run() -> None:
         print("=====\nSummary")
         for stage_name, duration in stage_times.items():
             print(f"{stage_name}: {duration:.2f} сек")
+
+        print("Пропущенные источники:")
+        if skipped_sources:
+            for source in sorted(set(skipped_sources)):
+                print(f"- {source}")
+        else:
+            print("- Нет")
+
+        print("Источники восстановленные из кэша:")
+        if restored_sources:
+            for source in sorted(set(restored_sources)):
+                print(f"- {source}")
+        else:
+            print("- Нет")
+
         print(f"Всего: {total_time:.2f} сек")
         print("=====")
 
