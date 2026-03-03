@@ -17,6 +17,7 @@ import pandas as pd
 import requests
 import urllib3
 from openpyxl.formatting.rule import FormulaRule
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from tqdm import tqdm
@@ -113,18 +114,51 @@ def is_source_alive(url: str, logger: logging.Logger) -> bool:
         return False
 
 
+def is_acra_source_alive(logger: logging.Logger) -> bool:
+    direct_url = f"{ACRA_BASE_URL}/ratings/issuers/"
+    proxy_url = f"{ACRA_PROXY_BASE_URL}/ratings/issuers/"
+
+    try:
+        response = requests.get(direct_url, timeout=10)
+        response.raise_for_status()
+        logger.info("ACRA source health OK direct status=%s", response.status_code)
+        return True
+    except requests.RequestException as direct_error:
+        logger.warning("ACRA source direct health failed: %s", direct_error)
+
+    try:
+        response = requests.get(direct_url, timeout=10, verify=False)
+        response.raise_for_status()
+        logger.info("ACRA source health OK direct-no-verify status=%s", response.status_code)
+        return True
+    except requests.RequestException as direct_no_verify_error:
+        logger.warning("ACRA source direct health without verify failed: %s", direct_no_verify_error)
+
+    try:
+        response = requests.get(proxy_url, timeout=10)
+        response.raise_for_status()
+        logger.info("ACRA source health OK proxy status=%s", response.status_code)
+        return True
+    except requests.RequestException as proxy_error:
+        logger.warning("ACRA source proxy health failed: %s", proxy_error)
+
+    return False
+
+
 def check_sources_health(logger: logging.Logger) -> dict[str, bool]:
     checks = {
         "moex": f"{BASE_URL}/engines/stock/markets/shares/securities.json",
         "expert_ra": f"{EXPERT_RA_BASE_URL}/ratings/",
-        "acra": f"{ACRA_BASE_URL}/ratings/issuers/",
         "nkr": f"{NKR_BASE_URL}/ratings/issuers/",
         "nra": f"{NRA_BASE_URL}/list-of-credit-ratings/",
     }
     statuses: dict[str, bool] = {}
+    acra_status = is_acra_source_alive(logger)
+    statuses["acra"] = acra_status
     with ThreadPoolExecutor(max_workers=len(checks)) as executor:
         futures = {executor.submit(is_source_alive, url, logger): name for name, url in checks.items()}
-        with progress(total=len(futures), desc="Проверка источников", unit="источник") as pbar:
+        with progress(total=len(futures) + 1, desc="Проверка источников", unit="источник") as pbar:
+            pbar.update(1)
             for future in as_completed(futures):
                 name = futures[future]
                 try:
@@ -1063,6 +1097,20 @@ def save_to_excel(df: pd.DataFrame, path: Path, logger: logging.Logger) -> None:
             zebra_rule = FormulaRule(formula=["MOD(ROW(),2)=0"], fill=ZEBRA_FILL)
             worksheet.conditional_formatting.add(zebra_range, zebra_rule)
 
+        if path == EMITTERS_FILE and "ScoreList" in df.columns and worksheet.max_row >= 2:
+            score_col_idx = df.columns.get_loc("ScoreList") + 1
+            score_col_letter = get_column_letter(score_col_idx)
+            validation = DataValidation(
+                type="list",
+                formula1='"Green,Yellow,Red"',
+                allow_blank=True,
+                showErrorMessage=True,
+                errorTitle="Недопустимое значение",
+                error=f"Допустимо только: {', '.join(sorted(ALLOWED_SCORE_VALUES))}",
+            )
+            worksheet.add_data_validation(validation)
+            validation.add(f"{score_col_letter}2:{score_col_letter}{worksheet.max_row}")
+
         _fit_column_widths(worksheet, df)
 
     logger.info("Saved %s rows=%s", path, len(df))
@@ -1177,7 +1225,7 @@ def run() -> None:
         inns = set(emitters["INN"].dropna().astype(str).tolist()) if not emitters.empty and "INN" in emitters.columns else set()
         expert_ra_ratings: dict[str, str] = {}
         rating_executor = ThreadPoolExecutor(max_workers=3)
-        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if acra_alive else None
+        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns)
         nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if nkr_alive else None
         nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if nra_alive else None
         if expert_ra_alive:
@@ -1203,17 +1251,13 @@ def run() -> None:
         print("Этап 5: Получение рейтингов АКРА")
         stage_started_at = perf_counter()
         acra_ratings: dict[str, str] = {}
-        if acra_alive:
-            try:
-                acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
-                save_json_dict(ACRA_CACHE_FILE, acra_ratings, logger)
-            except requests.RequestException as error:
-                logger.warning("ACRA stage failed, trying cache: %s", error)
-                skipped_sources.append("АКРА")
-                acra_ratings = {k: str(v) for k, v in load_json_dict(ACRA_CACHE_FILE, logger).items()}
-                if acra_ratings:
-                    restored_sources.append("АКРА")
-        else:
+        if not acra_alive:
+            logger.warning("ACRA health check is negative, but fetching is still attempted")
+        try:
+            acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
+            save_json_dict(ACRA_CACHE_FILE, acra_ratings, logger)
+        except requests.RequestException as error:
+            logger.warning("ACRA stage failed, trying cache: %s", error)
             skipped_sources.append("АКРА")
             acra_ratings = {k: str(v) for k, v in load_json_dict(ACRA_CACHE_FILE, logger).items()}
             if acra_ratings:
