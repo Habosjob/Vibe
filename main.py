@@ -56,6 +56,7 @@ ACRA_PAGE_WORKERS = 24
 ACRA_ISSUER_WORKERS = 64
 ACRA_SEARCH_WORKERS = 120
 NKR_PLAYWRIGHT_TIMEOUT_MS = 60_000
+ACRA_PLAYWRIGHT_TIMEOUT_MS = 45_000
 PROXYLIST_FILE = OUTPUT_DIR / "proxylist.csv"
 USE_CACHE = True
 CACHE_FILE = CACHE_DIR / "emitter_cache.json"
@@ -759,6 +760,29 @@ class AcraClient:
             )
         return rows
 
+    def _extract_search_rows_markdown(self, text: str) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        pattern = re.compile(
+            r"\[([^\]]+)\]\(https?://www\.acra-ratings\.ru(/ratings/issuers/\d+/)\)\s+"
+            r"([A-Z]{1,4}(?:[+-]|-)?\(RU\))?\s*"
+            r"(Позитивный|Стабильный|Негативный|Развивающийся|Под наблюдением)?[\s\S]{0,120}?"
+            r"\[(\d{1,2}\s+[а-я]+\s+\d{4}|\d{1,2}\.\d{1,2}\.\d{2,4})\]",
+            flags=re.IGNORECASE,
+        )
+        for match in pattern.finditer(text):
+            issuer_name, issuer_path, rating, forecast, raw_date = match.groups()
+            rows.append(
+                {
+                    "issuer_path": issuer_path,
+                    "issuer_name": self._clean_text(issuer_name),
+                    "rating": rating or "",
+                    "forecast": self._clean_text(forecast) if forecast else "",
+                    "date": self._parse_ru_date(raw_date) if raw_date else "",
+                }
+            )
+        return rows
+
+
     def _parse_ru_date(self, raw_value: str) -> str:
         month_map = {
             "янв": "01",
@@ -938,6 +962,54 @@ class AcraClient:
         rating_parts = [part for part in [rating, forecast, date_value] if part]
         return inn, "\n".join(rating_parts) if rating_parts else None
 
+    def _fetch_latest_ratings_by_inn_playwright(self, inns: list[str]) -> dict[str, str]:
+        ratings_by_inn: dict[str, str] = {}
+        issuer_cache: dict[str, tuple[str | None, str | None]] = {}
+
+        with sync_playwright() as playwright:
+            request = playwright.request.new_context(ignore_https_errors=True)
+
+            with progress(total=len(inns), desc="Парсинг АКРА (Playwright)", unit="ИНН") as pbar:
+                for inn in inns:
+                    try:
+                        response = request.get(
+                            f"{ACRA_BASE_URL}/ratings/issuers/",
+                            params={"text": inn},
+                            timeout=ACRA_PLAYWRIGHT_TIMEOUT_MS,
+                        )
+                        search_text = response.text()
+                        rows = self._extract_search_rows(search_text)
+                        for row in rows:
+                            parts = [part for part in [row.get("rating", ""), row.get("forecast", ""), row.get("date", "")] if part]
+                            if parts:
+                                ratings_by_inn[inn] = "\n".join(parts)
+                                break
+
+                        if inn in ratings_by_inn:
+                            pbar.update(1)
+                            continue
+
+                        issuer_links = self._extract_issuer_links(search_text)
+                        for issuer_path in issuer_links[:10]:
+                            if issuer_path not in issuer_cache:
+                                issuer_response = request.get(
+                                    f"{ACRA_BASE_URL}{issuer_path}",
+                                    timeout=ACRA_PLAYWRIGHT_TIMEOUT_MS,
+                                )
+                                issuer_cache[issuer_path] = self._parse_issuer_card(issuer_response.text())
+
+                            parsed_inn, parsed_value = issuer_cache[issuer_path]
+                            if parsed_inn == inn and parsed_value:
+                                ratings_by_inn[inn] = parsed_value
+                                break
+                    except Exception as error:
+                        self.logger.warning("ACRA Playwright query failed inn=%s: %s", inn, error)
+                    pbar.update(1)
+
+            request.dispose()
+
+        return ratings_by_inn
+
     def fetch_latest_ratings_by_inn(self, inns: set[str]) -> dict[str, str]:
         normalized_inns = {self._normalize_inn(value) for value in inns}
         normalized_inns = {inn for inn in normalized_inns if inn}
@@ -945,19 +1017,33 @@ class AcraClient:
             return {}
 
         ratings_by_inn: dict[str, str] = {}
+        issuer_cache: dict[str, tuple[str | None, str | None]] = {}
+        issuer_cache_lock = threading.Lock()
+
+        def fetch_issuer_cached(issuer_path: str) -> tuple[str | None, str | None]:
+            with issuer_cache_lock:
+                if issuer_path in issuer_cache:
+                    return issuer_cache[issuer_path]
+
+            issuer_text = self._get_page_text(issuer_path)
+            parsed = self._parse_issuer_card(issuer_text)
+            with issuer_cache_lock:
+                issuer_cache[issuer_path] = parsed
+            return parsed
 
         def fetch_for_inn(inn: str) -> tuple[str, str | None]:
             search_text = self._get_page_text("/ratings/issuers/", params={"text": inn})
             rows = self._extract_search_rows(search_text)
+            if not rows and "URL Source:" in search_text:
+                rows = self._extract_search_rows_markdown(search_text)
             for row in rows:
                 parts = [part for part in [row.get("rating", ""), row.get("forecast", ""), row.get("date", "")] if part]
                 if parts:
                     return inn, "\n".join(parts)
 
             issuer_links = self._extract_issuer_links(search_text)
-            if issuer_links:
-                issuer_text = self._get_page_text(issuer_links[0])
-                parsed_inn, parsed_value = self._parse_issuer_card(issuer_text)
+            for issuer_path in issuer_links[:10]:
+                parsed_inn, parsed_value = fetch_issuer_cached(issuer_path)
                 if parsed_inn == inn and parsed_value:
                     return inn, parsed_value
             return inn, None
@@ -977,6 +1063,20 @@ class AcraClient:
                     except Exception as error:
                         self.logger.exception("ACRA parse failed inn=%s: %s", inn, error)
                     pbar.update(1)
+
+        coverage_ratio = (len(ratings_by_inn) / len(normalized_inns)) if normalized_inns else 0
+        if coverage_ratio < 0.1 and normalized_inns:
+            self.logger.warning(
+                "ACRA coverage is too low (%s/%s). Trying Playwright fallback.",
+                len(ratings_by_inn),
+                len(normalized_inns),
+            )
+            unresolved = [inn for inn in ordered_inns if inn not in ratings_by_inn]
+            try:
+                playwright_ratings = self._fetch_latest_ratings_by_inn_playwright(unresolved)
+                ratings_by_inn.update(playwright_ratings)
+            except Exception as error:
+                self.logger.warning("ACRA Playwright fallback failed: %s", error)
 
         self.logger.info("ACRA request mode=%s target_inn=%s", self._request_mode, len(normalized_inns))
         self.logger.info("ACRA ratings matched by INN: %s", len(ratings_by_inn))
@@ -1553,6 +1653,29 @@ def apply_nra_ratings(emitters: pd.DataFrame, ratings_by_inn: dict[str, str]) ->
     return result
 
 
+def load_ratings_from_emitters_excel(column_name: str, logger: logging.Logger) -> dict[str, str]:
+    if not EMITTERS_FILE.exists():
+        return {}
+    try:
+        frame = pd.read_excel(EMITTERS_FILE, sheet_name="Data")
+    except Exception as error:
+        logger.warning("Failed to load historical ratings from emitters Excel: %s", error)
+        return {}
+
+    if "INN" not in frame.columns or column_name not in frame.columns:
+        return {}
+
+    ratings: dict[str, str] = {}
+    for row in frame[["INN", column_name]].to_dict(orient="records"):
+        inn = normalize_inn(row.get("INN"))
+        value = row.get(column_name)
+        if inn and value is not None and not pd.isna(value):
+            text_value = str(value).strip()
+            if text_value:
+                ratings[inn] = text_value
+    return ratings
+
+
 def collect_green_bonds(
     client: MoexClient,
     emitters: pd.DataFrame,
@@ -1661,12 +1784,14 @@ def _is_missing_scalar(value: Any) -> bool:
 
 
 def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
+    sample_limit = 2000
     for col_idx, column_name in enumerate(df.columns, start=1):
         values = df[column_name]
         if values.empty:
             max_len = len(str(column_name))
         else:
-            series_len = values.map(lambda value: 0 if _is_missing_scalar(value) else len(str(value)))
+            sampled_values = values.head(sample_limit)
+            series_len = sampled_values.map(lambda value: 0 if _is_missing_scalar(value) else len(str(value)))
             max_len = max(len(str(column_name)), int(series_len.max()))
 
         adjusted_width = min(max_len + 2, 80)
@@ -1675,11 +1800,23 @@ def _fit_column_widths(worksheet: Any, df: pd.DataFrame) -> None:
 
 def _extract_coupon_summary(coupons: Any) -> dict[str, Any]:
     if not isinstance(coupons, list) or not coupons:
-        return {"coupons_count": 0, "next_coupon_date": None, "next_coupon_value": None, "last_coupon_date": None}
+        return {
+            "coupons_count": 0,
+            "next_coupon_date": None,
+            "next_coupon_value": None,
+            "next_coupon_period_days": None,
+            "last_coupon_date": None,
+        }
 
     rows = pd.DataFrame(coupons)
     if rows.empty:
-        return {"coupons_count": 0, "next_coupon_date": None, "next_coupon_value": None, "last_coupon_date": None}
+        return {
+            "coupons_count": 0,
+            "next_coupon_date": None,
+            "next_coupon_value": None,
+            "next_coupon_period_days": None,
+            "last_coupon_date": None,
+        }
 
     rows["coupondate_ts"] = pd.to_datetime(rows.get("coupondate"), errors="coerce")
     now = pd.Timestamp.now().normalize()
@@ -1691,6 +1828,7 @@ def _extract_coupon_summary(coupons: Any) -> dict[str, Any]:
         "coupons_count": int(len(rows)),
         "next_coupon_date": next_row["coupondate_ts"].date().isoformat() if next_row is not None and pd.notna(next_row["coupondate_ts"]) else None,
         "next_coupon_value": next_row.get("value") if next_row is not None else None,
+        "next_coupon_period_days": next_row.get("couponperiod") if next_row is not None else None,
         "last_coupon_date": last_row["coupondate_ts"].date().isoformat() if last_row is not None and pd.notna(last_row["coupondate_ts"]) else None,
     }
 
@@ -1704,6 +1842,16 @@ def _extract_amortization_summary(amortizations: Any) -> dict[str, Any]:
         return {"amortizations_count": 0, "next_amort_date": None, "next_amort_value": None}
 
     rows["amortdate_ts"] = pd.to_datetime(rows.get("amortdate"), errors="coerce")
+    if "data_source" in rows.columns:
+        data_source = rows["data_source"].astype(str).str.lower()
+        rows = rows[~data_source.isin(["maturity", "issue"])]
+
+    if "valueprc" in rows.columns:
+        rows = rows[pd.to_numeric(rows["valueprc"], errors="coerce").fillna(0) < 100]
+
+    if rows.empty:
+        return {"amortizations_count": 0, "next_amort_date": None, "next_amort_value": None}
+
     now = pd.Timestamp.now().normalize()
     future_rows = rows[rows["amortdate_ts"] >= now].sort_values("amortdate_ts")
     next_row = future_rows.iloc[0] if not future_rows.empty else rows.sort_values("amortdate_ts").iloc[-1]
@@ -1747,12 +1895,9 @@ def save_to_excel(df: pd.DataFrame, path: Path, logger: logging.Logger) -> None:
         worksheet.freeze_panes = "A2"
         worksheet.auto_filter.ref = worksheet.dimensions
 
-        for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
-            for cell in row:
-                cell.alignment = CENTERED_WRAP_ALIGNMENT
-                cell.border = THIN_BORDER
-
         for cell in worksheet[1]:
+            cell.alignment = CENTERED_WRAP_ALIGNMENT
+            cell.border = THIN_BORDER
             cell.fill = HEADER_FILL
             cell.font = HEADER_FONT
 
@@ -1817,6 +1962,8 @@ def run() -> None:
     emitters = pd.DataFrame()
     green_bonds = pd.DataFrame()
     green_payments = pd.DataFrame()
+    green_bonds_future = None
+    green_executor: ThreadPoolExecutor | None = None
     sqlite_conn = open_sqlite_connection()
 
     try:
@@ -1881,14 +2028,20 @@ def run() -> None:
         inns = {normalize_inn(value) for value in emitters["INN"].tolist()} if not emitters.empty and "INN" in emitters.columns else set()
         inns = {inn for inn in inns if inn}
         logger.info("Emitters scope: rows=%s unique_inn=%s", len(emitters), len(inns))
+
+        green_executor = ThreadPoolExecutor(max_workers=1)
+        green_bonds_future = green_executor.submit(collect_green_bonds, client, emitters, bonds, logger, None)
+
         expert_ra_cached, expert_ra_cached_today = load_daily_ratings_cache(EXPERT_RA_CACHE_FILE, logger)
         acra_cached, acra_cached_today = load_daily_ratings_cache(ACRA_CACHE_FILE, logger)
         nkr_cached, nkr_cached_today = load_daily_ratings_cache(NKR_CACHE_FILE, logger)
         nra_cached, nra_cached_today = load_daily_ratings_cache(NRA_CACHE_FILE, logger)
 
         expert_ra_ratings: dict[str, str] = {}
+        acra_history_prefetch = load_ratings_from_emitters_excel("Рейтинг Акра", logger)
         rating_executor = ThreadPoolExecutor(max_workers=3)
-        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns) if not acra_cached_today else None
+        acra_prefetched_exclude = set(acra_cached.keys()) | set(acra_history_prefetch.keys())
+        acra_future = rating_executor.submit(acra_client.fetch_latest_ratings_by_inn, inns - acra_prefetched_exclude) if not acra_cached_today else None
         nkr_future = rating_executor.submit(nkr_client.fetch_latest_ratings_by_inn, inns) if not nkr_cached_today else None
         nra_future = rating_executor.submit(nra_client.fetch_latest_ratings_by_inn, inns) if not nra_cached_today else None
         if expert_ra_cached_today:
@@ -1913,17 +2066,24 @@ def run() -> None:
         print("Этап 5: Получение рейтингов АКРА")
         stage_started_at = perf_counter()
         acra_ratings: dict[str, str] = {}
-        if acra_cached_today:
-            acra_ratings = acra_cached
-            restored_sources.append("АКРА (дневной кэш)")
+        acra_history = acra_history_prefetch
+        acra_cached_scope = {inn: rating for inn, rating in acra_cached.items() if inn in inns}
+        acra_history_scope = {inn: rating for inn, rating in acra_history.items() if inn in inns and inn not in acra_cached_scope}
+        acra_cached_scope = {**acra_history_scope, **acra_cached_scope}
+        pending_acra_inns = inns - set(acra_cached_scope.keys())
+
+        if acra_cached_today or not pending_acra_inns:
+            acra_ratings = acra_cached_scope
+            restored_sources.append("АКРА (кэш)")
         else:
             try:
-                acra_ratings = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(inns)
+                fetched_acra = acra_future.result() if acra_future is not None else acra_client.fetch_latest_ratings_by_inn(pending_acra_inns)
+                acra_ratings = {**acra_cached_scope, **fetched_acra}
                 save_daily_ratings_cache(ACRA_CACHE_FILE, acra_ratings, logger)
             except requests.RequestException as error:
                 logger.warning("ACRA stage failed, trying cache: %s", error)
                 skipped_sources.append("АКРА")
-                acra_ratings = acra_cached
+                acra_ratings = acra_cached_scope
                 if acra_ratings:
                     restored_sources.append("АКРА")
         if not emitters.empty:
@@ -2005,7 +2165,19 @@ def run() -> None:
 
         print("Этап 9: Green bonds (ScoreList=Green)")
         stage_started_at = perf_counter()
-        green_bonds, green_payments = collect_green_bonds(client, emitters, bonds, logger, sqlite_conn=sqlite_conn)
+        if green_bonds_future is not None:
+            green_bonds, green_payments = green_bonds_future.result()
+        else:
+            green_bonds, green_payments = collect_green_bonds(client, emitters, bonds, logger, sqlite_conn=None)
+
+        if not green_bonds.empty:
+            upsert_dataframe_sqlite(sqlite_conn, "green_bonds", green_bonds, ["SECID"], logger)
+        if not green_payments.empty:
+            payments_frame = green_payments.copy()
+            if "coupondate" not in payments_frame.columns:
+                payments_frame["coupondate"] = pd.NA
+            upsert_dataframe_sqlite(sqlite_conn, "green_bond_payments", payments_frame, ["SECID", "coupondate"], logger)
+
         stage_times["Этап 9: Green bonds (ScoreList=Green)"] = perf_counter() - stage_started_at
 
         print("Этап 10: Формирование Excel")
@@ -2034,6 +2206,8 @@ def run() -> None:
         logger.exception("Script failed: %s", error)
         raise
     finally:
+        if green_executor is not None:
+            green_executor.shutdown(wait=False)
         save_cache(cache, logger)
         sqlite_conn.close()
         logger.info("Script finished. interrupted=%s", interrupted["value"])
