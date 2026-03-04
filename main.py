@@ -9,6 +9,7 @@ from time import perf_counter
 
 import requests
 from openpyxl import Workbook
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 from tqdm import tqdm
 
@@ -221,6 +222,7 @@ def pull_scoring_from_excel(conn: sqlite3.Connection, logger: logging.Logger, to
     inn_idx = headers.index("INN")
     scoring_idx = headers.index("Scoring")
     date_idx = headers.index("DateScoring")
+    allowed_scoring = set(config.SCORING_ALLOWED_VALUES)
 
     updates: list[tuple[str | None, str | None, str]] = []
     for row in rows[1:]:
@@ -230,6 +232,14 @@ def pull_scoring_from_excel(conn: sqlite3.Connection, logger: logging.Logger, to
         scoring_val = ""
         if scoring_idx < len(row) and row[scoring_idx] is not None:
             scoring_val = str(row[scoring_idx]).strip()
+        if scoring_val and scoring_val not in allowed_scoring:
+            logger.warning(
+                "Пропущено некорректное значение Scoring='%s' для INN=%s. Допустимые значения: %s",
+                scoring_val,
+                inn,
+                ", ".join(config.SCORING_ALLOWED_VALUES),
+            )
+            scoring_val = ""
         date_val = ""
         if date_idx < len(row) and row[date_idx] is not None:
             date_val = str(row[date_idx]).strip()
@@ -297,6 +307,23 @@ def export_emitents_excel(conn: sqlite3.Connection) -> int:
 
     ws.auto_filter.ref = ws.dimensions
     ws.freeze_panes = "A2"
+
+    scoring_column_index = headers.index("Scoring") + 1
+    scoring_column_letter = ws.cell(row=1, column=scoring_column_index).column_letter
+    validation_values = ",".join(config.SCORING_ALLOWED_VALUES)
+    scoring_validation = DataValidation(
+        type="list",
+        formula1=f'"{validation_values}"',
+        allow_blank=True,
+        showErrorMessage=True,
+        errorStyle="stop",
+        errorTitle="Недопустимое значение",
+        error=f"Выберите одно из значений: {validation_values}",
+        promptTitle="Scoring",
+        prompt=f"Доступные значения: {validation_values}",
+    )
+    ws.add_data_validation(scoring_validation)
+    scoring_validation.add(f"{scoring_column_letter}2:{scoring_column_letter}1048576")
 
     for column_cells in ws.columns:
         max_len = 0

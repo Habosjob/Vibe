@@ -20,7 +20,8 @@
    - цветные заголовки,
    - автофильтр,
    - закрепление первой строки,
-   - автоширина колонок.
+   - автоширина колонок,
+   - жесткая проверка `Scoring` через выпадающий список (`Red`, `Yellow`, `Green`).
 8. Создает снапшоты в `BaseSnapshots`:
    - `rates_snapshot.xlsx` (5 случайных строк с уникальными `SECID`),
    - `emitents_snapshot.xlsx` (5 случайных строк из `emitents`).
@@ -49,6 +50,9 @@ python main.py
 ## Логика `Scoring` и `DateScoring`
 - `Scoring`:
   - заполняется вручную пользователем в `Emitents.xlsx`,
+  - доступен только выбор из выпадающего списка: `Red`, `Yellow`, `Green`,
+  - ввод других значений блокируется в Excel,
+  - если некорректное значение все же попало в файл (например, через внешний импорт), скрипт не переносит его в SQL и пишет предупреждение в лог,
   - переносится в SQL при следующем запуске.
 - `DateScoring`:
   - если у строки есть `Scoring`, но нет `DateScoring`, скрипт ставит текущую дату,
@@ -65,6 +69,7 @@ python main.py
 - `EMITENTS_TABLE_NAME` — таблица витрины эмитентов в SQLite.
 - `EMITENTS_XLSX_FILENAME` — имя Excel-витрины в корне проекта.
 - `EMITENTS_HEADER_FILL_COLOR` — цвет заголовков Excel.
+- `SCORING_ALLOWED_VALUES` — разрешенные значения в выпадающем списке `Scoring`.
 - `DATE_SCORING_FORMAT` — формат даты для `DateScoring`.
 - `EMITENTS_SNAPSHOT_FILENAME` — имя снапшота эмитентов в `BaseSnapshots`.
 
