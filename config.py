@@ -120,6 +120,9 @@ NRA_SNAPSHOT_FILENAME = "nra_snapshot.xlsx"
 # Имя Excel-файла снапшота по рейтингам АКРА (5 самых свежих строк по дате).
 ACRA_SNAPSHOT_FILENAME = "acra_snapshot.xlsx"
 
+# Имя Excel-файла снапшота по рейтингам НКР (5 самых свежих строк по дате).
+NKR_SNAPSHOT_FILENAME = "nkr_snapshot.xlsx"
+
 # TTL для повторной загрузки Excel НРА.
 # Значение: целое число > 0 (в часах).
 # По умолчанию: 12 часов.
@@ -153,8 +156,8 @@ ACRA_CACHE_TTL_HOURS = 12
 
 # Папка persistent-профиля браузера для АКРА.
 # Позволяет сохранять cookies/состояние между запусками.
-# По умолчанию: <проект>/acra_profile
-ACRA_PROFILE_DIR = BASE_DIR / "acra_profile"
+# По умолчанию: <проект>/cache/acra_profile
+ACRA_PROFILE_DIR = CACHE_DIR / "acra_profile"
 
 # Канал браузера Playwright для АКРА.
 # Значение: строка (например "chrome", "msedge") или None для bundled Chromium.
@@ -177,8 +180,8 @@ ACRA_LIST_GOTO_ATTEMPTS = 6
 ACRA_CARD_GOTO_ATTEMPTS = 5
 
 # Папка для дампов АКРА (список, карточки, прогресс-лог).
-# По умолчанию: <проект>/acra_dump
-ACRA_DUMP_DIR = BASE_DIR / "acra_dump"
+# По умолчанию: <проект>/raw/acra_dump
+ACRA_DUMP_DIR = RAW_DIR / "acra_dump"
 
 # Подпапка HTML-дампов карточек эмитентов АКРА.
 # По умолчанию: <проект>/acra_dump/issuers
@@ -195,3 +198,41 @@ ACRA_LIST_HTML_FILENAME = "issuers_list.html"
 # Имя MHTML-дампа страницы списка эмитентов АКРА.
 # По умолчанию: issuers_list.mhtml
 ACRA_LIST_MHTML_FILENAME = "issuers_list.mhtml"
+
+# URL страницы НКР «Список эмитентов».
+NKR_RATINGS_PAGE_URL = "https://ratings.ru/ratings/issuers/"
+
+# Имя raw-файла НКР в папке /raw.
+NKR_RAW_FILENAME = "nkr_ratings.xlsx"
+
+# Имя таблицы НКР с инкрементальной историей рейтингов.
+# Ключ уникальности: (tin, rating_date, rating, outlook).
+NKR_TABLE_NAME = "nkr_ratings"
+
+# Имя таблицы последних уникальных рейтингов НКР по ИНН.
+NKR_LATEST_TABLE_NAME = "nkr_latest_by_tin"
+
+# TTL для повторной загрузки Excel НКР.
+# Значение: целое число > 0 (в часах).
+# По умолчанию: 12 часов.
+NKR_CACHE_TTL_HOURS = 12
+
+# Headless-режим для НКР.
+# Значения: True/False.
+# По умолчанию: True.
+NKR_HEADLESS = True
+
+# Канал браузера Playwright для НКР.
+# Значение: строка (например "chrome", "msedge") или None для bundled Chromium.
+# По умолчанию: "chrome".
+NKR_BROWSER_CHANNEL = "chrome"
+
+# CSS-селектор кнопки/ссылки выгрузки НКР.
+# Значение: строка CSS-селектора.
+# По умолчанию: ".Excel-btn".
+NKR_EXPORT_BUTTON_SELECTOR = ".Excel-btn"
+
+# Количество попыток скачивания выгрузки НКР.
+# Значение: целое число > 0.
+# По умолчанию: 3.
+NKR_DOWNLOAD_ATTEMPTS = 3
