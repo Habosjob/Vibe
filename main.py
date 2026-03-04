@@ -596,7 +596,6 @@ def split_acra_rating_and_forecast(raw_value: str) -> tuple[str, str]:
     normalized_lines = [line.strip() for line in re.split(r"[\r\n]+", raw_value or "") if line.strip()]
     if not normalized_lines:
         return "", ""
-<<<<<<< codex/update-a-to-parse-from-html-zb5cdu
 
     forecast_line = ""
     rating_line = ""
@@ -637,15 +636,6 @@ def is_acra_forecast_value(value: str) -> bool:
         "негативный",
         "развивающийся",
     }
-=======
-    if len(normalized_lines) == 1:
-        one_line = normalized_lines[0]
-        match = re.match(r"^(.*?)\s*[;,]\s*([^;,]+)$", one_line)
-        if match:
-            return match.group(1).strip(), match.group(2).strip()
-        return one_line, ""
-    return normalized_lines[0], normalized_lines[1]
->>>>>>> main
 
 
 def extract_inn_from_acra_card(html_text: str) -> str:
