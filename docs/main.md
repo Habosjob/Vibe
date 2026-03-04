@@ -13,7 +13,7 @@
    - работает с TTL 12 часов (настраивается `NRA_CACHE_TTL_HOURS`).
 5. Парсит рейтинги АКРА методом из `Acra.py` (через `playwright.sync_api` + запуск **Google Chrome** + паузы/ретраи):
    - первый этап (список) обновляется не чаще одного раза в 12 часов (`ACRA_CACHE_TTL_HOURS`),
-   - извлекаются: ссылка на карточку, наименование, рейтинг и дата,
+   - извлекаются: ссылка на карточку, наименование, рейтинг, прогноз и дата,
    - карточки открываются в persistent-профиле браузера (`ACRA_PROFILE_DIR`) для устойчивости к антибот-защите,
    - обновления инкрементальные в таблицу `acra_ratings`.
 6. Для АКРА реализована оптимизация карточек:
@@ -21,7 +21,7 @@
    - карточка запрашивается только для новых эмитентов (или если по ссылке ранее не удалось получить ИНН).
 7. В отдельной БД рейтинговых агентств:
    - НРА хранится в `nra_ratings` и `nra_latest_by_inn`,
-   - АКРА хранится в `acra_ratings` с уникальностью `issuer_url + rating_date + rating`,
+   - АКРА хранится в `acra_ratings` с уникальностью `issuer_url + rating_date + rating` (отдельно сохраняются `rating` и `forecast`),
    - НКР хранится в `nkr_ratings` и `nkr_latest_by_tin` (уникальность истории по `tin + rating_date + rating + outlook`).
 8. Ведет таблицу `emitents` с уникальными эмитентами по `INN` в основной БД:
    - берет поля `EMITENTNAME` и `INN` из `rates`,
@@ -76,8 +76,9 @@ python main.py
 - TTL первого этапа (список): `ACRA_CACHE_TTL_HOURS` (по умолчанию 12 часов).
 - БД: `DB/raitings.sqlite3`.
 - Таблица: `acra_ratings`.
-- Поля записи: `issuer_url`, `issuer_name`, `rating`, `rating_date`, `inn`, `loaded_at_utc`.
+- Поля записи: `issuer_url`, `issuer_name`, `rating`, `forecast`, `rating_date`, `inn`, `loaded_at_utc`.
 - Если ссылка известна и ИНН по ней уже есть в БД, карточка эмитента не парсится повторно.
+- Если в локальном `raw/acra_dump/issuers_list.html` есть прогнозы, они используются для backfill пустого `forecast` в SQLite без повторной загрузки сайта.
 - Для нестабильных соединений используются ретраи `goto` и "человеческие" паузы между действиями.
 - Дополнительно формируются дампы: `raw/acra_dump/issuers_list.html`, `raw/acra_dump/issuers_list.mhtml`, карточки в `raw/acra_dump/issuers/`, прогресс в `raw/acra_dump/progress.jsonl`.
 

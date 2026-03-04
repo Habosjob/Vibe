@@ -481,6 +481,7 @@ def ensure_acra_tables(conn: sqlite3.Connection) -> None:
             "issuer_url" TEXT NOT NULL,
             "issuer_name" TEXT,
             "rating" TEXT,
+            "forecast" TEXT,
             "rating_date" TEXT,
             "inn" TEXT,
             "loaded_at_utc" TEXT,
@@ -491,6 +492,9 @@ def ensure_acra_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         f'CREATE INDEX IF NOT EXISTS "idx_{config.ACRA_TABLE_NAME}_url" ON "{config.ACRA_TABLE_NAME}"("issuer_url")'
     )
+    conn.execute(
+        f'ALTER TABLE "{config.ACRA_TABLE_NAME}" ADD COLUMN "forecast" TEXT'
+    ) if _column_absent(conn, config.ACRA_TABLE_NAME, "forecast") else None
     conn.commit()
 
 
@@ -503,6 +507,45 @@ def should_refresh_acra(conn: sqlite3.Connection, now_utc: datetime) -> bool:
     except ValueError:
         return True
     return now_utc - last_refresh >= timedelta(hours=config.ACRA_CACHE_TTL_HOURS)
+
+
+def backfill_acra_forecast_from_local_dump(conn: sqlite3.Connection, logger: logging.Logger) -> int:
+    list_dump_path = config.ACRA_DUMP_DIR / config.ACRA_LIST_HTML_FILENAME
+    if not list_dump_path.exists():
+        return 0
+
+    try:
+        html_text = list_dump_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("АКРА backfill прогноза пропущен: не удалось прочитать %s (%s)", list_dump_path, exc)
+        return 0
+
+    parsed_rows = parse_acra_list(html_text)
+    forecast_by_url = {
+        row["issuer_url"]: (row.get("forecast") or "").strip()
+        for row in parsed_rows
+        if (row.get("issuer_url") or "").strip() and (row.get("forecast") or "").strip()
+    }
+    if not forecast_by_url:
+        return 0
+
+    updated = 0
+    for issuer_url, forecast in forecast_by_url.items():
+        cursor = conn.execute(
+            f'''
+            UPDATE "{config.ACRA_TABLE_NAME}"
+            SET "forecast" = ?
+            WHERE "issuer_url" = ? AND TRIM(COALESCE("forecast", '')) = ''
+            ''',
+            (forecast, issuer_url),
+        )
+        if cursor.rowcount and cursor.rowcount > 0:
+            updated += int(cursor.rowcount)
+
+    if updated:
+        conn.commit()
+        logger.info("АКРА backfill прогноза из локального дампа: обновлено строк=%s", updated)
+    return updated
 
 
 def parse_acra_list(html_text: str) -> list[dict[str, str]]:
@@ -521,6 +564,19 @@ def parse_acra_list(html_text: str) -> list[dict[str, str]]:
         rating_node = row.select_one('div.emits-row__item[data-type="rate"] p')
         rating = rating_node.get_text(" ", strip=True) if rating_node else ""
 
+        forecast = ""
+        forecast_container = row.select_one('div.emits-row__item[data-type="forecast"]')
+        if forecast_container:
+            forecast = forecast_container.get_text(" ", strip=True)
+
+        rating_container = row.select_one('div.emits-row__item[data-type="rate"]')
+        rating_raw = rating_container.get_text("\n", strip=True) if rating_container else ""
+        fallback_rating, fallback_forecast = split_acra_rating_and_forecast(rating_raw)
+        if not rating:
+            rating = fallback_rating
+        if not forecast:
+            forecast = fallback_forecast
+
         date_node = row.select_one('div.emits-row__item[data-type="pressRelease"] a')
         date_raw = date_node.get_text(" ", strip=True) if date_node else ""
         parsed_rows.append(
@@ -528,10 +584,57 @@ def parse_acra_list(html_text: str) -> list[dict[str, str]]:
                 "issuer_url": issuer_url,
                 "issuer_name": issuer_name,
                 "rating": rating,
+                "forecast": forecast,
                 "rating_date": normalize_date_ru(date_raw) or date_raw,
             }
         )
     return parsed_rows
+
+
+def split_acra_rating_and_forecast(raw_value: str) -> tuple[str, str]:
+    normalized_lines = [line.strip() for line in re.split(r"[\r\n]+", raw_value or "") if line.strip()]
+    if not normalized_lines:
+        return "", ""
+
+    forecast_line = ""
+    rating_line = ""
+
+    for line in normalized_lines:
+        if not forecast_line and is_acra_forecast_value(line):
+            forecast_line = line
+            continue
+        if not rating_line and is_acra_rating_value(line):
+            rating_line = line
+
+    if rating_line:
+        return rating_line, forecast_line
+
+    one_line = normalized_lines[0]
+    match = re.match(r"^(.*?)\s*[;,]\s*([^;,]+)$", one_line)
+    if match:
+        left = match.group(1).strip()
+        right = match.group(2).strip()
+        if is_acra_forecast_value(right):
+            return left, right
+    return one_line, forecast_line
+
+
+def is_acra_rating_value(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    normalized = text.replace(" ", "")
+    return bool(re.search(r"[A-ZА-Я][+\-]?(?:\([A-ZА-Я]{2}\))", normalized))
+
+
+def is_acra_forecast_value(value: str) -> bool:
+    normalized = (value or "").strip().lower()
+    return normalized in {
+        "стабильный",
+        "позитивный",
+        "негативный",
+        "развивающийся",
+    }
 
 
 def extract_inn_from_acra_card(html_text: str) -> str:
@@ -703,6 +806,7 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
     current = conn.execute(f'SELECT COUNT(*) FROM "{config.ACRA_TABLE_NAME}"').fetchone()
     current_total = int(current[0]) if current else 0
     if not should_refresh_acra(conn, now_utc):
+        backfill_acra_forecast_from_local_dump(conn, logger)
         return False, current_total, 0
 
     inn_cache_by_url = {
@@ -726,10 +830,11 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
             cursor = conn.execute(
                     f'''
                     INSERT INTO "{config.ACRA_TABLE_NAME}" (
-                        "issuer_url", "issuer_name", "rating", "rating_date", "inn", "loaded_at_utc"
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        "issuer_url", "issuer_name", "rating", "forecast", "rating_date", "inn", "loaded_at_utc"
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT("issuer_url", "rating_date", "rating") DO UPDATE SET
                         "issuer_name" = excluded."issuer_name",
+                        "forecast" = excluded."forecast",
                         "inn" = CASE
                             WHEN TRIM(COALESCE("{config.ACRA_TABLE_NAME}"."inn", '')) = '' THEN excluded."inn"
                             ELSE "{config.ACRA_TABLE_NAME}"."inn"
@@ -740,6 +845,7 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
                         row_data["issuer_url"],
                         row_data.get("issuer_name", ""),
                         row_data.get("rating", ""),
+                        row_data.get("forecast", ""),
                         row_data.get("rating_date", ""),
                         row_data.get("inn", ""),
                         loaded_at,
@@ -752,6 +858,7 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
         return False, current_total, 0
 
     conn.commit()
+    backfill_acra_forecast_from_local_dump(conn, logger)
     set_meta_value(conn, "acra_last_refresh_utc", now_utc.isoformat())
     set_meta_value(conn, "acra_last_rows_count", str(len(unique_rows)))
     logger.info(
@@ -1062,7 +1169,7 @@ def sync_nra_rate_to_emitents(main_conn: sqlite3.Connection, nra_conn: sqlite3.C
 def sync_acra_rate_to_emitents(main_conn: sqlite3.Connection, ratings_conn: sqlite3.Connection, logger: logging.Logger) -> int:
     rows = ratings_conn.execute(
         f'''
-        SELECT src."inn", src."rating"
+        SELECT src."inn", src."rating", src."forecast"
         FROM "{config.ACRA_TABLE_NAME}" src
         JOIN (
             SELECT "inn", MAX(
@@ -1084,18 +1191,20 @@ def sync_acra_rate_to_emitents(main_conn: sqlite3.Connection, ratings_conn: sqli
     ).fetchall()
 
     updates: list[tuple[str, str]] = []
-    for inn, rating in rows:
+    for inn, rating, forecast in rows:
         rating_text = (rating or "").strip()
+        forecast_text = (forecast or "").strip().lower()
         if not rating_text:
             continue
 
-        parts = [part.strip() for part in re.split(r"[,;]", rating_text, maxsplit=1) if part.strip()]
-        base_rating = parts[0] if parts else ""
-        forecast = parts[1].lower() if len(parts) > 1 else ""
+        base_rating = rating_text
+        if not forecast_text:
+            base_rating, forecast_text = split_acra_rating_and_forecast(rating_text)
+            forecast_text = forecast_text.lower()
         if not base_rating:
             continue
 
-        rate_for_showcase = f"{base_rating}({forecast})" if forecast else base_rating
+        rate_for_showcase = f"{base_rating}({forecast_text})" if forecast_text else base_rating
         updates.append((rate_for_showcase, inn.strip()))
 
     main_conn.executemany(
@@ -1343,7 +1452,7 @@ def export_nra_snapshot(conn: sqlite3.Connection) -> int:
 def export_acra_snapshot(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "issuer_name", "issuer_url", "rating", "rating_date", "inn"
+        SELECT "issuer_name", "issuer_url", "rating", "forecast", "rating_date", "inn"
         FROM "{config.ACRA_TABLE_NAME}"
         ORDER BY
             CASE
