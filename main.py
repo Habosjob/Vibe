@@ -1757,6 +1757,112 @@ def export_dohod_snapshot(conn: sqlite3.Connection) -> int:
     return len(rows)
 
 
+MERGE_MOEX_COLUMNS = [
+    "SECID",
+    "ISIN",
+    "FACEVALUE",
+    "FACEUNIT",
+    "MATDATE",
+    "IS_QUALIFIED_INVESTORS",
+    "BOND_TYPE",
+    "BOND_SUBTYPE",
+    "YIELDATWAP",
+    "PRICE",
+]
+
+MERGE_DOHOD_COLUMNS = [
+    "Название",
+    "Ближайшая дата погашения/оферты (Дата)",
+    "Событие в дату",
+    "Коэф. Ликвидности (max=100)",
+    "Медиана дневного оборота (млн в валюте торгов)",
+    "Цена, % от номинала",
+    "НКД",
+    "Размер купона",
+    "Текущий купон, %",
+    "Тип купона",
+    "Купон (раз/год)",
+    "Субординированная (да/нет)",
+    "Базовый индекс (для FRN)",
+    "Премия/Дисконт к базовому индексу (для FRN)",
+]
+
+
+def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
+    columns_sql = ['"ISIN" TEXT PRIMARY KEY']
+    for column in MERGE_MOEX_COLUMNS:
+        if column == "ISIN":
+            continue
+        columns_sql.append(f'"{column}" TEXT')
+    for column in MERGE_DOHOD_COLUMNS:
+        columns_sql.append(f'"{column}" TEXT')
+    conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({", ".join(columns_sql)})')
+    conn.commit()
+
+
+def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, scoring: str) -> int:
+    ensure_merge_table(conn, table_name)
+
+    moex_select = [f'm."{column}"' for column in MERGE_MOEX_COLUMNS]
+    dohod_select = [f'd."{column}"' for column in MERGE_DOHOD_COLUMNS]
+    selected_columns = moex_select + dohod_select
+    insert_columns = [f'"{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"]
+    insert_columns = ['"ISIN"'] + insert_columns + [f'"{column}"' for column in MERGE_DOHOD_COLUMNS]
+    placeholders = ", ".join(["?"] * len(insert_columns))
+
+    rows = conn.execute(
+        f'''
+        SELECT {", ".join(selected_columns)}
+        FROM "{config.RATES_TABLE_NAME}" m
+        INNER JOIN "{config.EMITENTS_TABLE_NAME}" e
+            ON TRIM(COALESCE(m."INN", '')) = TRIM(COALESCE(e."INN", ''))
+        LEFT JOIN "{config.DOHOD_TABLE_NAME}" d
+            ON TRIM(COALESCE(m."ISIN", '')) = TRIM(COALESCE(d."ISIN", ''))
+        WHERE TRIM(COALESCE(e."Scoring", '')) = ?
+          AND TRIM(COALESCE(m."ISIN", '')) <> ''
+        ''',
+        (scoring,),
+    ).fetchall()
+
+    conn.execute("BEGIN")
+    conn.execute(f'DELETE FROM "{table_name}"')
+    if rows:
+        conn.executemany(
+            f'INSERT OR REPLACE INTO "{table_name}" ({", ".join(insert_columns)}) VALUES ({placeholders})',
+            rows,
+        )
+    conn.commit()
+    return len(rows)
+
+
+def export_merge_snapshot(conn: sqlite3.Connection, table_name: str, snapshot_filename: str, sheet_name: str) -> int:
+    query = f'''
+    SELECT *
+    FROM "{table_name}"
+    WHERE rowid IN (
+        SELECT MIN(rowid)
+        FROM "{table_name}"
+        GROUP BY "ISIN"
+        ORDER BY RANDOM()
+        LIMIT 5
+    )
+    '''
+    cursor = conn.execute(query)
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / snapshot_filename
+    wb.save(snapshot_path)
+    return len(rows)
+
+
 def main() -> None:
     logger = setup_logging()
     stage_times: dict[str, float] = {}
@@ -1906,6 +2012,38 @@ def main() -> None:
             )
             pbar.update(1)
         stage_times["Этап 6: Витрина эмитентов (SQL + Excel)"] = perf_counter() - s
+
+        print("Этап 7: Merge Green/Yellow (SQL + snapshot)")
+        s = perf_counter()
+        with progress(total=4, desc="Merge bonds", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                green_rows = rebuild_merge_table_by_scoring(conn, config.MERGE_GREEN_TABLE_NAME, "Green")
+                pbar.update(1)
+                yellow_rows = rebuild_merge_table_by_scoring(conn, config.MERGE_YELLOW_TABLE_NAME, "Yellow")
+                pbar.update(1)
+                green_snapshot = export_merge_snapshot(
+                    conn,
+                    config.MERGE_GREEN_TABLE_NAME,
+                    config.MERGE_GREEN_SNAPSHOT_FILENAME,
+                    "merge_green_snapshot",
+                )
+                pbar.update(1)
+                yellow_snapshot = export_merge_snapshot(
+                    conn,
+                    config.MERGE_YELLOW_TABLE_NAME,
+                    config.MERGE_YELLOW_SNAPSHOT_FILENAME,
+                    "merge_yellow_snapshot",
+                )
+                pbar.update(1)
+
+            logger.info(
+                "Merge Green: строк=%s, snapshot=%s; Merge Yellow: строк=%s, snapshot=%s",
+                green_rows,
+                green_snapshot,
+                yellow_rows,
+                yellow_snapshot,
+            )
+        stage_times["Этап 7: Merge Green/Yellow (SQL + snapshot)"] = perf_counter() - s
 
         print("=====\nГотово")
     except Exception as exc:
