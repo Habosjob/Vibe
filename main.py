@@ -4,8 +4,10 @@ import csv
 import html
 import io
 import logging
+import random
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
@@ -16,6 +18,9 @@ from bs4 import BeautifulSoup
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
+from playwright.sync_api import Error as PWError
+from playwright.sync_api import TimeoutError as PWTimeoutError
+from playwright.sync_api import sync_playwright
 from tqdm import tqdm
 
 import config
@@ -432,6 +437,104 @@ def extract_inn_from_acra_card(html_text: str) -> str:
     return re.sub(r"\D+", "", fallback.group(1)) if fallback else ""
 
 
+def acra_human_sleep(min_seconds: float = 0.7, max_seconds: float = 1.8) -> None:
+    time.sleep(random.uniform(min_seconds, max_seconds))
+
+
+def acra_goto_with_retries(page, url: str, logger: logging.Logger, wait_selector: str | None = None, attempts: int = 5) -> bool:
+    last_error: Exception | None = None
+    for retry in range(1, attempts + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000))
+            if wait_selector:
+                page.wait_for_selector(wait_selector, timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000))
+            return True
+        except (PWTimeoutError, PWError) as exc:
+            last_error = exc
+            message = str(exc)
+            retryable = any(
+                marker in message
+                for marker in ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET", "ERR_EMPTY_RESPONSE", "ERR_TIMED_OUT", "net::")
+            )
+            if not retryable:
+                logger.warning("АКРА goto non-retryable error for %s: %s", url, message)
+                return False
+            sleep_seconds = min((3.0 * retry) + random.uniform(0.5, 2.0), 20.0)
+            logger.warning(
+                "АКРА goto retry %s/%s for %s due to %s; sleep %.1fs",
+                retry,
+                attempts,
+                url,
+                message[:200],
+                sleep_seconds,
+            )
+            time.sleep(sleep_seconds)
+    logger.warning("АКРА goto failed for %s after retries: %s", url, last_error)
+    return False
+
+
+def collect_acra_rows_via_playwright(logger: logging.Logger, inn_cache_by_url: dict[str, str]) -> tuple[dict[str, dict[str, str]], int]:
+    unique_rows: dict[str, dict[str, str]] = {}
+    card_fetch_count = 0
+    with sync_playwright() as p:
+        launch_kwargs = {
+            "user_data_dir": str(config.ACRA_PROFILE_DIR),
+            "headless": config.ACRA_HEADLESS,
+            "viewport": {"width": 1365, "height": 768},
+            "locale": "ru-RU",
+            "timezone_id": "Europe/Moscow",
+            "args": ["--start-maximized"],
+        }
+        if config.ACRA_BROWSER_CHANNEL:
+            launch_kwargs["channel"] = config.ACRA_BROWSER_CHANNEL
+
+        context = p.chromium.launch_persistent_context(**launch_kwargs)
+        try:
+            page = context.new_page()
+            list_ok = acra_goto_with_retries(
+                page,
+                config.ACRA_RATINGS_LIST_URL,
+                logger,
+                wait_selector='a.emits-row__item[data-type="ratePerson"]',
+                attempts=config.ACRA_LIST_GOTO_ATTEMPTS,
+            )
+            if not list_ok:
+                return unique_rows, card_fetch_count
+
+            acra_human_sleep(1.0, 2.0)
+            page.mouse.wheel(0, random.randint(500, 1400))
+            acra_human_sleep(0.6, 1.2)
+
+            parsed_rows = parse_acra_list(page.content())
+            for row_data in parsed_rows:
+                unique_rows[row_data["issuer_url"]] = row_data
+
+            for row_data in tqdm(list(unique_rows.values()), desc="АКРА карточки", unit="эмитент", leave=False, dynamic_ncols=True):
+                cached_inn = (inn_cache_by_url.get(row_data["issuer_url"]) or "").strip()
+                if cached_inn:
+                    row_data["inn"] = cached_inn
+                    continue
+                card_ok = acra_goto_with_retries(
+                    page,
+                    row_data["issuer_url"],
+                    logger,
+                    wait_selector=None,
+                    attempts=config.ACRA_CARD_GOTO_ATTEMPTS,
+                )
+                if not card_ok:
+                    continue
+                acra_human_sleep(0.8, 1.8)
+                if random.random() < 0.6:
+                    page.mouse.wheel(0, random.randint(250, 900))
+                    acra_human_sleep(0.3, 0.8)
+                row_data["inn"] = extract_inn_from_acra_card(page.content())
+                card_fetch_count += 1
+                acra_human_sleep(0.6, 1.6)
+        finally:
+            context.close()
+    return unique_rows, card_fetch_count
+
+
 def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime) -> tuple[bool, int, int]:
     ensure_acra_tables(conn)
     current = conn.execute(f'SELECT COUNT(*) FROM "{config.ACRA_TABLE_NAME}"').fetchone()
@@ -439,41 +542,42 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
     if not should_refresh_acra(conn, now_utc):
         return False, current_total, 0
 
+    inn_cache_by_url = {
+        row[0]: row[1]
+        for row in conn.execute(
+            f'''
+            SELECT "issuer_url", "inn"
+            FROM "{config.ACRA_TABLE_NAME}"
+            WHERE TRIM(COALESCE("inn", '')) <> ''
+            '''
+        ).fetchall()
+    }
+
     try:
-        with create_http_session() as session:
-            list_response = session.get(config.ACRA_RATINGS_LIST_URL, timeout=config.REQUEST_TIMEOUT_SECONDS)
-            list_response.raise_for_status()
-            parsed_rows = parse_acra_list(list_response.text)
-
-            unique_rows: dict[str, dict[str, str]] = {}
-            for parsed_row in parsed_rows:
-                unique_rows[parsed_row["issuer_url"]] = parsed_row
-
-            loaded_at = now_utc.isoformat()
-            card_requests = 0
-            changed_rows = 0
-
-            for row_data in unique_rows.values():
-                issuer_url = row_data["issuer_url"]
-                existing = conn.execute(
-                    f'''
-                    SELECT "inn"
-                    FROM "{config.ACRA_TABLE_NAME}"
-                    WHERE "issuer_url" = ?
-                      AND TRIM(COALESCE("inn", '')) <> ''
-                    LIMIT 1
-                    ''',
-                    (issuer_url,),
-                ).fetchone()
-
-                inn_value = existing[0] if existing else ""
-                if not inn_value:
-                    card_response = session.get(issuer_url, timeout=config.REQUEST_TIMEOUT_SECONDS)
+        if config.ACRA_USE_PLAYWRIGHT:
+            unique_rows, card_requests = collect_acra_rows_via_playwright(logger, inn_cache_by_url)
+        else:
+            with create_http_session() as session:
+                list_response = session.get(config.ACRA_RATINGS_LIST_URL, timeout=config.REQUEST_TIMEOUT_SECONDS)
+                list_response.raise_for_status()
+                parsed_rows = parse_acra_list(list_response.text)
+                unique_rows = {row["issuer_url"]: row for row in parsed_rows}
+                card_requests = 0
+                for row_data in unique_rows.values():
+                    cached_inn = (inn_cache_by_url.get(row_data["issuer_url"]) or "").strip()
+                    if cached_inn:
+                        row_data["inn"] = cached_inn
+                        continue
+                    card_response = session.get(row_data["issuer_url"], timeout=config.REQUEST_TIMEOUT_SECONDS)
                     card_response.raise_for_status()
-                    inn_value = extract_inn_from_acra_card(card_response.text)
+                    row_data["inn"] = extract_inn_from_acra_card(card_response.text)
                     card_requests += 1
 
-                cursor = conn.execute(
+        loaded_at = now_utc.isoformat()
+        changed_rows = 0
+
+        for row_data in unique_rows.values():
+            cursor = conn.execute(
                     f'''
                     INSERT INTO "{config.ACRA_TABLE_NAME}" (
                         "issuer_url", "issuer_name", "rating", "rating_date", "inn", "loaded_at_utc"
@@ -487,17 +591,17 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
                         "loaded_at_utc" = excluded."loaded_at_utc"
                     ''',
                     (
-                        issuer_url,
+                        row_data["issuer_url"],
                         row_data.get("issuer_name", ""),
                         row_data.get("rating", ""),
                         row_data.get("rating_date", ""),
-                        inn_value,
+                        row_data.get("inn", ""),
                         loaded_at,
                     ),
                 )
-                if cursor.rowcount and cursor.rowcount > 0:
-                    changed_rows += 1
-    except requests.RequestException as exc:
+            if cursor.rowcount and cursor.rowcount > 0:
+                changed_rows += 1
+    except Exception as exc:
         logger.warning("АКРА обновление пропущено из-за сетевой ошибки: %s", exc)
         return False, current_total, 0
 
