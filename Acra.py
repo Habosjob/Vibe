@@ -17,12 +17,12 @@ LIST_URL = ("https://www.acra-ratings.ru/ratings/issuers/"
             "&rating_scale=0&rate_from=0&rate_to=0&page=1&sort=&count=1000&")
 
 BASE = "https://www.acra-ratings.ru"
-OUT_DIR = "acra_dump"
+OUT_DIR = os.path.join("raw", "acra_dump")
 OUT_XLSX = "acraraiting.xlsx"
 PROGRESS_LOG = os.path.join(OUT_DIR, "progress.jsonl")
 
 # persistent-профиль браузера (важно для "не терять" куки и ручного прохождения защиты)
-PROFILE_DIR = "acra_profile"
+PROFILE_DIR = os.path.join("cache", "acra_profile")
 
 RU_MONTHS = {
     "янв": 1, "фев": 2, "мар": 3, "апр": 4, "май": 5, "июн": 6,

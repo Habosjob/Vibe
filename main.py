@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import base64
 import html
 import io
 import json
@@ -9,6 +10,7 @@ import random
 import re
 import sqlite3
 import time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
@@ -193,7 +195,8 @@ def ensure_emitents_table(conn: sqlite3.Connection) -> None:
             "Scoring" TEXT,
             "DateScoring" TEXT,
             "NRA_Rate" TEXT,
-            "Acra_Rate" TEXT
+            "Acra_Rate" TEXT,
+            "NKR_Rate" TEXT
         )
         '''
     )
@@ -203,6 +206,9 @@ def ensure_emitents_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         f'ALTER TABLE "{config.EMITENTS_TABLE_NAME}" ADD COLUMN "Acra_Rate" TEXT'
     ) if _column_absent(conn, config.EMITENTS_TABLE_NAME, "Acra_Rate") else None
+    conn.execute(
+        f'ALTER TABLE "{config.EMITENTS_TABLE_NAME}" ADD COLUMN "NKR_Rate" TEXT'
+    ) if _column_absent(conn, config.EMITENTS_TABLE_NAME, "NKR_Rate") else None
     conn.commit()
 
 
@@ -251,6 +257,35 @@ def ensure_nra_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_nkr_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.NKR_TABLE_NAME}" (
+            "id" TEXT,
+            "issuer_name" TEXT,
+            "rating_date" TEXT,
+            "rating" TEXT,
+            "outlook" TEXT,
+            "tin" TEXT,
+            "loaded_at_utc" TEXT,
+            UNIQUE("tin", "rating_date", "rating", "outlook")
+        )
+        '''
+    )
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.NKR_LATEST_TABLE_NAME}" (
+            "tin" TEXT PRIMARY KEY,
+            "issuer_name" TEXT,
+            "rating_date" TEXT,
+            "rating" TEXT,
+            "outlook" TEXT
+        )
+        '''
+    )
+    conn.commit()
+
+
 NRA_HEADERS_MAP = {
     "id": "id",
     "Название организации": "organization_name",
@@ -267,6 +302,15 @@ NRA_HEADERS_MAP = {
     "ISIN": "isin",
     "Ссылка на пресс релиз": "press_release_link",
     "Под наблюдением": "under_watch",
+}
+
+NKR_HEADERS_MAP = {
+    "ID": "id",
+    "Issuer Name": "issuer_name",
+    "Date": "rating_date",
+    "Rating": "rating",
+    "Outlook": "outlook",
+    "TIN": "tin",
 }
 
 RU_MONTHS = {
@@ -352,6 +396,67 @@ def parse_nra_excel(content: bytes) -> list[dict[str, str]]:
         if any(row_dict.values()):
             parsed_rows.append(row_dict)
     return parsed_rows
+
+
+def _normalize_tin(value: object) -> str:
+    raw = _normalize_cell(value)
+    if not raw:
+        return ""
+
+    compact = raw.replace(" ", "").replace("\u00a0", "").replace(",", ".")
+    if re.fullmatch(r"\d+", compact):
+        return compact.zfill(10) if len(compact) < 10 else compact
+
+    try:
+        as_int = str(int(Decimal(compact)))
+        return as_int.zfill(10) if len(as_int) < 10 else as_int
+    except (InvalidOperation, ValueError):
+        digits = re.sub(r"\D+", "", compact)
+        return digits.zfill(10) if digits and len(digits) < 10 else digits
+
+
+def parse_nkr_excel(content: bytes) -> list[dict[str, str]]:
+    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    headers = [_normalize_cell(cell) for cell in rows[0]]
+    indexes: dict[str, int] = {}
+    for idx, header in enumerate(headers):
+        if header in NKR_HEADERS_MAP:
+            indexes[NKR_HEADERS_MAP[header]] = idx
+
+    missing = [column for column in NKR_HEADERS_MAP.values() if column not in indexes]
+    if missing:
+        raise ValueError(f"В выгрузке НКР отсутствуют колонки: {', '.join(missing)}")
+
+    parsed_rows: list[dict[str, str]] = []
+    for row in rows[1:]:
+        row_dict: dict[str, str] = {}
+        for key, idx in indexes.items():
+            row_dict[key] = _normalize_cell(row[idx]) if idx < len(row) else ""
+        row_dict["tin"] = _normalize_tin(row[indexes["tin"]] if indexes["tin"] < len(row) else "")
+        row_dict["rating_date"] = normalize_date_ru(row_dict.get("rating_date", ""))
+        if any(row_dict.values()):
+            parsed_rows.append(row_dict)
+    return parsed_rows
+
+
+def should_refresh_nkr(conn: sqlite3.Connection, now_utc: datetime) -> bool:
+    last_refresh_raw = get_meta_value(conn, "nkr_last_refresh_utc")
+    rows_count_raw = get_meta_value(conn, "nkr_last_rows_count")
+    if not last_refresh_raw or not rows_count_raw:
+        return True
+    try:
+        last_refresh = datetime.fromisoformat(last_refresh_raw)
+        rows_count = int(rows_count_raw)
+    except ValueError:
+        return True
+    if rows_count <= 0:
+        return True
+    return now_utc - last_refresh >= timedelta(hours=config.NKR_CACHE_TTL_HOURS)
 
 
 def should_refresh_nra(conn: sqlite3.Connection, now_utc: datetime) -> bool:
@@ -766,6 +871,150 @@ def refresh_nra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger,
     return True, len(parsed_rows)
 
 
+def download_nkr_excel_via_playwright(logger: logging.Logger) -> bytes:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=config.NKR_HEADLESS, channel=config.NKR_BROWSER_CHANNEL)
+        context = browser.new_context(locale="ru-RU", timezone_id="Europe/Moscow")
+        page = context.new_page()
+        try:
+            page.goto(config.NKR_RATINGS_PAGE_URL, wait_until="domcontentloaded", timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000))
+            page.wait_for_selector("text=Выгрузить в Excel", timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000))
+
+            blob_url = page.evaluate(
+                '''() => {
+                    const asText = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                    const linkByText = [...document.querySelectorAll('a')]
+                        .find((el) => asText(el).includes('выгрузить в excel'));
+                    if (linkByText) {
+                        if ((linkByText.getAttribute('href') || '').startsWith('blob:')) {
+                            return linkByText.getAttribute('href');
+                        }
+                        linkByText.click();
+                    } else {
+                        const buttonByText = [...document.querySelectorAll('button,div')]
+                            .find((el) => asText(el).includes('выгрузить в excel'));
+                        buttonByText?.click();
+                    }
+
+                    const links = [...document.querySelectorAll('a[href^="blob:"]')];
+                    if (links.length > 0) {
+                        return links[0].getAttribute('href');
+                    }
+                    return '';
+                }'''
+            )
+
+            if not blob_url:
+                page.wait_for_timeout(1500)
+                blob_url = page.evaluate(
+                    """() => {
+                        const links = [...document.querySelectorAll('a[href^="blob:"]')];
+                        return links.length > 0 ? links[0].getAttribute('href') : '';
+                    }"""
+                )
+
+            if not blob_url:
+                raise ValueError("На странице НКР не найдена Blob-ссылка на Excel.")
+
+            payload_b64 = page.evaluate(
+                '''async (blobHref) => {
+                    const response = await fetch(blobHref);
+                    const buffer = await response.arrayBuffer();
+                    const bytes = new Uint8Array(buffer);
+                    const chunkSize = 0x8000;
+                    let binary = '';
+                    for (let i = 0; i < bytes.length; i += chunkSize) {
+                        const chunk = bytes.subarray(i, i + chunkSize);
+                        binary += String.fromCharCode(...chunk);
+                    }
+                    return btoa(binary);
+                }''',
+                blob_url,
+            )
+            return base64.b64decode(payload_b64)
+        except Exception:
+            logger.exception("Ошибка скачивания НКР через Playwright")
+            raise
+        finally:
+            context.close()
+            browser.close()
+
+
+def refresh_nkr_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime) -> tuple[bool, int]:
+    ensure_nkr_tables(conn)
+    if not should_refresh_nkr(conn, now_utc):
+        row = conn.execute(f'SELECT COUNT(*) FROM "{config.NKR_TABLE_NAME}"').fetchone()
+        return False, int(row[0]) if row else 0
+
+    content = download_nkr_excel_via_playwright(logger)
+    raw_path = config.RAW_DIR / config.NKR_RAW_FILENAME
+    if raw_path.exists():
+        raw_path.unlink()
+    raw_path.write_bytes(content)
+
+    parsed_rows = parse_nkr_excel(content)
+    loaded_at = now_utc.isoformat()
+    payload = [
+        (
+            row.get("id", ""),
+            row.get("issuer_name", ""),
+            row.get("rating_date", ""),
+            row.get("rating", ""),
+            row.get("outlook", ""),
+            row.get("tin", ""),
+            loaded_at,
+        )
+        for row in parsed_rows
+        if row.get("tin", "").strip()
+    ]
+
+    conn.executemany(
+        f'''
+        INSERT INTO "{config.NKR_TABLE_NAME}" (
+            "id", "issuer_name", "rating_date", "rating", "outlook", "tin", "loaded_at_utc"
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT("tin", "rating_date", "rating", "outlook") DO UPDATE SET
+            "issuer_name"=excluded."issuer_name",
+            "id"=excluded."id",
+            "loaded_at_utc"=excluded."loaded_at_utc"
+        ''',
+        payload,
+    )
+
+    conn.execute(f'DELETE FROM "{config.NKR_LATEST_TABLE_NAME}"')
+    conn.execute(
+        f'''
+        INSERT INTO "{config.NKR_LATEST_TABLE_NAME}" (
+            "tin", "issuer_name", "rating_date", "rating", "outlook"
+        )
+        SELECT src."tin", src."issuer_name", src."rating_date", src."rating", src."outlook"
+        FROM "{config.NKR_TABLE_NAME}" src
+        JOIN (
+            SELECT "tin", MAX(
+                (CASE
+                    WHEN instr("rating_date", '.') > 0 THEN substr("rating_date", 7, 4) || '-' || substr("rating_date", 4, 2) || '-' || substr("rating_date", 1, 2)
+                    ELSE "rating_date"
+                END) || '|' || COALESCE("loaded_at_utc", '')
+            ) AS max_key
+            FROM "{config.NKR_TABLE_NAME}"
+            WHERE TRIM(COALESCE("tin", '')) <> ''
+            GROUP BY "tin"
+        ) latest ON latest."tin" = src."tin"
+        WHERE
+            (CASE
+                WHEN instr(src."rating_date", '.') > 0 THEN substr(src."rating_date", 7, 4) || '-' || substr(src."rating_date", 4, 2) || '-' || substr(src."rating_date", 1, 2)
+                ELSE src."rating_date"
+            END) || '|' || COALESCE(src."loaded_at_utc", '') = latest.max_key
+        '''
+    )
+    conn.commit()
+
+    set_meta_value(conn, "nkr_last_refresh_utc", loaded_at)
+    set_meta_value(conn, "nkr_last_rows_count", str(len(parsed_rows)))
+    logger.info("НКР обновление завершено. Загружено строк: %s", len(parsed_rows))
+    return True, len(parsed_rows)
+
+
 def sync_nra_rate_to_emitents(main_conn: sqlite3.Connection, nra_conn: sqlite3.Connection, logger: logging.Logger) -> int:
     rows = nra_conn.execute(
         f'''
@@ -837,6 +1086,32 @@ def sync_acra_rate_to_emitents(main_conn: sqlite3.Connection, ratings_conn: sqli
     )
     main_conn.commit()
     logger.info("Acra_Rate синхронизирован для INN: %s", len(updates))
+    return len(updates)
+
+
+def sync_nkr_rate_to_emitents(main_conn: sqlite3.Connection, ratings_conn: sqlite3.Connection, logger: logging.Logger) -> int:
+    rows = ratings_conn.execute(
+        f'''
+        SELECT "tin", "rating", "outlook"
+        FROM "{config.NKR_LATEST_TABLE_NAME}"
+        WHERE TRIM(COALESCE("tin", '')) <> ''
+        '''
+    ).fetchall()
+
+    updates: list[tuple[str, str]] = []
+    for tin, rating, outlook in rows:
+        rating_text = (rating or "").strip()
+        outlook_text = (outlook or "").strip().lower()
+        if not rating_text:
+            continue
+        updates.append((f"{rating_text}({outlook_text})" if outlook_text else rating_text, tin.strip()))
+
+    main_conn.executemany(
+        f'UPDATE "{config.EMITENTS_TABLE_NAME}" SET "NKR_Rate" = ? WHERE "INN" = ?',
+        updates,
+    )
+    main_conn.commit()
+    logger.info("NKR_Rate синхронизирован для INN: %s", len(updates))
     return len(updates)
 
 
@@ -941,7 +1216,7 @@ def ensure_scoring_dates(conn: sqlite3.Connection, logger: logging.Logger, today
 def export_emitents_excel(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate"
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate", "NKR_Rate"
         FROM "{config.EMITENTS_TABLE_NAME}"
         ORDER BY "EMITENTNAME", "INN"
         '''
@@ -998,7 +1273,7 @@ def export_emitents_excel(conn: sqlite3.Connection) -> int:
 def export_emitents_snapshot(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate"
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate", "NKR_Rate"
         FROM "{config.EMITENTS_TABLE_NAME}"
         ORDER BY RANDOM()
         LIMIT 5
@@ -1072,6 +1347,35 @@ def export_acra_snapshot(conn: sqlite3.Connection) -> int:
         ws.append(list(row))
 
     snapshot_path = config.BASE_SNAPSHOTS_DIR / config.ACRA_SNAPSHOT_FILENAME
+    wb.save(snapshot_path)
+    return len(rows)
+
+
+def export_nkr_snapshot(conn: sqlite3.Connection) -> int:
+    cursor = conn.execute(
+        f'''
+        SELECT "issuer_name", "tin", "rating_date", "rating", "outlook"
+        FROM "{config.NKR_LATEST_TABLE_NAME}"
+        ORDER BY
+            CASE
+                WHEN instr("rating_date", '.') > 0 THEN substr("rating_date", 7, 4) || '-' || substr("rating_date", 4, 2) || '-' || substr("rating_date", 1, 2)
+                ELSE "rating_date"
+            END DESC,
+            "tin" ASC
+        LIMIT 5
+        '''
+    )
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "nkr_snapshot"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / config.NKR_SNAPSHOT_FILENAME
     wb.save(snapshot_path)
     return len(rows)
 
@@ -1186,19 +1490,23 @@ def main() -> None:
             pbar.update(1)
         stage_times["Этап 3: Формирование Excel-среза"] = perf_counter() - s
 
-        print("Этап 4: Рейтинги агентств (НРА + АКРА, отдельная SQLite)")
+        print("Этап 4: Рейтинги агентств (НРА + АКРА + НКР, отдельная SQLite)")
         s = perf_counter()
-        with progress(total=6, desc="NRA/ACRA", unit="шаг") as pbar:
+        with progress(total=9, desc="NRA/ACRA/NKR", unit="шаг") as pbar:
             now_utc = datetime.now(timezone.utc)
             with connect_db(ratings_db_path) as nra_conn:
                 init_meta_table(nra_conn)
                 ensure_nra_tables(nra_conn)
                 ensure_acra_tables(nra_conn)
+                ensure_nkr_tables(nra_conn)
                 nra_refreshed, nra_rows = refresh_nra_data_if_needed(nra_conn, logger, now_utc)
                 nra_snapshot_rows = export_nra_snapshot(nra_conn)
                 pbar.update(1)
                 acra_refreshed, acra_rows, acra_cards = refresh_acra_data_if_needed(nra_conn, logger, now_utc)
                 acra_snapshot_rows = export_acra_snapshot(nra_conn)
+                pbar.update(1)
+                nkr_refreshed, nkr_rows = refresh_nkr_data_if_needed(nra_conn, logger, now_utc)
+                nkr_snapshot_rows = export_nkr_snapshot(nra_conn)
             pbar.update(1)
             pbar.set_description("Фиксация результата")
             logger.info(
@@ -1214,11 +1522,19 @@ def main() -> None:
                 acra_cards,
                 acra_snapshot_rows,
             )
+            logger.info(
+                "НКР: режим=%s, строк в источнике=%s, строк в snapshot=%s",
+                "обновлено из сети" if nkr_refreshed else "использован локальный кэш",
+                nkr_rows,
+                nkr_snapshot_rows,
+            )
             pbar.update(1)
             pbar.update(1)
             pbar.update(1)
             pbar.update(1)
-        stage_times["Этап 4: Рейтинги агентств (НРА + АКРА, отдельная SQLite)"] = perf_counter() - s
+            pbar.update(1)
+            pbar.update(1)
+        stage_times["Этап 4: Рейтинги агентств (НРА + АКРА + НКР, отдельная SQLite)"] = perf_counter() - s
 
         print("Этап 5: Витрина эмитентов (SQL + Excel)")
         s = perf_counter()
@@ -1233,6 +1549,7 @@ def main() -> None:
                 with connect_db(ratings_db_path) as nra_conn:
                     nra_synced = sync_nra_rate_to_emitents(conn, nra_conn, logger)
                     acra_synced = sync_acra_rate_to_emitents(conn, nra_conn, logger)
+                    nkr_synced = sync_nkr_rate_to_emitents(conn, nra_conn, logger)
                 pbar.update(1)
                 dates_fixed = ensure_scoring_dates(conn, logger, today_str)
                 pbar.update(1)
@@ -1242,15 +1559,17 @@ def main() -> None:
                 pbar.update(1)
 
             logger.info(
-                "Витрина эмитентов: перенос из Excel=%s, upsert из rates=%s, NRA_Rate=%s, Acra_Rate=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
+                "Витрина эмитентов: перенос из Excel=%s, upsert из rates=%s, NRA_Rate=%s, Acra_Rate=%s, NKR_Rate=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
                 pulled,
                 synced,
                 nra_synced,
                 acra_synced,
+                nkr_synced,
                 dates_fixed,
                 emitents_count,
                 emitents_snapshot,
             )
+            pbar.update(1)
         stage_times["Этап 5: Витрина эмитентов (SQL + Excel)"] = perf_counter() - s
 
         print("=====\nГотово")

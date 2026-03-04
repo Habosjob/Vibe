@@ -1,4 +1,4 @@
-# Скрипт `main.py` — загрузка MOEX rates + рейтинги НРА/АКРА + витрина эмитентов
+# Скрипт `main.py` — загрузка MOEX rates + рейтинги НРА/АКРА/НКР + витрина эмитентов
 
 ## Что делает скрипт
 1. Загружает CSV с MOEX по ссылке из `config.py`.
@@ -21,11 +21,12 @@
    - карточка запрашивается только для новых эмитентов (или если по ссылке ранее не удалось получить ИНН).
 7. В отдельной БД рейтинговых агентств:
    - НРА хранится в `nra_ratings` и `nra_latest_by_inn`,
-   - АКРА хранится в `acra_ratings` с уникальностью `issuer_url + rating_date + rating`.
+   - АКРА хранится в `acra_ratings` с уникальностью `issuer_url + rating_date + rating`,
+   - НКР хранится в `nkr_ratings` и `nkr_latest_by_tin` (уникальность истории по `tin + rating_date + rating + outlook`).
 8. Ведет таблицу `emitents` с уникальными эмитентами по `INN` в основной БД:
    - берет поля `EMITENTNAME` и `INN` из `rates`,
    - инкрементально делает upsert,
-   - хранит пользовательские поля `Scoring`, `DateScoring` и столбцы `NRA_Rate`, `Acra_Rate`.
+   - хранит пользовательские поля `Scoring`, `DateScoring` и столбцы `NRA_Rate`, `Acra_Rate`, `NKR_Rate`.
 9. Обогащает витрину эмитентов рейтингами НРА:
    - матчинг по `INN`,
    - формат значения: `Рейтинг(прогноз)`.
@@ -33,15 +34,23 @@
    - матчинг по `INN`,
    - сохраняет в `Acra_Rate`,
    - формат `Рейтинг(прогноз)` при наличии прогноза, иначе только рейтинг.
-11. Синхронизирует ручные оценки из Excel-витрины `Emitents.xlsx` обратно в SQL.
-12. Автоматически заполняет `DateScoring`, когда есть `Scoring`, а дата еще пустая.
-13. Формирует Excel-витрину `Emitents.xlsx` в корне проекта с оформлением и валидацией `Scoring`.
-14. Создает снапшоты в `BaseSnapshots`:
+11. Загружает Excel-выгрузку НКР через Playwright со страницы `https://ratings.ru/ratings/issuers/`:
+   - нажимает кнопку `Выгрузить в Excel`,
+   - парсит `blob:` ссылку, скачивает бинарное содержимое и сохраняет raw-файл `raw/nkr_ratings.xlsx`,
+   - в БД пишет только нужные поля: `Date`, `Rating`, `Outlook`, `TIN`,
+   - делает инкрементальное обновление истории в `nkr_ratings`,
+   - формирует `nkr_latest_by_tin` (уникально по ИНН с самой свежей датой).
+12. Обогащает витрину эмитентов рейтингами НКР по `TIN == INN` в колонку `NKR_Rate`.
+13. Синхронизирует ручные оценки из Excel-витрины `Emitents.xlsx` обратно в SQL.
+14. Автоматически заполняет `DateScoring`, когда есть `Scoring`, а дата еще пустая.
+15. Формирует Excel-витрину `Emitents.xlsx` в корне проекта с оформлением и валидацией `Scoring`.
+16. Создает снапшоты в `BaseSnapshots`:
    - `rates_snapshot.xlsx` (5 случайных строк с уникальными `SECID`),
    - `emitents_snapshot.xlsx` (5 случайных строк из `emitents`),
    - `nra_snapshot.xlsx` (**5 самых свежих** строк по дате рейтинга),
-   - `acra_snapshot.xlsx` (**5 самых свежих** строк по дате рейтинга).
-15. Пишет технический лог в `logs/main.log` (перезаписывается каждый запуск).
+   - `acra_snapshot.xlsx` (**5 самых свежих** строк по дате рейтинга),
+  - `nkr_snapshot.xlsx` (**5 самых свежих** строк по дате рейтинга).
+17. Пишет технический лог в `logs/main.log` (перезаписывается каждый запуск).
 
 ## Запуск
 ```bash
@@ -70,7 +79,17 @@ python main.py
 - Поля записи: `issuer_url`, `issuer_name`, `rating`, `rating_date`, `inn`, `loaded_at_utc`.
 - Если ссылка известна и ИНН по ней уже есть в БД, карточка эмитента не парсится повторно.
 - Для нестабильных соединений используются ретраи `goto` и "человеческие" паузы между действиями.
-- Дополнительно формируются дампы: `acra_dump/issuers_list.html`, `acra_dump/issuers_list.mhtml`, карточки в `acra_dump/issuers/`, прогресс в `acra_dump/progress.jsonl`.
+- Дополнительно формируются дампы: `raw/acra_dump/issuers_list.html`, `raw/acra_dump/issuers_list.mhtml`, карточки в `raw/acra_dump/issuers/`, прогресс в `raw/acra_dump/progress.jsonl`.
+
+
+## Логика НКР
+- Источник: `NKR_RATINGS_PAGE_URL` (страница списка эмитентов НКР).
+- Драйвер: Playwright, скачивание через `blob:` URL по кнопке «Выгрузить в Excel».
+- TTL загрузки: `NKR_CACHE_TTL_HOURS` (по умолчанию 12 часов).
+- Raw-файл: `raw/nkr_ratings.xlsx`.
+- БД: `DB/raitings.sqlite3`.
+- История: `nkr_ratings`, агрегат последних значений: `nkr_latest_by_tin`.
+- В витрину переносится `NKR_Rate` в формате `Рейтинг(прогноз)` при наличии прогноза.
 
 ## Настройка
 Все настройки находятся в `config.py`.
@@ -81,14 +100,17 @@ python main.py
 - `NRA_CACHE_TTL_HOURS` — срок жизни кэша НРА в часах.
 - `ACRA_CACHE_TTL_HOURS` — срок жизни кэша этапа списка АКРА в часах.
 - `REQUEST_TIMEOUT_SECONDS` — таймаут HTTP.
-- `ACRA_PROFILE_DIR` — папка persistent-профиля браузера для АКРА.
+- `ACRA_PROFILE_DIR` — папка persistent-профиля браузера для АКРА (по умолчанию `cache/acra_profile`).
 - `ACRA_BROWSER_CHANNEL` — канал браузера (`"chrome"`, `"msedge"` или `None`).
 - `ACRA_HEADLESS` — headless-режим для АКРА.
 - `ACRA_LIST_GOTO_ATTEMPTS` / `ACRA_CARD_GOTO_ATTEMPTS` — число retry для переходов.
-- `ACRA_DUMP_DIR` / `ACRA_ISSUERS_DUMP_DIR` — пути для HTML/MHTML дампов и карточек АКРА.
+- `ACRA_DUMP_DIR` / `ACRA_ISSUERS_DUMP_DIR` — пути для HTML/MHTML дампов и карточек АКРА (по умолчанию внутри `raw/acra_dump`).
 - `ACRA_PROGRESS_LOG_FILENAME` — имя JSONL-лога прогресса по карточкам.
 - `NRA_RATINGS_PAGE_URL` — страница НРА с кнопкой выгрузки.
 - `ACRA_RATINGS_LIST_URL` — страница списка эмитентов АКРА.
+- `NKR_RATINGS_PAGE_URL` — страница списка эмитентов НКР.
+- `NKR_CACHE_TTL_HOURS` — срок жизни кэша НКР в часах.
+- `NKR_TABLE_NAME` / `NKR_LATEST_TABLE_NAME` — таблицы НКР в БД рейтинговых агентств.
 - `RAITINGS_DB_FILENAME` — файл общей SQLite-базы рейтинговых агентств.
 - `ACRA_TABLE_NAME` — таблица АКРА в БД рейтинговых агентств.
 
