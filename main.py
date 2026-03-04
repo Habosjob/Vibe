@@ -35,7 +35,7 @@ def progress(total: int, desc: str, unit: str):
 
 def setup_logging() -> logging.Logger:
     config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("moex_rates_main")
+    logger = logging.getLogger("bonds_main")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     handler = logging.FileHandler(config.LOGS_DIR / config.LOG_FILENAME, mode="w", encoding="utf-8")
@@ -60,6 +60,34 @@ def ensure_directories() -> None:
         config.DOCS_DIR,
     ):
         folder.mkdir(parents=True, exist_ok=True)
+
+
+def migrate_legacy_db_if_needed() -> None:
+    legacy_path = config.DB_DIR / config.LEGACY_DB_FILENAME
+    target_path = config.DB_DIR / config.DB_FILENAME
+    if target_path.exists() or not legacy_path.exists():
+        return
+    legacy_path.replace(target_path)
+
+
+def migrate_legacy_rates_table_if_needed(conn: sqlite3.Connection) -> None:
+    if config.RATES_TABLE_NAME == config.LEGACY_RATES_TABLE_NAME:
+        return
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        (config.RATES_TABLE_NAME,),
+    ).fetchone()
+    if table_exists:
+        return
+    legacy_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        (config.LEGACY_RATES_TABLE_NAME,),
+    ).fetchone()
+    if legacy_exists:
+        conn.execute(
+            f'ALTER TABLE "{config.LEGACY_RATES_TABLE_NAME}" RENAME TO "{config.RATES_TABLE_NAME}"'
+        )
+        conn.commit()
 
 
 def connect_db(db_path: Path) -> sqlite3.Connection:
@@ -286,6 +314,31 @@ def ensure_nkr_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_dohod_table(conn: sqlite3.Connection, headers: list[str] | None = None) -> None:
+    base_columns = ['"ISIN" TEXT PRIMARY KEY']
+    if headers:
+        for header in headers:
+            normalized = header.strip()
+            if not normalized or normalized == "ISIN":
+                continue
+            base_columns.append(f'"{normalized}" TEXT')
+    base_columns.append('"loaded_at_utc" TEXT')
+    conn.execute(
+        f'CREATE TABLE IF NOT EXISTS "{config.DOHOD_TABLE_NAME}" ({", ".join(base_columns)})'
+    )
+    conn.commit()
+
+
+def ensure_table_has_columns(conn: sqlite3.Connection, table_name: str, headers: list[str]) -> None:
+    existing = {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()}
+    for header in headers:
+        normalized = header.strip()
+        if not normalized or normalized in existing:
+            continue
+        conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{normalized}" TEXT')
+    conn.commit()
+
+
 NRA_HEADERS_MAP = {
     "id": "id",
     "Название организации": "organization_name",
@@ -442,6 +495,101 @@ def parse_nkr_excel(content: bytes) -> list[dict[str, str]]:
         if any(row_dict.values()):
             parsed_rows.append(row_dict)
     return parsed_rows
+
+
+def parse_dohod_excel(content: bytes) -> tuple[list[str], list[dict[str, str]]]:
+    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return [], []
+
+    headers = [_normalize_cell(cell) for cell in rows[0]]
+    if "ISIN" not in headers:
+        raise ValueError("В выгрузке Доходъ отсутствует колонка ISIN.")
+
+    parsed_rows: list[dict[str, str]] = []
+    for row in rows[1:]:
+        row_dict: dict[str, str] = {}
+        for idx, header in enumerate(headers):
+            if not header:
+                continue
+            row_dict[header] = _normalize_cell(row[idx]) if idx < len(row) else ""
+        if any(row_dict.values()):
+            parsed_rows.append(row_dict)
+    return headers, parsed_rows
+
+
+def should_refresh_dohod(conn: sqlite3.Connection, now_utc: datetime) -> bool:
+    last_refresh_raw = get_meta_value(conn, "dohod_last_refresh_utc")
+    rows_count_raw = get_meta_value(conn, "dohod_last_rows_count")
+    if not last_refresh_raw or not rows_count_raw:
+        return True
+    try:
+        last_refresh = datetime.fromisoformat(last_refresh_raw)
+        rows_count = int(rows_count_raw)
+    except ValueError:
+        return True
+    if rows_count <= 0:
+        return True
+    return now_utc - last_refresh >= timedelta(hours=config.DOHOD_CACHE_TTL_HOURS)
+
+
+def download_dohod_excel_via_playwright(logger: logging.Logger) -> bytes:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=config.DOHOD_HEADLESS, channel=config.DOHOD_BROWSER_CHANNEL)
+        context = browser.new_context(locale="ru-RU", timezone_id="Europe/Moscow", accept_downloads=True)
+        try:
+            page = context.new_page()
+            page.goto(config.DOHOD_BONDS_PAGE_URL, wait_until="domcontentloaded", timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000))
+            button = page.get_by_text("Скачать Excel", exact=False).first
+            page.wait_for_timeout(700)
+
+            try:
+                with page.expect_download(timeout=12_000) as download_info:
+                    button.click(timeout=8_000)
+                download = download_info.value
+                download_path = download.path()
+                bytes_data = Path(download_path).read_bytes() if download_path else b""
+                if bytes_data:
+                    logger.info("Доходъ: файл получен через expect_download")
+                    return bytes_data
+            except Exception as exc:
+                logger.info("Доходъ: expect_download не сработал (%s)", exc)
+
+            blob_url = page.evaluate(
+                """() => {
+                    const anchors = [...document.querySelectorAll('a[href^="blob:"]')];
+                    if (anchors.length) return anchors[0].getAttribute('href');
+                    const anyBlob = [...document.querySelectorAll('[href],[data-href]')]
+                        .map(el => el.getAttribute('href') || el.getAttribute('data-href') || '')
+                        .find(v => v && v.startsWith('blob:'));
+                    return anyBlob || '';
+                }"""
+            )
+            if blob_url:
+                content_b64 = page.evaluate(
+                    '''async (blobHref) => {
+                        const response = await fetch(blobHref);
+                        const buffer = await response.arrayBuffer();
+                        let binary = '';
+                        const bytes = new Uint8Array(buffer);
+                        const chunk = 0x8000;
+                        for (let i = 0; i < bytes.length; i += chunk) {
+                            binary += String.fromCharCode(...bytes.slice(i, i + chunk));
+                        }
+                        return btoa(binary);
+                    }''',
+                    blob_url,
+                )
+                if content_b64:
+                    logger.info("Доходъ: файл получен через blob-ссылку")
+                    return base64.b64decode(content_b64)
+
+            raise ValueError("На странице Доходъ не удалось получить Excel-файл.")
+        finally:
+            context.close()
+            browser.close()
 
 
 def should_refresh_nkr(conn: sqlite3.Connection, now_utc: datetime) -> bool:
@@ -1257,7 +1405,7 @@ def sync_emitents_from_rates(conn: sqlite3.Connection, logger: logging.Logger) -
     )
     conn.commit()
     affected = cursor.rowcount if cursor.rowcount is not None else 0
-    logger.info("Синхронизация эмитентов из rates завершена. Затронуто строк: %s", affected)
+    logger.info("Синхронизация эмитентов из moex_bonds завершена. Затронуто строк: %s", affected)
     return max(affected, 0)
 
 
@@ -1542,6 +1690,49 @@ def refresh_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger, now
     return True, len(rows)
 
 
+def refresh_dohod_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime) -> tuple[bool, int]:
+    raw_path = config.RAW_DIR / config.DOHOD_RAW_FILENAME
+
+    ensure_dohod_table(conn)
+    if not should_refresh_dohod(conn, now_utc):
+        logger.info("Доходъ: кэш актуален, загрузка из сети пропущена.")
+        row = conn.execute(f'SELECT COUNT(*) FROM "{config.DOHOD_TABLE_NAME}"').fetchone()
+        return False, int(row[0]) if row else 0
+
+    content = download_dohod_excel_via_playwright(logger)
+    if raw_path.exists():
+        raw_path.unlink()
+    raw_path.write_bytes(content)
+
+    headers, rows = parse_dohod_excel(content)
+    ensure_dohod_table(conn, headers)
+    ensure_table_has_columns(conn, config.DOHOD_TABLE_NAME, headers)
+
+    insert_columns = [header for header in headers if header]
+    quoted_cols = ", ".join([f'"{column}"' for column in insert_columns] + ['"loaded_at_utc"'])
+    placeholders = ", ".join(["?"] * (len(insert_columns) + 1))
+    update_cols = [column for column in insert_columns if column != "ISIN"]
+    update_expr = ", ".join([f'"{column}"=excluded."{column}"' for column in update_cols] + ['"loaded_at_utc"=excluded."loaded_at_utc"'])
+    payload = [tuple((row.get(column, "") for column in insert_columns)) + (now_utc.isoformat(),) for row in rows if row.get("ISIN", "")]
+
+    conn.execute("BEGIN")
+    conn.executemany(
+        f'''
+        INSERT INTO "{config.DOHOD_TABLE_NAME}" ({quoted_cols})
+        VALUES ({placeholders})
+        ON CONFLICT("ISIN") DO UPDATE SET {update_expr}
+        ''',
+        payload,
+    )
+    conn.commit()
+
+    set_meta_value(conn, "dohod_last_refresh_utc", now_utc.isoformat())
+    set_meta_value(conn, "dohod_last_rows_count", str(len(payload)))
+    set_meta_value(conn, "dohod_last_headers", "|".join(insert_columns))
+    logger.info("Доходъ: данные обновлены, строк=%s, колонок=%s", len(payload), len(insert_columns))
+    return True, len(payload)
+
+
 def export_random_snapshot(conn: sqlite3.Connection) -> int:
     query = f"""
     SELECT *
@@ -1571,6 +1762,140 @@ def export_random_snapshot(conn: sqlite3.Connection) -> int:
     return len(rows)
 
 
+def export_dohod_snapshot(conn: sqlite3.Connection) -> int:
+    query = f'''
+    SELECT *
+    FROM "{config.DOHOD_TABLE_NAME}"
+    WHERE rowid IN (
+        SELECT MIN(rowid)
+        FROM "{config.DOHOD_TABLE_NAME}"
+        GROUP BY "ISIN"
+        ORDER BY RANDOM()
+        LIMIT 5
+    )
+    '''
+    cursor = conn.execute(query)
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "dohod_snapshot"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / config.DOHOD_SNAPSHOT_FILENAME
+    wb.save(snapshot_path)
+    return len(rows)
+
+
+MERGE_MOEX_COLUMNS = [
+    "SECID",
+    "ISIN",
+    "FACEVALUE",
+    "FACEUNIT",
+    "MATDATE",
+    "IS_QUALIFIED_INVESTORS",
+    "BOND_TYPE",
+    "BOND_SUBTYPE",
+    "YIELDATWAP",
+    "PRICE",
+]
+
+MERGE_DOHOD_COLUMNS = [
+    "Название",
+    "Ближайшая дата погашения/оферты (Дата)",
+    "Событие в дату",
+    "Коэф. Ликвидности (max=100)",
+    "Медиана дневного оборота (млн в валюте торгов)",
+    "Цена, % от номинала",
+    "НКД",
+    "Размер купона",
+    "Текущий купон, %",
+    "Тип купона",
+    "Купон (раз/год)",
+    "Субординированная (да/нет)",
+    "Базовый индекс (для FRN)",
+    "Премия/Дисконт к базовому индексу (для FRN)",
+]
+
+
+def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
+    columns_sql = ['"ISIN" TEXT PRIMARY KEY']
+    for column in MERGE_MOEX_COLUMNS:
+        if column == "ISIN":
+            continue
+        columns_sql.append(f'"{column}" TEXT')
+    for column in MERGE_DOHOD_COLUMNS:
+        columns_sql.append(f'"{column}" TEXT')
+    conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({", ".join(columns_sql)})')
+    conn.commit()
+
+
+def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, scoring: str) -> int:
+    ensure_merge_table(conn, table_name)
+
+    moex_select = [f'm."{column}"' for column in MERGE_MOEX_COLUMNS]
+    dohod_select = [f'd."{column}"' for column in MERGE_DOHOD_COLUMNS]
+    selected_columns = moex_select + dohod_select
+    insert_columns = [f'"{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"]
+    insert_columns = ['"ISIN"'] + insert_columns + [f'"{column}"' for column in MERGE_DOHOD_COLUMNS]
+    placeholders = ", ".join(["?"] * len(insert_columns))
+
+    rows = conn.execute(
+        f'''
+        SELECT {", ".join(selected_columns)}
+        FROM "{config.RATES_TABLE_NAME}" m
+        INNER JOIN "{config.EMITENTS_TABLE_NAME}" e
+            ON TRIM(COALESCE(m."INN", '')) = TRIM(COALESCE(e."INN", ''))
+        LEFT JOIN "{config.DOHOD_TABLE_NAME}" d
+            ON TRIM(COALESCE(m."ISIN", '')) = TRIM(COALESCE(d."ISIN", ''))
+        WHERE TRIM(COALESCE(e."Scoring", '')) = ?
+          AND TRIM(COALESCE(m."ISIN", '')) <> ''
+        ''',
+        (scoring,),
+    ).fetchall()
+
+    conn.execute("BEGIN")
+    conn.execute(f'DELETE FROM "{table_name}"')
+    if rows:
+        conn.executemany(
+            f'INSERT OR REPLACE INTO "{table_name}" ({", ".join(insert_columns)}) VALUES ({placeholders})',
+            rows,
+        )
+    conn.commit()
+    return len(rows)
+
+
+def export_merge_snapshot(conn: sqlite3.Connection, table_name: str, snapshot_filename: str, sheet_name: str) -> int:
+    query = f'''
+    SELECT *
+    FROM "{table_name}"
+    WHERE rowid IN (
+        SELECT MIN(rowid)
+        FROM "{table_name}"
+        GROUP BY "ISIN"
+        ORDER BY RANDOM()
+        LIMIT 5
+    )
+    '''
+    cursor = conn.execute(query)
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / snapshot_filename
+    wb.save(snapshot_path)
+    return len(rows)
+
+
 def main() -> None:
     logger = setup_logging()
     stage_times: dict[str, float] = {}
@@ -1584,11 +1909,14 @@ def main() -> None:
         s = perf_counter()
         with progress(total=2, desc="Подготовка", unit="шаг") as pbar:
             ensure_directories()
+            migrate_legacy_db_if_needed()
             pbar.update(1)
             pbar.set_description("Подготовка БД")
             with connect_db(db_path) as conn:
                 init_meta_table(conn)
+                migrate_legacy_rates_table_if_needed(conn)
                 ensure_emitents_table(conn)
+                ensure_dohod_table(conn)
             pbar.update(1)
         stage_times["Этап 1: Подготовка окружения"] = perf_counter() - s
 
@@ -1604,21 +1932,38 @@ def main() -> None:
             pbar.update(1)
             pbar.set_description("Финализация")
             logger.info("Режим: %s", "обновлено из сети" if refreshed else "использован локальный кэш")
-            logger.info("Количество строк в таблице rates: %s", row_count)
+            logger.info("Количество строк в таблице %s: %s", config.RATES_TABLE_NAME, row_count)
             pbar.update(1)
         stage_times["Этап 2: Проверка TTL кэша и обновление данных"] = perf_counter() - s
 
-        print("Этап 3: Формирование Excel-среза")
+        print("Этап 3: Доходъ (Playwright Excel + SQLite + snapshot)")
         s = perf_counter()
-        with progress(total=2, desc="Excel snapshot", unit="шаг") as pbar:
+        with progress(total=3, desc="Dohod", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                refreshed, dohod_rows = refresh_dohod_data_if_needed(conn, logger, datetime.now(timezone.utc))
+                pbar.update(1)
+                dohod_snapshot = export_dohod_snapshot(conn)
+            pbar.update(1)
+            logger.info(
+                "Доходъ: режим=%s, строк в таблице=%s, строк в snapshot=%s",
+                "обновлено из сети" if refreshed else "использован локальный кэш",
+                dohod_rows,
+                dohod_snapshot,
+            )
+            pbar.update(1)
+        stage_times["Этап 3: Доходъ (Playwright Excel + SQLite + snapshot)"] = perf_counter() - s
+
+        print("Этап 4: Формирование Excel-среза MOEX")
+        s = perf_counter()
+        with progress(total=2, desc="MOEX snapshot", unit="шаг") as pbar:
             with connect_db(db_path) as conn:
                 count = export_random_snapshot(conn)
             pbar.update(1)
-            logger.info("Сформирован Excel-срез: строк=%s", count)
+            logger.info("Сформирован Excel-срез MOEX: строк=%s", count)
             pbar.update(1)
-        stage_times["Этап 3: Формирование Excel-среза"] = perf_counter() - s
+        stage_times["Этап 4: Формирование Excel-среза MOEX"] = perf_counter() - s
 
-        print("Этап 4: Рейтинги агентств (НРА + АКРА + НКР, отдельная SQLite)")
+        print("Этап 5: Рейтинги агентств (НРА + АКРА + НКР, отдельная SQLite)")
         s = perf_counter()
         with progress(total=9, desc="NRA/ACRA/NKR", unit="шаг") as pbar:
             now_utc = datetime.now(timezone.utc)
@@ -1662,9 +2007,9 @@ def main() -> None:
             pbar.update(1)
             pbar.update(1)
             pbar.update(1)
-        stage_times["Этап 4: Рейтинги агентств (НРА + АКРА + НКР, отдельная SQLite)"] = perf_counter() - s
+        stage_times["Этап 5: Рейтинги агентств (НРА + АКРА + НКР, отдельная SQLite)"] = perf_counter() - s
 
-        print("Этап 5: Витрина эмитентов (SQL + Excel)")
+        print("Этап 6: Витрина эмитентов (SQL + Excel)")
         s = perf_counter()
         with progress(total=7, desc="Emitents", unit="шаг") as pbar:
             today_str = datetime.now().strftime(config.DATE_SCORING_FORMAT)
@@ -1687,8 +2032,9 @@ def main() -> None:
                 pbar.update(1)
 
             logger.info(
-                "Витрина эмитентов: перенос из Excel=%s, upsert из rates=%s, NRA_Rate=%s, Acra_Rate=%s, NKR_Rate=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
+                "Витрина эмитентов: перенос из Excel=%s, upsert из %s=%s, NRA_Rate=%s, Acra_Rate=%s, NKR_Rate=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
                 pulled,
+                config.RATES_TABLE_NAME,
                 synced,
                 nra_synced,
                 acra_synced,
@@ -1698,7 +2044,39 @@ def main() -> None:
                 emitents_snapshot,
             )
             pbar.update(1)
-        stage_times["Этап 5: Витрина эмитентов (SQL + Excel)"] = perf_counter() - s
+        stage_times["Этап 6: Витрина эмитентов (SQL + Excel)"] = perf_counter() - s
+
+        print("Этап 7: Merge Green/Yellow (SQL + snapshot)")
+        s = perf_counter()
+        with progress(total=4, desc="Merge bonds", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                green_rows = rebuild_merge_table_by_scoring(conn, config.MERGE_GREEN_TABLE_NAME, "Green")
+                pbar.update(1)
+                yellow_rows = rebuild_merge_table_by_scoring(conn, config.MERGE_YELLOW_TABLE_NAME, "Yellow")
+                pbar.update(1)
+                green_snapshot = export_merge_snapshot(
+                    conn,
+                    config.MERGE_GREEN_TABLE_NAME,
+                    config.MERGE_GREEN_SNAPSHOT_FILENAME,
+                    "merge_green_snapshot",
+                )
+                pbar.update(1)
+                yellow_snapshot = export_merge_snapshot(
+                    conn,
+                    config.MERGE_YELLOW_TABLE_NAME,
+                    config.MERGE_YELLOW_SNAPSHOT_FILENAME,
+                    "merge_yellow_snapshot",
+                )
+                pbar.update(1)
+
+            logger.info(
+                "Merge Green: строк=%s, snapshot=%s; Merge Yellow: строк=%s, snapshot=%s",
+                green_rows,
+                green_snapshot,
+                yellow_rows,
+                yellow_snapshot,
+            )
+        stage_times["Этап 7: Merge Green/Yellow (SQL + snapshot)"] = perf_counter() - s
 
         print("=====\nГотово")
     except Exception as exc:

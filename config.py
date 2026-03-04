@@ -51,22 +51,30 @@ LOGS_DIR = BASE_DIR / "logs"
 DOCS_DIR = BASE_DIR / "docs"
 
 # Имя raw-файла в папке /raw.
-RAW_FILENAME = "moex_rates.csv"
+RAW_FILENAME = "moex_bonds.csv"
 
 # Имя кэш-файла в папке /cache.
-CACHE_FILENAME = "moex_rates_cache.csv"
+CACHE_FILENAME = "moex_bonds_cache.csv"
 
 # Имя файла базы данных SQLite.
-DB_FILENAME = "moex_rates.sqlite3"
+DB_FILENAME = "bonds.sqlite3"
 
 # Имя лог-файла (перезаписывается на каждом запуске).
 LOG_FILENAME = "main.log"
 
 # Имя Excel-файла со срезом 5 случайных уникальных SECID.
-SNAPSHOT_FILENAME = "rates_snapshot.xlsx"
+SNAPSHOT_FILENAME = "moex_bonds_snapshot.xlsx"
 
 # Имя таблицы с данными котировок.
-RATES_TABLE_NAME = "rates"
+RATES_TABLE_NAME = "moex_bonds"
+
+# Легаси-имя таблицы MOEX для миграции существующей БД.
+# Если таблица с таким именем найдена, она будет автоматически переименована.
+LEGACY_RATES_TABLE_NAME = "rates"
+
+# Легаси-имя файла БД для миграции со старого проекта.
+# Если найден DB/moex_rates.sqlite3 и отсутствует DB/bonds.sqlite3, файл будет переименован.
+LEGACY_DB_FILENAME = "moex_rates.sqlite3"
 
 # Имя таблицы метаданных кэша.
 META_TABLE_NAME = "meta"
@@ -236,3 +244,46 @@ NKR_EXPORT_BUTTON_SELECTOR = ".Excel-btn"
 # Значение: целое число > 0.
 # По умолчанию: 3.
 NKR_DOWNLOAD_ATTEMPTS = 3
+
+# URL страницы Доходъ с таблицей облигаций и кнопкой выгрузки Excel.
+DOHOD_BONDS_PAGE_URL = "https://www.dohod.ru/analytic/bonds"
+
+# Имя raw-файла выгрузки Доходъ в папке /raw.
+DOHOD_RAW_FILENAME = "dohod_bonds.xlsx"
+
+# TTL для повторной загрузки Excel Доходъ.
+# Значение: целое число > 0 (в часах).
+# По умолчанию: 12 часов.
+DOHOD_CACHE_TTL_HOURS = 12
+
+# Имя таблицы Доходъ в основной БД bonds.sqlite3.
+DOHOD_TABLE_NAME = "Dohod_Bonds"
+
+# Имя Excel-файла снапшота по таблице Доходъ (5 случайных строк по уникальному ISIN).
+DOHOD_SNAPSHOT_FILENAME = "dohod_bonds_snapshot.xlsx"
+
+# Headless-режим для Доходъ.
+# Значения: True/False.
+# По умолчанию: True.
+DOHOD_HEADLESS = True
+
+# Канал браузера Playwright для Доходъ.
+# Значение: строка (например "chrome", "msedge") или None для bundled Chromium.
+# По умолчанию: "chrome".
+DOHOD_BROWSER_CHANNEL = "chrome"
+
+# Имя merge-таблицы для облигаций эмитентов со Scoring = Green.
+# По умолчанию: MergeGreenBonds.
+MERGE_GREEN_TABLE_NAME = "MergeGreenBonds"
+
+# Имя merge-таблицы для облигаций эмитентов со Scoring = Yellow.
+# По умолчанию: MergeYellowBonds.
+MERGE_YELLOW_TABLE_NAME = "MergeYellowBonds"
+
+# Имя Excel-файла снапшота merge-таблицы Green (5 случайных строк).
+# По умолчанию: merge_green_bonds_snapshot.xlsx.
+MERGE_GREEN_SNAPSHOT_FILENAME = "merge_green_bonds_snapshot.xlsx"
+
+# Имя Excel-файла снапшота merge-таблицы Yellow (5 случайных строк).
+# По умолчанию: merge_yellow_bonds_snapshot.xlsx.
+MERGE_YELLOW_SNAPSHOT_FILENAME = "merge_yellow_bonds_snapshot.xlsx"
