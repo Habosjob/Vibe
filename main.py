@@ -9,8 +9,10 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
+from urllib.parse import urljoin
 
 import requests
+from bs4 import BeautifulSoup
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
@@ -257,6 +259,41 @@ NRA_HEADERS_MAP = {
     "Под наблюдением": "under_watch",
 }
 
+RU_MONTHS = {
+    "янв": 1,
+    "фев": 2,
+    "мар": 3,
+    "апр": 4,
+    "май": 5,
+    "июн": 6,
+    "июл": 7,
+    "авг": 8,
+    "сен": 9,
+    "окт": 10,
+    "ноя": 11,
+    "дек": 12,
+}
+
+
+def normalize_date_ru(value: str) -> str:
+    date_str = (value or "").strip()
+    if not date_str:
+        return ""
+    if re.match(r"^\d{2}\.\d{2}\.\d{4}$", date_str):
+        return f"{date_str[6:10]}-{date_str[3:5]}-{date_str[0:2]}"
+    match = re.match(r"^(\d{1,2})\s+([А-Яа-я]{3})\s+(\d{4})$", date_str)
+    if not match:
+        return date_str
+    day = int(match.group(1))
+    month = RU_MONTHS.get(match.group(2).lower())
+    year = int(match.group(3))
+    if not month:
+        return date_str
+    try:
+        return datetime(year, month, day).strftime("%Y-%m-%d")
+    except ValueError:
+        return date_str
+
 
 def find_nra_excel_link(page_html: str) -> str:
     marker = re.search(r'Выгрузить\s*в\s*Excel', page_html, flags=re.IGNORECASE)
@@ -320,6 +357,162 @@ def should_refresh_nra(conn: sqlite3.Connection, now_utc: datetime) -> bool:
     if rows_count <= 0:
         return True
     return now_utc - last_refresh >= timedelta(hours=config.NRA_CACHE_TTL_HOURS)
+
+
+def ensure_acra_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.ACRA_TABLE_NAME}" (
+            "issuer_url" TEXT NOT NULL,
+            "issuer_name" TEXT,
+            "rating" TEXT,
+            "rating_date" TEXT,
+            "inn" TEXT,
+            "loaded_at_utc" TEXT,
+            UNIQUE("issuer_url", "rating_date", "rating")
+        )
+        '''
+    )
+    conn.execute(
+        f'CREATE INDEX IF NOT EXISTS "idx_{config.ACRA_TABLE_NAME}_url" ON "{config.ACRA_TABLE_NAME}"("issuer_url")'
+    )
+    conn.commit()
+
+
+def should_refresh_acra(conn: sqlite3.Connection, now_utc: datetime) -> bool:
+    last_refresh_raw = get_meta_value(conn, "acra_last_refresh_utc")
+    if not last_refresh_raw:
+        return True
+    try:
+        last_refresh = datetime.fromisoformat(last_refresh_raw)
+    except ValueError:
+        return True
+    return now_utc - last_refresh >= timedelta(hours=config.ACRA_CACHE_TTL_HOURS)
+
+
+def parse_acra_list(html_text: str) -> list[dict[str, str]]:
+    soup = BeautifulSoup(html_text, "lxml")
+    parsed_rows: list[dict[str, str]] = []
+    for row in soup.select("div.emits-row.search-table-row"):
+        issuer_link = row.select_one('a.emits-row__item[data-type="ratePerson"]')
+        if issuer_link is None:
+            continue
+        href = (issuer_link.get("href") or "").strip()
+        if not href:
+            continue
+        issuer_url = href if href.startswith("http") else urljoin(config.ACRA_RATINGS_LIST_URL, href)
+        issuer_name = issuer_link.get_text(" ", strip=True)
+
+        rating_node = row.select_one('div.emits-row__item[data-type="rate"] p')
+        rating = rating_node.get_text(" ", strip=True) if rating_node else ""
+
+        date_node = row.select_one('div.emits-row__item[data-type="pressRelease"] a')
+        date_raw = date_node.get_text(" ", strip=True) if date_node else ""
+        parsed_rows.append(
+            {
+                "issuer_url": issuer_url,
+                "issuer_name": issuer_name,
+                "rating": rating,
+                "rating_date": normalize_date_ru(date_raw) or date_raw,
+            }
+        )
+    return parsed_rows
+
+
+def extract_inn_from_acra_card(html_text: str) -> str:
+    soup = BeautifulSoup(html_text, "lxml")
+    for info in soup.select("div.info"):
+        label = info.find("small")
+        if label and label.get_text(" ", strip=True).lower() == "инн":
+            value_node = info.find("p")
+            raw_value = value_node.get_text(" ", strip=True) if value_node else ""
+            return re.sub(r"\D+", "", raw_value)
+
+    fallback = re.search(r"ИНН\D{0,50}(\d[\d\s]{8,14}\d)", soup.get_text(" ", strip=True), flags=re.IGNORECASE)
+    return re.sub(r"\D+", "", fallback.group(1)) if fallback else ""
+
+
+def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime) -> tuple[bool, int, int]:
+    ensure_acra_tables(conn)
+    current = conn.execute(f'SELECT COUNT(*) FROM "{config.ACRA_TABLE_NAME}"').fetchone()
+    current_total = int(current[0]) if current else 0
+    if not should_refresh_acra(conn, now_utc):
+        return False, current_total, 0
+
+    try:
+        with create_http_session() as session:
+            list_response = session.get(config.ACRA_RATINGS_LIST_URL, timeout=config.REQUEST_TIMEOUT_SECONDS)
+            list_response.raise_for_status()
+            parsed_rows = parse_acra_list(list_response.text)
+
+            unique_rows: dict[str, dict[str, str]] = {}
+            for parsed_row in parsed_rows:
+                unique_rows[parsed_row["issuer_url"]] = parsed_row
+
+            loaded_at = now_utc.isoformat()
+            card_requests = 0
+            changed_rows = 0
+
+            for row_data in unique_rows.values():
+                issuer_url = row_data["issuer_url"]
+                existing = conn.execute(
+                    f'''
+                    SELECT "inn"
+                    FROM "{config.ACRA_TABLE_NAME}"
+                    WHERE "issuer_url" = ?
+                      AND TRIM(COALESCE("inn", '')) <> ''
+                    LIMIT 1
+                    ''',
+                    (issuer_url,),
+                ).fetchone()
+
+                inn_value = existing[0] if existing else ""
+                if not inn_value:
+                    card_response = session.get(issuer_url, timeout=config.REQUEST_TIMEOUT_SECONDS)
+                    card_response.raise_for_status()
+                    inn_value = extract_inn_from_acra_card(card_response.text)
+                    card_requests += 1
+
+                cursor = conn.execute(
+                    f'''
+                    INSERT INTO "{config.ACRA_TABLE_NAME}" (
+                        "issuer_url", "issuer_name", "rating", "rating_date", "inn", "loaded_at_utc"
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT("issuer_url", "rating_date", "rating") DO UPDATE SET
+                        "issuer_name" = excluded."issuer_name",
+                        "inn" = CASE
+                            WHEN TRIM(COALESCE("{config.ACRA_TABLE_NAME}"."inn", '')) = '' THEN excluded."inn"
+                            ELSE "{config.ACRA_TABLE_NAME}"."inn"
+                        END,
+                        "loaded_at_utc" = excluded."loaded_at_utc"
+                    ''',
+                    (
+                        issuer_url,
+                        row_data.get("issuer_name", ""),
+                        row_data.get("rating", ""),
+                        row_data.get("rating_date", ""),
+                        inn_value,
+                        loaded_at,
+                    ),
+                )
+                if cursor.rowcount and cursor.rowcount > 0:
+                    changed_rows += 1
+    except requests.RequestException as exc:
+        logger.warning("АКРА обновление пропущено из-за сетевой ошибки: %s", exc)
+        return False, current_total, 0
+
+    conn.commit()
+    set_meta_value(conn, "acra_last_refresh_utc", now_utc.isoformat())
+    set_meta_value(conn, "acra_last_rows_count", str(len(unique_rows)))
+    logger.info(
+        "АКРА обновление завершено. В списке=%s, вставлено/обновлено=%s, карточек запрошено=%s",
+        len(unique_rows),
+        changed_rows,
+        card_requests,
+    )
+
+    total = conn.execute(f'SELECT COUNT(*) FROM "{config.ACRA_TABLE_NAME}"').fetchone()
+    return True, int(total[0]) if total else 0, card_requests
 
 
 def refresh_nra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime) -> tuple[bool, int]:
@@ -637,7 +830,12 @@ def export_nra_snapshot(conn: sqlite3.Connection) -> int:
     query = f'''
     SELECT "organization_name", "inn", "press_release_date", "rating", "rating_status", "forecast"
     FROM "{config.NRA_LATEST_TABLE_NAME}"
-    ORDER BY RANDOM()
+    ORDER BY
+        CASE
+            WHEN instr("press_release_date", '.') > 0 THEN substr("press_release_date", 7, 4) || '-' || substr("press_release_date", 4, 2) || '-' || substr("press_release_date", 1, 2)
+            ELSE "press_release_date"
+        END DESC,
+        "inn" ASC
     LIMIT 5
     '''
     cursor = conn.execute(query)
@@ -652,6 +850,35 @@ def export_nra_snapshot(conn: sqlite3.Connection) -> int:
         ws.append(list(row))
 
     snapshot_path = config.BASE_SNAPSHOTS_DIR / config.NRA_SNAPSHOT_FILENAME
+    wb.save(snapshot_path)
+    return len(rows)
+
+
+def export_acra_snapshot(conn: sqlite3.Connection) -> int:
+    cursor = conn.execute(
+        f'''
+        SELECT "issuer_name", "issuer_url", "rating", "rating_date", "inn"
+        FROM "{config.ACRA_TABLE_NAME}"
+        ORDER BY
+            CASE
+                WHEN instr("rating_date", '.') > 0 THEN substr("rating_date", 7, 4) || '-' || substr("rating_date", 4, 2) || '-' || substr("rating_date", 1, 2)
+                ELSE "rating_date"
+            END DESC,
+            "loaded_at_utc" DESC
+        LIMIT 5
+        '''
+    )
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "acra_snapshot"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / config.ACRA_SNAPSHOT_FILENAME
     wb.save(snapshot_path)
     return len(rows)
 
@@ -766,15 +993,19 @@ def main() -> None:
             pbar.update(1)
         stage_times["Этап 3: Формирование Excel-среза"] = perf_counter() - s
 
-        print("Этап 4: Рейтинги НРА (Excel + отдельная SQLite)")
+        print("Этап 4: Рейтинги агентств (НРА + АКРА, отдельная SQLite)")
         s = perf_counter()
-        with progress(total=4, desc="NRA", unit="шаг") as pbar:
+        with progress(total=6, desc="NRA/ACRA", unit="шаг") as pbar:
             now_utc = datetime.now(timezone.utc)
             with connect_db(ratings_db_path) as nra_conn:
                 init_meta_table(nra_conn)
                 ensure_nra_tables(nra_conn)
+                ensure_acra_tables(nra_conn)
                 nra_refreshed, nra_rows = refresh_nra_data_if_needed(nra_conn, logger, now_utc)
                 nra_snapshot_rows = export_nra_snapshot(nra_conn)
+                pbar.update(1)
+                acra_refreshed, acra_rows, acra_cards = refresh_acra_data_if_needed(nra_conn, logger, now_utc)
+                acra_snapshot_rows = export_acra_snapshot(nra_conn)
             pbar.update(1)
             pbar.set_description("Фиксация результата")
             logger.info(
@@ -783,10 +1014,18 @@ def main() -> None:
                 nra_rows,
                 nra_snapshot_rows,
             )
+            logger.info(
+                "АКРА: режим=%s, строк в базе=%s, карточек запрошено=%s, строк в snapshot=%s",
+                "обновлено из сети" if acra_refreshed else "использован локальный кэш",
+                acra_rows,
+                acra_cards,
+                acra_snapshot_rows,
+            )
             pbar.update(1)
             pbar.update(1)
             pbar.update(1)
-        stage_times["Этап 4: Рейтинги НРА (Excel + отдельная SQLite)"] = perf_counter() - s
+            pbar.update(1)
+        stage_times["Этап 4: Рейтинги агентств (НРА + АКРА, отдельная SQLite)"] = perf_counter() - s
 
         print("Этап 5: Витрина эмитентов (SQL + Excel)")
         s = perf_counter()
