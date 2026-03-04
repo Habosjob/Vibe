@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import html
 import io
+import json
 import logging
 import random
 import re
@@ -441,6 +442,29 @@ def acra_human_sleep(min_seconds: float = 0.7, max_seconds: float = 1.8) -> None
     time.sleep(random.uniform(min_seconds, max_seconds))
 
 
+def acra_ensure_dirs() -> None:
+    config.ACRA_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+    config.ACRA_ISSUERS_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def acra_safe_filename(name: str, limit: int = 80) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9а-яА-Я_-]+", "_", name or "").strip("_")
+    return cleaned[:limit] or "issuer"
+
+
+def acra_log_progress(payload: dict[str, str]) -> None:
+    acra_ensure_dirs()
+    progress_log_path = config.ACRA_DUMP_DIR / config.ACRA_PROGRESS_LOG_FILENAME
+    with progress_log_path.open("a", encoding="utf-8") as file_obj:
+        file_obj.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def acra_save_mhtml(page, file_path: Path) -> None:
+    cdp = page.context.new_cdp_session(page)
+    snapshot = cdp.send("Page.captureSnapshot", {"format": "mhtml"})
+    file_path.write_text(snapshot["data"], encoding="utf-8")
+
+
 def acra_goto_with_retries(page, url: str, logger: logging.Logger, wait_selector: str | None = None, attempts: int = 5) -> bool:
     last_error: Exception | None = None
     for retry in range(1, attempts + 1):
@@ -474,21 +498,19 @@ def acra_goto_with_retries(page, url: str, logger: logging.Logger, wait_selector
 
 
 def collect_acra_rows_via_playwright(logger: logging.Logger, inn_cache_by_url: dict[str, str]) -> tuple[dict[str, dict[str, str]], int]:
+    acra_ensure_dirs()
     unique_rows: dict[str, dict[str, str]] = {}
     card_fetch_count = 0
     with sync_playwright() as p:
-        launch_kwargs = {
-            "user_data_dir": str(config.ACRA_PROFILE_DIR),
-            "headless": config.ACRA_HEADLESS,
-            "viewport": {"width": 1365, "height": 768},
-            "locale": "ru-RU",
-            "timezone_id": "Europe/Moscow",
-            "args": ["--start-maximized"],
-        }
-        if config.ACRA_BROWSER_CHANNEL:
-            launch_kwargs["channel"] = config.ACRA_BROWSER_CHANNEL
-
-        context = p.chromium.launch_persistent_context(**launch_kwargs)
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=str(config.ACRA_PROFILE_DIR),
+            channel=config.ACRA_BROWSER_CHANNEL,
+            headless=config.ACRA_HEADLESS,
+            viewport={"width": 1365, "height": 768},
+            locale="ru-RU",
+            timezone_id="Europe/Moscow",
+            args=["--start-maximized"],
+        )
         try:
             page = context.new_page()
             list_ok = acra_goto_with_retries(
@@ -505,11 +527,22 @@ def collect_acra_rows_via_playwright(logger: logging.Logger, inn_cache_by_url: d
             page.mouse.wheel(0, random.randint(500, 1400))
             acra_human_sleep(0.6, 1.2)
 
-            parsed_rows = parse_acra_list(page.content())
+            try:
+                acra_save_mhtml(page, config.ACRA_DUMP_DIR / config.ACRA_LIST_MHTML_FILENAME)
+            except Exception as exc:
+                logger.warning("Не удалось сохранить MHTML списка АКРА: %s", exc)
+
+            list_html = page.content()
+            (config.ACRA_DUMP_DIR / config.ACRA_LIST_HTML_FILENAME).write_text(list_html, encoding="utf-8")
+
+            parsed_rows = parse_acra_list(list_html)
             for row_data in parsed_rows:
                 unique_rows[row_data["issuer_url"]] = row_data
 
-            for row_data in tqdm(list(unique_rows.values()), desc="АКРА карточки", unit="эмитент", leave=False, dynamic_ncols=True):
+            for index, row_data in enumerate(
+                tqdm(list(unique_rows.values()), desc="АКРА карточки", unit="эмитент", leave=False, dynamic_ncols=True),
+                start=1,
+            ):
                 cached_inn = (inn_cache_by_url.get(row_data["issuer_url"]) or "").strip()
                 if cached_inn:
                     row_data["inn"] = cached_inn
@@ -522,12 +555,33 @@ def collect_acra_rows_via_playwright(logger: logging.Logger, inn_cache_by_url: d
                     attempts=config.ACRA_CARD_GOTO_ATTEMPTS,
                 )
                 if not card_ok:
+                    acra_log_progress(
+                        {
+                            "url": row_data["issuer_url"],
+                            "name": row_data.get("issuer_name", ""),
+                            "inn": "",
+                            "status": "goto_failed",
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
                     continue
                 acra_human_sleep(0.8, 1.8)
                 if random.random() < 0.6:
                     page.mouse.wheel(0, random.randint(250, 900))
                     acra_human_sleep(0.3, 0.8)
-                row_data["inn"] = extract_inn_from_acra_card(page.content())
+                card_html = page.content()
+                card_filename = f"{index:04d}_{acra_safe_filename(row_data.get('issuer_name', ''))}.html"
+                (config.ACRA_ISSUERS_DUMP_DIR / card_filename).write_text(card_html, encoding="utf-8")
+                row_data["inn"] = extract_inn_from_acra_card(card_html)
+                acra_log_progress(
+                    {
+                        "url": row_data["issuer_url"],
+                        "name": row_data.get("issuer_name", ""),
+                        "inn": row_data.get("inn", ""),
+                        "status": "ok",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
                 card_fetch_count += 1
                 acra_human_sleep(0.6, 1.6)
         finally:
@@ -554,24 +608,7 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
     }
 
     try:
-        if config.ACRA_USE_PLAYWRIGHT:
-            unique_rows, card_requests = collect_acra_rows_via_playwright(logger, inn_cache_by_url)
-        else:
-            with create_http_session() as session:
-                list_response = session.get(config.ACRA_RATINGS_LIST_URL, timeout=config.REQUEST_TIMEOUT_SECONDS)
-                list_response.raise_for_status()
-                parsed_rows = parse_acra_list(list_response.text)
-                unique_rows = {row["issuer_url"]: row for row in parsed_rows}
-                card_requests = 0
-                for row_data in unique_rows.values():
-                    cached_inn = (inn_cache_by_url.get(row_data["issuer_url"]) or "").strip()
-                    if cached_inn:
-                        row_data["inn"] = cached_inn
-                        continue
-                    card_response = session.get(row_data["issuer_url"], timeout=config.REQUEST_TIMEOUT_SECONDS)
-                    card_response.raise_for_status()
-                    row_data["inn"] = extract_inn_from_acra_card(card_response.text)
-                    card_requests += 1
+        unique_rows, card_requests = collect_acra_rows_via_playwright(logger, inn_cache_by_url)
 
         loaded_at = now_utc.isoformat()
         changed_rows = 0

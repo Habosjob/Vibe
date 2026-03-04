@@ -11,7 +11,7 @@
    - сохраняет оригинальный файл в `raw/nra_ratings.xlsx`,
    - обновляет отдельную SQLite-базу `DB/raitings.sqlite3`,
    - работает с TTL 12 часов (настраивается `NRA_CACHE_TTL_HOURS`).
-5. Парсит рейтинги АКРА методом из `Acra.py` (через `playwright.sync_api` + запуск Chrome + паузы/ретраи):
+5. Парсит рейтинги АКРА методом из `Acra.py` (через `playwright.sync_api` + запуск **Google Chrome** + паузы/ретраи):
    - первый этап (список) обновляется не чаще одного раза в 12 часов (`ACRA_CACHE_TTL_HOURS`),
    - извлекаются: ссылка на карточку, наименование, рейтинг и дата,
    - карточки открываются в persistent-профиле браузера (`ACRA_PROFILE_DIR`) для устойчивости к антибот-защите,
@@ -59,13 +59,14 @@ python main.py
 
 ## Логика АКРА
 - Источник: `ACRA_RATINGS_LIST_URL`.
-- Драйвер: Playwright (`playwright.sync_api`) + Chromium channel `chrome` (настраивается), persistent-профиль браузера.
+- Драйвер: Playwright (`playwright.sync_api`) c `p.chromium.launch_persistent_context(..., channel="chrome")`, как в оригинальном `Acra.py`.
 - TTL первого этапа (список): `ACRA_CACHE_TTL_HOURS` (по умолчанию 12 часов).
 - БД: `DB/raitings.sqlite3`.
 - Таблица: `acra_ratings`.
 - Поля записи: `issuer_url`, `issuer_name`, `rating`, `rating_date`, `inn`, `loaded_at_utc`.
 - Если ссылка известна и ИНН по ней уже есть в БД, карточка эмитента не парсится повторно.
 - Для нестабильных соединений используются ретраи `goto` и "человеческие" паузы между действиями.
+- Дополнительно формируются дампы: `acra_dump/issuers_list.html`, `acra_dump/issuers_list.mhtml`, карточки в `acra_dump/issuers/`, прогресс в `acra_dump/progress.jsonl`.
 
 ## Настройка
 Все настройки находятся в `config.py`.
@@ -76,11 +77,12 @@ python main.py
 - `NRA_CACHE_TTL_HOURS` — срок жизни кэша НРА в часах.
 - `ACRA_CACHE_TTL_HOURS` — срок жизни кэша этапа списка АКРА в часах.
 - `REQUEST_TIMEOUT_SECONDS` — таймаут HTTP.
-- `ACRA_USE_PLAYWRIGHT` — включить браузерный сценарий АКРА через Playwright.
 - `ACRA_PROFILE_DIR` — папка persistent-профиля браузера для АКРА.
 - `ACRA_BROWSER_CHANNEL` — канал браузера (`"chrome"`, `"msedge"` или `None`).
 - `ACRA_HEADLESS` — headless-режим для АКРА.
 - `ACRA_LIST_GOTO_ATTEMPTS` / `ACRA_CARD_GOTO_ATTEMPTS` — число retry для переходов.
+- `ACRA_DUMP_DIR` / `ACRA_ISSUERS_DUMP_DIR` — пути для HTML/MHTML дампов и карточек АКРА.
+- `ACRA_PROGRESS_LOG_FILENAME` — имя JSONL-лога прогресса по карточкам.
 - `NRA_RATINGS_PAGE_URL` — страница НРА с кнопкой выгрузки.
 - `ACRA_RATINGS_LIST_URL` — страница списка эмитентов АКРА.
 - `RAITINGS_DB_FILENAME` — файл общей SQLite-базы рейтинговых агентств.
