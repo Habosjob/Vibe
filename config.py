@@ -226,3 +226,13 @@ NKR_HEADLESS = True
 # Значение: строка (например "chrome", "msedge") или None для bundled Chromium.
 # По умолчанию: "chrome".
 NKR_BROWSER_CHANNEL = "chrome"
+
+# CSS-селектор кнопки/ссылки выгрузки НКР.
+# Значение: строка CSS-селектора.
+# По умолчанию: ".Excel-btn".
+NKR_EXPORT_BUTTON_SELECTOR = ".Excel-btn"
+
+# Количество попыток скачивания выгрузки НКР.
+# Значение: целое число > 0.
+# По умолчанию: 3.
+NKR_DOWNLOAD_ATTEMPTS = 3

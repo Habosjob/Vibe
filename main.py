@@ -874,64 +874,77 @@ def refresh_nra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger,
 def download_nkr_excel_via_playwright(logger: logging.Logger) -> bytes:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=config.NKR_HEADLESS, channel=config.NKR_BROWSER_CHANNEL)
-        context = browser.new_context(locale="ru-RU", timezone_id="Europe/Moscow")
+        context = browser.new_context(locale="ru-RU", timezone_id="Europe/Moscow", accept_downloads=True)
         page = context.new_page()
         try:
             page.goto(config.NKR_RATINGS_PAGE_URL, wait_until="domcontentloaded", timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000))
-            page.wait_for_selector("text=Выгрузить в Excel", timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000))
+            page.wait_for_selector(config.NKR_EXPORT_BUTTON_SELECTOR, timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000))
 
-            blob_url = page.evaluate(
-                '''() => {
-                    const asText = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-                    const linkByText = [...document.querySelectorAll('a')]
-                        .find((el) => asText(el).includes('выгрузить в excel'));
-                    if (linkByText) {
-                        if ((linkByText.getAttribute('href') || '').startsWith('blob:')) {
-                            return linkByText.getAttribute('href');
-                        }
-                        linkByText.click();
-                    } else {
-                        const buttonByText = [...document.querySelectorAll('button,div')]
-                            .find((el) => asText(el).includes('выгрузить в excel'));
-                        buttonByText?.click();
-                    }
+            for attempt in range(1, config.NKR_DOWNLOAD_ATTEMPTS + 1):
+                logger.info("НКР: попытка скачивания %s/%s", attempt, config.NKR_DOWNLOAD_ATTEMPTS)
 
-                    const links = [...document.querySelectorAll('a[href^="blob:"]')];
-                    if (links.length > 0) {
-                        return links[0].getAttribute('href');
-                    }
-                    return '';
-                }'''
-            )
+                try:
+                    with page.expect_download(timeout=8_000) as download_info:
+                        page.locator(config.NKR_EXPORT_BUTTON_SELECTOR).first.click(timeout=5_000)
+                    download = download_info.value
+                    download_path = download.path()
+                    bytes_data = Path(download_path).read_bytes() if download_path else b""
+                    if bytes_data:
+                        logger.info("НКР: файл получен через expect_download")
+                        return bytes_data
+                except Exception as exc:
+                    logger.info("НКР: expect_download не сработал (%s)", exc)
 
-            if not blob_url:
-                page.wait_for_timeout(1500)
+                href_value = page.locator(config.NKR_EXPORT_BUTTON_SELECTOR).first.get_attribute("href") or ""
+                if href_value and not href_value.lower().startswith("blob:"):
+                    direct_url = urljoin(config.NKR_RATINGS_PAGE_URL, href_value)
+                    response = context.request.get(direct_url, timeout=int(config.REQUEST_TIMEOUT_SECONDS * 1000))
+                    if response.ok and response.body():
+                        logger.info("НКР: файл получен по прямой ссылке %s", direct_url)
+                        return response.body()
+
                 blob_url = page.evaluate(
-                    """() => {
+                    '''(selector) => {
+                        const node = document.querySelector(selector);
+                        const href = (node?.getAttribute('href') || '').trim();
+                        if (href.startsWith('blob:')) return href;
+
+                        const asText = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                        const linkByText = [...document.querySelectorAll('a')]
+                            .find((el) => asText(el).includes('выгрузить в excel'));
+                        const textHref = (linkByText?.getAttribute('href') || '').trim();
+                        if (textHref.startsWith('blob:')) return textHref;
+
                         const links = [...document.querySelectorAll('a[href^="blob:"]')];
                         return links.length > 0 ? links[0].getAttribute('href') : '';
-                    }"""
+                    }''',
+                    config.NKR_EXPORT_BUTTON_SELECTOR,
                 )
 
-            if not blob_url:
-                raise ValueError("На странице НКР не найдена Blob-ссылка на Excel.")
+                if blob_url:
+                    payload_b64 = page.evaluate(
+                        '''async (blobHref) => {
+                            const response = await fetch(blobHref);
+                            const buffer = await response.arrayBuffer();
+                            const bytes = new Uint8Array(buffer);
+                            const chunkSize = 0x8000;
+                            let binary = '';
+                            for (let i = 0; i < bytes.length; i += chunkSize) {
+                                const chunk = bytes.subarray(i, i + chunkSize);
+                                binary += String.fromCharCode(...chunk);
+                            }
+                            return btoa(binary);
+                        }''',
+                        blob_url,
+                    )
+                    bytes_data = base64.b64decode(payload_b64)
+                    if bytes_data:
+                        logger.info("НКР: файл получен через blob-ссылку")
+                        return bytes_data
 
-            payload_b64 = page.evaluate(
-                '''async (blobHref) => {
-                    const response = await fetch(blobHref);
-                    const buffer = await response.arrayBuffer();
-                    const bytes = new Uint8Array(buffer);
-                    const chunkSize = 0x8000;
-                    let binary = '';
-                    for (let i = 0; i < bytes.length; i += chunkSize) {
-                        const chunk = bytes.subarray(i, i + chunkSize);
-                        binary += String.fromCharCode(...chunk);
-                    }
-                    return btoa(binary);
-                }''',
-                blob_url,
-            )
-            return base64.b64decode(payload_b64)
+                page.wait_for_timeout(1200)
+
+            raise ValueError("На странице НКР не удалось получить Excel-файл (ни download, ни href, ни blob).")
         except Exception:
             logger.exception("Ошибка скачивания НКР через Playwright")
             raise
@@ -942,11 +955,16 @@ def download_nkr_excel_via_playwright(logger: logging.Logger) -> bytes:
 
 def refresh_nkr_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime) -> tuple[bool, int]:
     ensure_nkr_tables(conn)
+    current = conn.execute(f'SELECT COUNT(*) FROM "{config.NKR_TABLE_NAME}"').fetchone()
+    current_total = int(current[0]) if current else 0
     if not should_refresh_nkr(conn, now_utc):
-        row = conn.execute(f'SELECT COUNT(*) FROM "{config.NKR_TABLE_NAME}"').fetchone()
-        return False, int(row[0]) if row else 0
+        return False, current_total
 
-    content = download_nkr_excel_via_playwright(logger)
+    try:
+        content = download_nkr_excel_via_playwright(logger)
+    except Exception as exc:
+        logger.warning("НКР обновление пропущено из-за сетевой ошибки: %s", exc)
+        return False, current_total
     raw_path = config.RAW_DIR / config.NKR_RAW_FILENAME
     if raw_path.exists():
         raw_path.unlink()

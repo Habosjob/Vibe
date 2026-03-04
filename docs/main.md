@@ -36,7 +36,7 @@
    - формат `Рейтинг(прогноз)` при наличии прогноза, иначе только рейтинг.
 11. Загружает Excel-выгрузку НКР через Playwright со страницы `https://ratings.ru/ratings/issuers/`:
    - нажимает кнопку `Выгрузить в Excel`,
-   - парсит `blob:` ссылку, скачивает бинарное содержимое и сохраняет raw-файл `raw/nkr_ratings.xlsx`,
+   - сначала пытается скачать через событие браузерной загрузки, затем по прямому `href`, и только после этого — через `blob:` ссылку,
    - в БД пишет только нужные поля: `Date`, `Rating`, `Outlook`, `TIN`,
    - делает инкрементальное обновление истории в `nkr_ratings`,
    - формирует `nkr_latest_by_tin` (уникально по ИНН с самой свежей датой).
@@ -84,7 +84,7 @@ python main.py
 
 ## Логика НКР
 - Источник: `NKR_RATINGS_PAGE_URL` (страница списка эмитентов НКР).
-- Драйвер: Playwright, скачивание через `blob:` URL по кнопке «Выгрузить в Excel».
+- Драйвер: Playwright, многошаговое скачивание (download event -> direct href -> blob URL).
 - TTL загрузки: `NKR_CACHE_TTL_HOURS` (по умолчанию 12 часов).
 - Raw-файл: `raw/nkr_ratings.xlsx`.
 - БД: `DB/raitings.sqlite3`.
@@ -110,6 +110,8 @@ python main.py
 - `ACRA_RATINGS_LIST_URL` — страница списка эмитентов АКРА.
 - `NKR_RATINGS_PAGE_URL` — страница списка эмитентов НКР.
 - `NKR_CACHE_TTL_HOURS` — срок жизни кэша НКР в часах.
+- `NKR_EXPORT_BUTTON_SELECTOR` — CSS-селектор кнопки выгрузки НКР.
+- `NKR_DOWNLOAD_ATTEMPTS` — количество попыток скачивания выгрузки НКР.
 - `NKR_TABLE_NAME` / `NKR_LATEST_TABLE_NAME` — таблицы НКР в БД рейтинговых агентств.
 - `RAITINGS_DB_FILENAME` — файл общей SQLite-базы рейтинговых агентств.
 - `ACRA_TABLE_NAME` — таблица АКРА в БД рейтинговых агентств.
