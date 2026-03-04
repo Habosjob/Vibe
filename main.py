@@ -561,8 +561,9 @@ def parse_acra_list(html_text: str) -> list[dict[str, str]]:
         issuer_url = href if href.startswith("http") else urljoin(config.ACRA_RATINGS_LIST_URL, href)
         issuer_name = issuer_link.get_text(" ", strip=True)
 
-        rating_node = row.select_one('div.emits-row__item[data-type="rate"] p')
-        rating = rating_node.get_text(" ", strip=True) if rating_node else ""
+        rating_container = row.select_one('div.emits-row__item[data-type="rate"]')
+        rating_raw = rating_container.get_text("\n", strip=True) if rating_container else ""
+        rating, forecast = split_acra_rating_and_forecast(rating_raw)
 
         forecast = ""
         forecast_container = row.select_one('div.emits-row__item[data-type="forecast"]')
@@ -595,6 +596,7 @@ def split_acra_rating_and_forecast(raw_value: str) -> tuple[str, str]:
     normalized_lines = [line.strip() for line in re.split(r"[\r\n]+", raw_value or "") if line.strip()]
     if not normalized_lines:
         return "", ""
+<<<<<<< codex/update-a-to-parse-from-html-zb5cdu
 
     forecast_line = ""
     rating_line = ""
@@ -635,6 +637,15 @@ def is_acra_forecast_value(value: str) -> bool:
         "негативный",
         "развивающийся",
     }
+=======
+    if len(normalized_lines) == 1:
+        one_line = normalized_lines[0]
+        match = re.match(r"^(.*?)\s*[;,]\s*([^;,]+)$", one_line)
+        if match:
+            return match.group(1).strip(), match.group(2).strip()
+        return one_line, ""
+    return normalized_lines[0], normalized_lines[1]
+>>>>>>> main
 
 
 def extract_inn_from_acra_card(html_text: str) -> str:
