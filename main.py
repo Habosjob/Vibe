@@ -481,6 +481,7 @@ def ensure_acra_tables(conn: sqlite3.Connection) -> None:
             "issuer_url" TEXT NOT NULL,
             "issuer_name" TEXT,
             "rating" TEXT,
+            "forecast" TEXT,
             "rating_date" TEXT,
             "inn" TEXT,
             "loaded_at_utc" TEXT,
@@ -491,6 +492,9 @@ def ensure_acra_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         f'CREATE INDEX IF NOT EXISTS "idx_{config.ACRA_TABLE_NAME}_url" ON "{config.ACRA_TABLE_NAME}"("issuer_url")'
     )
+    conn.execute(
+        f'ALTER TABLE "{config.ACRA_TABLE_NAME}" ADD COLUMN "forecast" TEXT'
+    ) if _column_absent(conn, config.ACRA_TABLE_NAME, "forecast") else None
     conn.commit()
 
 
@@ -518,8 +522,9 @@ def parse_acra_list(html_text: str) -> list[dict[str, str]]:
         issuer_url = href if href.startswith("http") else urljoin(config.ACRA_RATINGS_LIST_URL, href)
         issuer_name = issuer_link.get_text(" ", strip=True)
 
-        rating_node = row.select_one('div.emits-row__item[data-type="rate"] p')
-        rating = rating_node.get_text(" ", strip=True) if rating_node else ""
+        rating_container = row.select_one('div.emits-row__item[data-type="rate"]')
+        rating_raw = rating_container.get_text("\n", strip=True) if rating_container else ""
+        rating, forecast = split_acra_rating_and_forecast(rating_raw)
 
         date_node = row.select_one('div.emits-row__item[data-type="pressRelease"] a')
         date_raw = date_node.get_text(" ", strip=True) if date_node else ""
@@ -528,10 +533,24 @@ def parse_acra_list(html_text: str) -> list[dict[str, str]]:
                 "issuer_url": issuer_url,
                 "issuer_name": issuer_name,
                 "rating": rating,
+                "forecast": forecast,
                 "rating_date": normalize_date_ru(date_raw) or date_raw,
             }
         )
     return parsed_rows
+
+
+def split_acra_rating_and_forecast(raw_value: str) -> tuple[str, str]:
+    normalized_lines = [line.strip() for line in re.split(r"[\r\n]+", raw_value or "") if line.strip()]
+    if not normalized_lines:
+        return "", ""
+    if len(normalized_lines) == 1:
+        one_line = normalized_lines[0]
+        match = re.match(r"^(.*?)\s*[;,]\s*([^;,]+)$", one_line)
+        if match:
+            return match.group(1).strip(), match.group(2).strip()
+        return one_line, ""
+    return normalized_lines[0], normalized_lines[1]
 
 
 def extract_inn_from_acra_card(html_text: str) -> str:
@@ -726,10 +745,11 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
             cursor = conn.execute(
                     f'''
                     INSERT INTO "{config.ACRA_TABLE_NAME}" (
-                        "issuer_url", "issuer_name", "rating", "rating_date", "inn", "loaded_at_utc"
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        "issuer_url", "issuer_name", "rating", "forecast", "rating_date", "inn", "loaded_at_utc"
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT("issuer_url", "rating_date", "rating") DO UPDATE SET
                         "issuer_name" = excluded."issuer_name",
+                        "forecast" = excluded."forecast",
                         "inn" = CASE
                             WHEN TRIM(COALESCE("{config.ACRA_TABLE_NAME}"."inn", '')) = '' THEN excluded."inn"
                             ELSE "{config.ACRA_TABLE_NAME}"."inn"
@@ -740,6 +760,7 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
                         row_data["issuer_url"],
                         row_data.get("issuer_name", ""),
                         row_data.get("rating", ""),
+                        row_data.get("forecast", ""),
                         row_data.get("rating_date", ""),
                         row_data.get("inn", ""),
                         loaded_at,
@@ -1062,7 +1083,7 @@ def sync_nra_rate_to_emitents(main_conn: sqlite3.Connection, nra_conn: sqlite3.C
 def sync_acra_rate_to_emitents(main_conn: sqlite3.Connection, ratings_conn: sqlite3.Connection, logger: logging.Logger) -> int:
     rows = ratings_conn.execute(
         f'''
-        SELECT src."inn", src."rating"
+        SELECT src."inn", src."rating", src."forecast"
         FROM "{config.ACRA_TABLE_NAME}" src
         JOIN (
             SELECT "inn", MAX(
@@ -1084,18 +1105,20 @@ def sync_acra_rate_to_emitents(main_conn: sqlite3.Connection, ratings_conn: sqli
     ).fetchall()
 
     updates: list[tuple[str, str]] = []
-    for inn, rating in rows:
+    for inn, rating, forecast in rows:
         rating_text = (rating or "").strip()
+        forecast_text = (forecast or "").strip().lower()
         if not rating_text:
             continue
 
-        parts = [part.strip() for part in re.split(r"[,;]", rating_text, maxsplit=1) if part.strip()]
-        base_rating = parts[0] if parts else ""
-        forecast = parts[1].lower() if len(parts) > 1 else ""
+        base_rating = rating_text
+        if not forecast_text:
+            base_rating, forecast_text = split_acra_rating_and_forecast(rating_text)
+            forecast_text = forecast_text.lower()
         if not base_rating:
             continue
 
-        rate_for_showcase = f"{base_rating}({forecast})" if forecast else base_rating
+        rate_for_showcase = f"{base_rating}({forecast_text})" if forecast_text else base_rating
         updates.append((rate_for_showcase, inn.strip()))
 
     main_conn.executemany(
@@ -1343,7 +1366,7 @@ def export_nra_snapshot(conn: sqlite3.Connection) -> int:
 def export_acra_snapshot(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "issuer_name", "issuer_url", "rating", "rating_date", "inn"
+        SELECT "issuer_name", "issuer_url", "rating", "forecast", "rating_date", "inn"
         FROM "{config.ACRA_TABLE_NAME}"
         ORDER BY
             CASE
