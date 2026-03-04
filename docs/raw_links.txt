@@ -3,7 +3,6 @@
 КОРНЕВАЯ ДИРЕКТОРИЯ:
 ============================================================
 
-https://raw.githubusercontent.com/Habosjob/Vibe/main/Acra.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Emitents.xlsx
 https://raw.githubusercontent.com/Habosjob/Vibe/main/Git_auto.bat
 https://raw.githubusercontent.com/Habosjob/Vibe/main/config.py
@@ -16,13 +15,6 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
 ------------------------------------------------------------
 
 https://raw.githubusercontent.com/Habosjob/Vibe/main/__pycache__/config.cpython-311.pyc
-
-------------------------------------------------------------
-Директория: cache/
-------------------------------------------------------------
-
-https://raw.githubusercontent.com/Habosjob/Vibe/main/cache/.gitkeep
-https://raw.githubusercontent.com/Habosjob/Vibe/main/cache/moex_rates_cache.csv
 
 ------------------------------------------------------------
 Директория: docs/
@@ -39,11 +31,3 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/docs/raw_links_latest.txt
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/.gitkeep
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/generate_raw_links.log
 https://raw.githubusercontent.com/Habosjob/Vibe/main/logs/main.log
-
-------------------------------------------------------------
-Директория: raw/
-------------------------------------------------------------
-
-https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/.gitkeep
-https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/moex_rates.csv
-https://raw.githubusercontent.com/Habosjob/Vibe/main/raw/nra_ratings.xlsx
