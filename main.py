@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import csv
+import html
+import io
 import logging
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 
 import requests
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
 from tqdm import tqdm
@@ -29,6 +32,12 @@ def setup_logging() -> logging.Logger:
     handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     logger.addHandler(handler)
     return logger
+
+
+def create_http_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({"User-Agent": config.NRA_REQUEST_USER_AGENT})
+    return session
 
 
 def ensure_directories() -> None:
@@ -174,11 +183,275 @@ def ensure_emitents_table(conn: sqlite3.Connection) -> None:
             "INN" TEXT PRIMARY KEY,
             "EMITENTNAME" TEXT NOT NULL,
             "Scoring" TEXT,
-            "DateScoring" TEXT
+            "DateScoring" TEXT,
+            "NRA_Rate" TEXT
+        )
+        '''
+    )
+    conn.execute(
+        f'ALTER TABLE "{config.EMITENTS_TABLE_NAME}" ADD COLUMN "NRA_Rate" TEXT'
+    ) if _column_absent(conn, config.EMITENTS_TABLE_NAME, "NRA_Rate") else None
+    conn.commit()
+
+
+def _column_absent(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    return column_name not in {row[1] for row in rows}
+
+
+def ensure_nra_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.NRA_TABLE_NAME}" (
+            "id" TEXT,
+            "organization_name" TEXT,
+            "inn" TEXT,
+            "press_release_title" TEXT,
+            "press_release_date" TEXT,
+            "rating" TEXT,
+            "rating_status" TEXT,
+            "forecast" TEXT,
+            "rating_type" TEXT,
+            "organization_sector" TEXT,
+            "industry" TEXT,
+            "osk" TEXT,
+            "isin" TEXT,
+            "press_release_link" TEXT,
+            "under_watch" TEXT,
+            "source_file_name" TEXT,
+            "loaded_at_utc" TEXT,
+            UNIQUE("id")
+        )
+        '''
+    )
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.NRA_LATEST_TABLE_NAME}" (
+            "inn" TEXT PRIMARY KEY,
+            "organization_name" TEXT,
+            "press_release_date" TEXT,
+            "rating" TEXT,
+            "rating_status" TEXT,
+            "forecast" TEXT
         )
         '''
     )
     conn.commit()
+
+
+NRA_HEADERS_MAP = {
+    "id": "id",
+    "Название организации": "organization_name",
+    "ИНН": "inn",
+    "Название пресс-релиза": "press_release_title",
+    "Дата опубликования пресс-релиза": "press_release_date",
+    "Рейтинг": "rating",
+    "Статус рейтинга": "rating_status",
+    "Прогноз": "forecast",
+    "Вид рейтинга": "rating_type",
+    "Сектор организации": "organization_sector",
+    "Отрасль": "industry",
+    "ОСК": "osk",
+    "ISIN": "isin",
+    "Ссылка на пресс релиз": "press_release_link",
+    "Под наблюдением": "under_watch",
+}
+
+
+def find_nra_excel_link(page_html: str) -> str:
+    marker = re.search(r'Выгрузить\s*в\s*Excel', page_html, flags=re.IGNORECASE)
+    if marker:
+        idx = marker.start()
+        tag_start = page_html.rfind('<a ', 0, idx)
+        tag_end = page_html.find('>', tag_start)
+        if tag_start != -1 and tag_end != -1:
+            tag = page_html[tag_start:tag_end]
+            href_match = re.search(r'href=["\']([^"\']+)["\']', tag, flags=re.IGNORECASE)
+            if href_match:
+                return html.unescape(href_match.group(1))
+
+    links = re.findall(r'href=["\']([^"\']+\.(?:xlsx|xls)[^"\']*)["\']', page_html, flags=re.IGNORECASE)
+    if not links:
+        raise ValueError("На странице НРА не найдена ссылка на Excel-файл.")
+    return html.unescape(links[0])
+
+
+def _normalize_cell(value: object) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def parse_nra_excel(content: bytes) -> list[dict[str, str]]:
+    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return []
+
+    headers = [_normalize_cell(cell) for cell in rows[0]]
+    indexes: dict[str, int] = {}
+    for idx, header in enumerate(headers):
+        if header in NRA_HEADERS_MAP:
+            indexes[NRA_HEADERS_MAP[header]] = idx
+
+    missing = [column for column in NRA_HEADERS_MAP.values() if column not in indexes]
+    if missing:
+        raise ValueError(f"В выгрузке НРА отсутствуют колонки: {', '.join(missing)}")
+
+    parsed_rows: list[dict[str, str]] = []
+    for row in rows[1:]:
+        row_dict: dict[str, str] = {}
+        for key, idx in indexes.items():
+            row_dict[key] = _normalize_cell(row[idx]) if idx < len(row) else ""
+        if any(row_dict.values()):
+            parsed_rows.append(row_dict)
+    return parsed_rows
+
+
+def should_refresh_nra(conn: sqlite3.Connection, now_utc: datetime) -> bool:
+    last_refresh_raw = get_meta_value(conn, "nra_last_refresh_utc")
+    rows_count_raw = get_meta_value(conn, "nra_last_rows_count")
+    if not last_refresh_raw or not rows_count_raw:
+        return True
+    try:
+        last_refresh = datetime.fromisoformat(last_refresh_raw)
+        rows_count = int(rows_count_raw)
+    except ValueError:
+        return True
+    if rows_count <= 0:
+        return True
+    return now_utc - last_refresh >= timedelta(hours=config.NRA_CACHE_TTL_HOURS)
+
+
+def refresh_nra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime) -> tuple[bool, int]:
+    ensure_nra_tables(conn)
+    if not should_refresh_nra(conn, now_utc):
+        row = conn.execute(f'SELECT COUNT(*) FROM "{config.NRA_TABLE_NAME}"').fetchone()
+        return False, int(row[0]) if row else 0
+
+    with create_http_session() as session:
+        page_response = session.get(config.NRA_RATINGS_PAGE_URL, timeout=config.REQUEST_TIMEOUT_SECONDS)
+        page_response.raise_for_status()
+        excel_link = find_nra_excel_link(page_response.text)
+        excel_url = requests.compat.urljoin(config.NRA_RATINGS_PAGE_URL, excel_link)
+        excel_response = session.get(excel_url, timeout=config.REQUEST_TIMEOUT_SECONDS)
+        excel_response.raise_for_status()
+        content = excel_response.content
+
+    raw_path = config.RAW_DIR / config.NRA_RAW_FILENAME
+    if raw_path.exists():
+        raw_path.unlink()
+    raw_path.write_bytes(content)
+
+    parsed_rows = parse_nra_excel(content)
+    loaded_at = now_utc.isoformat()
+    payload = [
+        (
+            row["id"],
+            row["organization_name"],
+            row["inn"],
+            row["press_release_title"],
+            row["press_release_date"],
+            row["rating"],
+            row["rating_status"],
+            row["forecast"],
+            row["rating_type"],
+            row["organization_sector"],
+            row["industry"],
+            row["osk"],
+            row["isin"],
+            row["press_release_link"],
+            row["under_watch"],
+            config.NRA_RAW_FILENAME,
+            loaded_at,
+        )
+        for row in parsed_rows
+    ]
+    conn.executemany(
+        f'''
+        INSERT INTO "{config.NRA_TABLE_NAME}" (
+            "id", "organization_name", "inn", "press_release_title", "press_release_date", "rating",
+            "rating_status", "forecast", "rating_type", "organization_sector", "industry", "osk",
+            "isin", "press_release_link", "under_watch", "source_file_name", "loaded_at_utc"
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT("id") DO UPDATE SET
+            "organization_name"=excluded."organization_name",
+            "inn"=excluded."inn",
+            "press_release_title"=excluded."press_release_title",
+            "press_release_date"=excluded."press_release_date",
+            "rating"=excluded."rating",
+            "rating_status"=excluded."rating_status",
+            "forecast"=excluded."forecast",
+            "rating_type"=excluded."rating_type",
+            "organization_sector"=excluded."organization_sector",
+            "industry"=excluded."industry",
+            "osk"=excluded."osk",
+            "isin"=excluded."isin",
+            "press_release_link"=excluded."press_release_link",
+            "under_watch"=excluded."under_watch",
+            "source_file_name"=excluded."source_file_name",
+            "loaded_at_utc"=excluded."loaded_at_utc"
+        ''',
+        payload,
+    )
+
+    conn.execute(f'DELETE FROM "{config.NRA_LATEST_TABLE_NAME}"')
+    conn.execute(
+        f'''
+        INSERT INTO "{config.NRA_LATEST_TABLE_NAME}" (
+            "inn", "organization_name", "press_release_date", "rating", "rating_status", "forecast"
+        )
+        SELECT src."inn", src."organization_name", src."press_release_date", src."rating", src."rating_status", src."forecast"
+        FROM "{config.NRA_TABLE_NAME}" src
+        JOIN (
+            SELECT "inn", MAX(
+                (CASE
+                    WHEN instr("press_release_date", '.') > 0 THEN substr("press_release_date", 7, 4) || '-' || substr("press_release_date", 4, 2) || '-' || substr("press_release_date", 1, 2)
+                    ELSE "press_release_date"
+                END) || '|' || printf('%012d', CAST(COALESCE("id", '0') AS INTEGER))
+            ) AS max_key
+            FROM "{config.NRA_TABLE_NAME}"
+            WHERE TRIM(COALESCE("inn", '')) <> ''
+            GROUP BY "inn"
+        ) latest ON latest."inn" = src."inn"
+        WHERE
+            (CASE
+                WHEN instr(src."press_release_date", '.') > 0 THEN substr(src."press_release_date", 7, 4) || '-' || substr(src."press_release_date", 4, 2) || '-' || substr(src."press_release_date", 1, 2)
+                ELSE src."press_release_date"
+            END) || '|' || printf('%012d', CAST(COALESCE(src."id", '0') AS INTEGER)) = latest.max_key
+        '''
+    )
+    conn.commit()
+
+    set_meta_value(conn, "nra_last_refresh_utc", loaded_at)
+    set_meta_value(conn, "nra_last_rows_count", str(len(parsed_rows)))
+    logger.info("NRA обновление завершено. Загружено строк: %s", len(parsed_rows))
+    return True, len(parsed_rows)
+
+
+def sync_nra_rate_to_emitents(main_conn: sqlite3.Connection, nra_conn: sqlite3.Connection, logger: logging.Logger) -> int:
+    rows = nra_conn.execute(
+        f'''
+        SELECT "inn", "rating", "forecast"
+        FROM "{config.NRA_LATEST_TABLE_NAME}"
+        WHERE TRIM(COALESCE("inn", '')) <> ''
+        '''
+    ).fetchall()
+
+    updates: list[tuple[str, str]] = []
+    for inn, rating, forecast in rows:
+        rating_text = (rating or "").strip()
+        forecast_text = (forecast or "").strip().lower()
+        if not rating_text:
+            continue
+        updates.append((f"{rating_text}({forecast_text})" if forecast_text else rating_text, inn.strip()))
+
+    main_conn.executemany(
+        f'UPDATE "{config.EMITENTS_TABLE_NAME}" SET "NRA_Rate" = ? WHERE "INN" = ?',
+        updates,
+    )
+    main_conn.commit()
+    logger.info("NRA_Rate синхронизирован для INN: %s", len(updates))
+    return len(updates)
 
 
 def sync_emitents_from_rates(conn: sqlite3.Connection, logger: logging.Logger) -> int:
@@ -204,8 +477,6 @@ def pull_scoring_from_excel(conn: sqlite3.Connection, logger: logging.Logger, to
     if not excel_path.exists():
         logger.info("Файл витрины %s пока отсутствует — перенос оценок из Excel пропущен.", excel_path)
         return 0
-
-    from openpyxl import load_workbook
 
     wb = load_workbook(excel_path)
     ws = wb.active
@@ -284,7 +555,7 @@ def ensure_scoring_dates(conn: sqlite3.Connection, logger: logging.Logger, today
 def export_emitents_excel(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring"
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate"
         FROM "{config.EMITENTS_TABLE_NAME}"
         ORDER BY "EMITENTNAME", "INN"
         '''
@@ -341,7 +612,7 @@ def export_emitents_excel(conn: sqlite3.Connection) -> int:
 def export_emitents_snapshot(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring"
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate"
         FROM "{config.EMITENTS_TABLE_NAME}"
         ORDER BY RANDOM()
         LIMIT 5
@@ -431,6 +702,7 @@ def main() -> None:
     started = perf_counter()
 
     db_path = config.DB_DIR / config.DB_FILENAME
+    nra_db_path = config.DB_DIR / config.NRA_DB_FILENAME
 
     try:
         print("=====\nЭтап 1: Подготовка окружения")
@@ -471,15 +743,37 @@ def main() -> None:
             pbar.update(1)
         stage_times["Этап 3: Формирование Excel-среза"] = perf_counter() - s
 
-        print("Этап 4: Витрина эмитентов (SQL + Excel)")
+        print("Этап 4: Рейтинги НРА (Excel + отдельная SQLite)")
         s = perf_counter()
-        with progress(total=5, desc="Emitents", unit="шаг") as pbar:
+        with progress(total=3, desc="NRA", unit="шаг") as pbar:
+            now_utc = datetime.now(timezone.utc)
+            with connect_db(nra_db_path) as nra_conn:
+                init_meta_table(nra_conn)
+                ensure_nra_tables(nra_conn)
+                nra_refreshed, nra_rows = refresh_nra_data_if_needed(nra_conn, logger, now_utc)
+            pbar.update(1)
+            pbar.set_description("Фиксация результата")
+            logger.info(
+                "НРА: режим=%s, строк в источнике=%s",
+                "обновлено из сети" if nra_refreshed else "использован локальный кэш",
+                nra_rows,
+            )
+            pbar.update(1)
+            pbar.update(1)
+        stage_times["Этап 4: Рейтинги НРА (Excel + отдельная SQLite)"] = perf_counter() - s
+
+        print("Этап 5: Витрина эмитентов (SQL + Excel)")
+        s = perf_counter()
+        with progress(total=6, desc="Emitents", unit="шаг") as pbar:
             today_str = datetime.now().strftime(config.DATE_SCORING_FORMAT)
             with connect_db(db_path) as conn:
                 ensure_emitents_table(conn)
                 pulled = pull_scoring_from_excel(conn, logger, today_str)
                 pbar.update(1)
                 synced = sync_emitents_from_rates(conn, logger)
+                pbar.update(1)
+                with connect_db(nra_db_path) as nra_conn:
+                    nra_synced = sync_nra_rate_to_emitents(conn, nra_conn, logger)
                 pbar.update(1)
                 dates_fixed = ensure_scoring_dates(conn, logger, today_str)
                 pbar.update(1)
@@ -489,14 +783,15 @@ def main() -> None:
                 pbar.update(1)
 
             logger.info(
-                "Витрина эмитентов: перенос из Excel=%s, upsert из rates=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
+                "Витрина эмитентов: перенос из Excel=%s, upsert из rates=%s, NRA_Rate=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
                 pulled,
                 synced,
+                nra_synced,
                 dates_fixed,
                 emitents_count,
                 emitents_snapshot,
             )
-        stage_times["Этап 4: Витрина эмитентов (SQL + Excel)"] = perf_counter() - s
+        stage_times["Этап 5: Витрина эмитентов (SQL + Excel)"] = perf_counter() - s
 
         print("=====\nГотово")
     except Exception as exc:
