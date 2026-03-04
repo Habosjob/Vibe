@@ -150,3 +150,48 @@ ACRA_TABLE_NAME = "acra_ratings"
 # Значение: целое число > 0 (в часах).
 # По умолчанию: 12 часов.
 ACRA_CACHE_TTL_HOURS = 12
+
+# Папка persistent-профиля браузера для АКРА.
+# Позволяет сохранять cookies/состояние между запусками.
+# По умолчанию: <проект>/acra_profile
+ACRA_PROFILE_DIR = BASE_DIR / "acra_profile"
+
+# Канал браузера Playwright для АКРА.
+# Значение: строка (например "chrome", "msedge") или None для bundled Chromium.
+# По умолчанию: "chrome".
+ACRA_BROWSER_CHANNEL = "chrome"
+
+# Headless-режим для АКРА.
+# Значения: True/False. Для сложной антибот-защиты обычно лучше False.
+# По умолчанию: False.
+ACRA_HEADLESS = False
+
+# Количество попыток открыть страницу списка АКРА.
+# Значение: целое число > 0.
+# По умолчанию: 6.
+ACRA_LIST_GOTO_ATTEMPTS = 6
+
+# Количество попыток открыть карточку эмитента АКРА.
+# Значение: целое число > 0.
+# По умолчанию: 5.
+ACRA_CARD_GOTO_ATTEMPTS = 5
+
+# Папка для дампов АКРА (список, карточки, прогресс-лог).
+# По умолчанию: <проект>/acra_dump
+ACRA_DUMP_DIR = BASE_DIR / "acra_dump"
+
+# Подпапка HTML-дампов карточек эмитентов АКРА.
+# По умолчанию: <проект>/acra_dump/issuers
+ACRA_ISSUERS_DUMP_DIR = ACRA_DUMP_DIR / "issuers"
+
+# Имя JSONL-файла лога прогресса обработки карточек АКРА.
+# По умолчанию: progress.jsonl
+ACRA_PROGRESS_LOG_FILENAME = "progress.jsonl"
+
+# Имя HTML-дампа страницы списка эмитентов АКРА.
+# По умолчанию: issuers_list.html
+ACRA_LIST_HTML_FILENAME = "issuers_list.html"
+
+# Имя MHTML-дампа страницы списка эмитентов АКРА.
+# По умолчанию: issuers_list.mhtml
+ACRA_LIST_MHTML_FILENAME = "issuers_list.mhtml"
