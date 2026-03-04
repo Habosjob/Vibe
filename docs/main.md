@@ -58,7 +58,12 @@
    - `nra_snapshot.xlsx` (**5 самых свежих** строк по дате рейтинга),
    - `acra_snapshot.xlsx` (**5 самых свежих** строк по дате рейтинга),
   - `nkr_snapshot.xlsx` (**5 самых свежих** строк по дате рейтинга).
-18. Пишет технический лог в `logs/main.log` (перезаписывается каждый запуск).
+18. Создает merge-таблицы в `DB/bonds.sqlite3` на основе `Scoring` эмитента и матчинга по `ISIN`:
+   - `MergeGreenBonds` — облигации эмитентов, где `Scoring = Green`,
+   - `MergeYellowBonds` — облигации эмитентов, где `Scoring = Yellow`,
+   - структура включает выбранные поля из `moex_bonds` и `Dohod_Bonds`,
+   - для каждой merge-таблицы формируется отдельный snapshot по 5 случайных строк.
+19. Пишет технический лог в `logs/main.log` (перезаписывается каждый запуск).
 
 ## Запуск
 ```bash
@@ -140,3 +145,17 @@ python main.py
 - БД: `DB/bonds.sqlite3` (основная база).
 - Таблица: `Dohod_Bonds` (инкрементальный upsert по `ISIN`).
 - Snapshot: `BaseSnapshots/dohod_bonds_snapshot.xlsx` (5 случайных уникальных ISIN).
+
+
+## Логика MergeGreenBonds / MergeYellowBonds
+- БД: `DB/bonds.sqlite3` (основная база).
+- Источники:
+  - `moex_bonds` — поля: `SECID`, `ISIN`, `FACEVALUE`, `FACEUNIT`, `MATDATE`, `IS_QUALIFIED_INVESTORS`, `BOND_TYPE`, `BOND_SUBTYPE`, `YIELDATWAP`, `PRICE`;
+  - `Dohod_Bonds` — поля: `Название`, `Ближайшая дата погашения/оферты (Дата)`, `Событие в дату`, `Коэф. Ликвидности (max=100)`, `Медиана дневного оборота (млн в валюте торгов)`, `Цена, % от номинала`, `НКД`, `Размер купона`, `Текущий купон, %`, `Тип купона`, `Купон (раз/год)`, `Субординированная (да/нет)`, `Базовый индекс (для FRN)`, `Премия/Дисконт к базовому индексу (для FRN)`.
+- Матчинг:
+  - фильтрация по `emitents.Scoring` (`Green`/`Yellow`) через связь `moex_bonds.INN -> emitents.INN`;
+  - объединение с `Dohod_Bonds` по `ISIN` (LEFT JOIN).
+- Таблицы пересобираются каждый запуск этапа merge (очистка + новая вставка).
+- Snapshot-файлы:
+  - `BaseSnapshots/merge_green_bonds_snapshot.xlsx`;
+  - `BaseSnapshots/merge_yellow_bonds_snapshot.xlsx`.

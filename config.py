@@ -271,3 +271,19 @@ DOHOD_HEADLESS = True
 # Значение: строка (например "chrome", "msedge") или None для bundled Chromium.
 # По умолчанию: "chrome".
 DOHOD_BROWSER_CHANNEL = "chrome"
+
+# Имя merge-таблицы для облигаций эмитентов со Scoring = Green.
+# По умолчанию: MergeGreenBonds.
+MERGE_GREEN_TABLE_NAME = "MergeGreenBonds"
+
+# Имя merge-таблицы для облигаций эмитентов со Scoring = Yellow.
+# По умолчанию: MergeYellowBonds.
+MERGE_YELLOW_TABLE_NAME = "MergeYellowBonds"
+
+# Имя Excel-файла снапшота merge-таблицы Green (5 случайных строк).
+# По умолчанию: merge_green_bonds_snapshot.xlsx.
+MERGE_GREEN_SNAPSHOT_FILENAME = "merge_green_bonds_snapshot.xlsx"
+
+# Имя Excel-файла снапшота merge-таблицы Yellow (5 случайных строк).
+# По умолчанию: merge_yellow_bonds_snapshot.xlsx.
+MERGE_YELLOW_SNAPSHOT_FILENAME = "merge_yellow_bonds_snapshot.xlsx"
