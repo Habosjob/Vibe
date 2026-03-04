@@ -70,3 +70,22 @@ RATES_TABLE_NAME = "rates"
 
 # Имя таблицы метаданных кэша.
 META_TABLE_NAME = "meta"
+
+# Имя таблицы уникальных эмитентов (витрина по INN).
+# Хранит EMITENTNAME, INN, а также пользовательские поля Scoring и DateScoring.
+EMITENTS_TABLE_NAME = "emitents"
+
+# Имя Excel-файла витрины эмитентов в корне проекта.
+# Пользователь вносит ручные оценки в колонку Scoring.
+EMITENTS_XLSX_FILENAME = "Emitents.xlsx"
+
+# Цвет заливки заголовков в Excel-витрине (HEX ARGB).
+# По умолчанию: светло-голубой.
+EMITENTS_HEADER_FILL_COLOR = "FFD9E1F2"
+
+# Формат даты для автоматического заполнения DateScoring.
+# По умолчанию: ISO-формат YYYY-MM-DD.
+DATE_SCORING_FORMAT = "%Y-%m-%d"
+
+# Имя Excel-файла снапшота по таблице эмитентов (5 случайных строк).
+EMITENTS_SNAPSHOT_FILENAME = "emitents_snapshot.xlsx"

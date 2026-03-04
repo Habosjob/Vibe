@@ -9,6 +9,7 @@ from time import perf_counter
 
 import requests
 from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
 from tqdm import tqdm
 
 import config
@@ -165,6 +166,175 @@ def replace_rates_table(conn: sqlite3.Connection, headers: list[str], rows: list
     conn.commit()
 
 
+def ensure_emitents_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.EMITENTS_TABLE_NAME}" (
+            "INN" TEXT PRIMARY KEY,
+            "EMITENTNAME" TEXT NOT NULL,
+            "Scoring" TEXT,
+            "DateScoring" TEXT
+        )
+        '''
+    )
+    conn.commit()
+
+
+def sync_emitents_from_rates(conn: sqlite3.Connection, logger: logging.Logger) -> int:
+    cursor = conn.execute(
+        f'''
+        INSERT INTO "{config.EMITENTS_TABLE_NAME}" ("INN", "EMITENTNAME")
+        SELECT DISTINCT TRIM("INN"), TRIM("EMITENTNAME")
+        FROM "{config.RATES_TABLE_NAME}"
+        WHERE TRIM(COALESCE("INN", '')) <> ''
+          AND TRIM(COALESCE("EMITENTNAME", '')) <> ''
+        ON CONFLICT("INN") DO UPDATE SET
+            "EMITENTNAME" = excluded."EMITENTNAME"
+        '''
+    )
+    conn.commit()
+    affected = cursor.rowcount if cursor.rowcount is not None else 0
+    logger.info("Синхронизация эмитентов из rates завершена. Затронуто строк: %s", affected)
+    return max(affected, 0)
+
+
+def pull_scoring_from_excel(conn: sqlite3.Connection, logger: logging.Logger, today_str: str) -> int:
+    excel_path = config.BASE_DIR / config.EMITENTS_XLSX_FILENAME
+    if not excel_path.exists():
+        logger.info("Файл витрины %s пока отсутствует — перенос оценок из Excel пропущен.", excel_path)
+        return 0
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(excel_path)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return 0
+
+    headers = [str(cell).strip() if cell is not None else "" for cell in rows[0]]
+    required = {"INN", "Scoring", "DateScoring"}
+    if not required.issubset(set(headers)):
+        logger.warning("В %s не найдены обязательные колонки INN/Scoring/DateScoring.", excel_path)
+        return 0
+
+    inn_idx = headers.index("INN")
+    scoring_idx = headers.index("Scoring")
+    date_idx = headers.index("DateScoring")
+
+    updates: list[tuple[str | None, str | None, str]] = []
+    for row in rows[1:]:
+        inn = str(row[inn_idx]).strip() if inn_idx < len(row) and row[inn_idx] is not None else ""
+        if not inn:
+            continue
+        scoring_val = ""
+        if scoring_idx < len(row) and row[scoring_idx] is not None:
+            scoring_val = str(row[scoring_idx]).strip()
+        date_val = ""
+        if date_idx < len(row) and row[date_idx] is not None:
+            date_val = str(row[date_idx]).strip()
+
+        scoring_db = scoring_val or None
+        date_db = date_val or (today_str if scoring_db else None)
+        updates.append((scoring_db, date_db, inn))
+
+    if not updates:
+        return 0
+
+    conn.executemany(
+        f'''
+        UPDATE "{config.EMITENTS_TABLE_NAME}"
+        SET "Scoring" = ?,
+            "DateScoring" = ?
+        WHERE "INN" = ?
+        ''',
+        updates,
+    )
+    conn.commit()
+    logger.info("Перенос ручных Scoring из Excel в SQL: обработано строк=%s", len(updates))
+    return len(updates)
+
+
+def ensure_scoring_dates(conn: sqlite3.Connection, logger: logging.Logger, today_str: str) -> int:
+    cursor = conn.execute(
+        f'''
+        UPDATE "{config.EMITENTS_TABLE_NAME}"
+        SET "DateScoring" = ?
+        WHERE TRIM(COALESCE("Scoring", '')) <> ''
+          AND TRIM(COALESCE("DateScoring", '')) = ''
+        ''',
+        (today_str,),
+    )
+    conn.commit()
+    fixed = cursor.rowcount if cursor.rowcount is not None else 0
+    logger.info("Автозаполнение DateScoring выполнено. Добавлено дат: %s", fixed)
+    return max(fixed, 0)
+
+
+def export_emitents_excel(conn: sqlite3.Connection) -> int:
+    cursor = conn.execute(
+        f'''
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring"
+        FROM "{config.EMITENTS_TABLE_NAME}"
+        ORDER BY "EMITENTNAME", "INN"
+        '''
+    )
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "emitents"
+    ws.append(headers)
+
+    for row in rows:
+        ws.append(list(row))
+
+    header_fill = PatternFill(fill_type="solid", fgColor=config.EMITENTS_HEADER_FILL_COLOR)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+
+    ws.auto_filter.ref = ws.dimensions
+    ws.freeze_panes = "A2"
+
+    for column_cells in ws.columns:
+        max_len = 0
+        column_letter = column_cells[0].column_letter
+        for cell in column_cells:
+            value = "" if cell.value is None else str(cell.value)
+            max_len = max(max_len, len(value))
+        ws.column_dimensions[column_letter].width = min(max_len + 2, 80)
+
+    excel_path = config.BASE_DIR / config.EMITENTS_XLSX_FILENAME
+    wb.save(excel_path)
+    return len(rows)
+
+
+def export_emitents_snapshot(conn: sqlite3.Connection) -> int:
+    cursor = conn.execute(
+        f'''
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring"
+        FROM "{config.EMITENTS_TABLE_NAME}"
+        ORDER BY RANDOM()
+        LIMIT 5
+        '''
+    )
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "emitents_snapshot"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / config.EMITENTS_SNAPSHOT_FILENAME
+    wb.save(snapshot_path)
+    return len(rows)
+
+
 def save_text_file(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
@@ -244,6 +414,7 @@ def main() -> None:
             pbar.set_description("Подготовка БД")
             with connect_db(db_path) as conn:
                 init_meta_table(conn)
+                ensure_emitents_table(conn)
             pbar.update(1)
         stage_times["Этап 1: Подготовка окружения"] = perf_counter() - s
 
@@ -272,6 +443,33 @@ def main() -> None:
             logger.info("Сформирован Excel-срез: строк=%s", count)
             pbar.update(1)
         stage_times["Этап 3: Формирование Excel-среза"] = perf_counter() - s
+
+        print("Этап 4: Витрина эмитентов (SQL + Excel)")
+        s = perf_counter()
+        with progress(total=5, desc="Emitents", unit="шаг") as pbar:
+            today_str = datetime.now().strftime(config.DATE_SCORING_FORMAT)
+            with connect_db(db_path) as conn:
+                ensure_emitents_table(conn)
+                pulled = pull_scoring_from_excel(conn, logger, today_str)
+                pbar.update(1)
+                synced = sync_emitents_from_rates(conn, logger)
+                pbar.update(1)
+                dates_fixed = ensure_scoring_dates(conn, logger, today_str)
+                pbar.update(1)
+                emitents_count = export_emitents_excel(conn)
+                pbar.update(1)
+                emitents_snapshot = export_emitents_snapshot(conn)
+                pbar.update(1)
+
+            logger.info(
+                "Витрина эмитентов: перенос из Excel=%s, upsert из rates=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
+                pulled,
+                synced,
+                dates_fixed,
+                emitents_count,
+                emitents_snapshot,
+            )
+        stage_times["Этап 4: Витрина эмитентов (SQL + Excel)"] = perf_counter() - s
 
         print("=====\nГотово")
     except Exception as exc:
