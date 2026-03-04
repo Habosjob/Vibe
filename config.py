@@ -83,6 +83,11 @@ EMITENTS_XLSX_FILENAME = "Emitents.xlsx"
 # По умолчанию: светло-голубой.
 EMITENTS_HEADER_FILL_COLOR = "FFD9E1F2"
 
+# Допустимые значения для колонки Scoring в витрине Emitents.xlsx.
+# Значение: кортеж строк, которые можно выбрать из выпадающего списка.
+# По умолчанию: ("Red", "Yellow", "Green").
+SCORING_ALLOWED_VALUES = ("Red", "Yellow", "Green")
+
 # Формат даты для автоматического заполнения DateScoring.
 # По умолчанию: ISO-формат YYYY-MM-DD.
 DATE_SCORING_FORMAT = "%Y-%m-%d"
