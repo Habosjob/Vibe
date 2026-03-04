@@ -633,6 +633,29 @@ def export_emitents_snapshot(conn: sqlite3.Connection) -> int:
     return len(rows)
 
 
+def export_nra_snapshot(conn: sqlite3.Connection) -> int:
+    query = f'''
+    SELECT "organization_name", "inn", "press_release_date", "rating", "rating_status", "forecast"
+    FROM "{config.NRA_LATEST_TABLE_NAME}"
+    ORDER BY RANDOM()
+    LIMIT 5
+    '''
+    cursor = conn.execute(query)
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "nra_snapshot"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / config.NRA_SNAPSHOT_FILENAME
+    wb.save(snapshot_path)
+    return len(rows)
+
+
 def save_text_file(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
@@ -702,7 +725,7 @@ def main() -> None:
     started = perf_counter()
 
     db_path = config.DB_DIR / config.DB_FILENAME
-    nra_db_path = config.DB_DIR / config.NRA_DB_FILENAME
+    ratings_db_path = config.DB_DIR / config.RAITINGS_DB_FILENAME
 
     try:
         print("=====\nЭтап 1: Подготовка окружения")
@@ -745,19 +768,22 @@ def main() -> None:
 
         print("Этап 4: Рейтинги НРА (Excel + отдельная SQLite)")
         s = perf_counter()
-        with progress(total=3, desc="NRA", unit="шаг") as pbar:
+        with progress(total=4, desc="NRA", unit="шаг") as pbar:
             now_utc = datetime.now(timezone.utc)
-            with connect_db(nra_db_path) as nra_conn:
+            with connect_db(ratings_db_path) as nra_conn:
                 init_meta_table(nra_conn)
                 ensure_nra_tables(nra_conn)
                 nra_refreshed, nra_rows = refresh_nra_data_if_needed(nra_conn, logger, now_utc)
+                nra_snapshot_rows = export_nra_snapshot(nra_conn)
             pbar.update(1)
             pbar.set_description("Фиксация результата")
             logger.info(
-                "НРА: режим=%s, строк в источнике=%s",
+                "НРА: режим=%s, строк в источнике=%s, строк в snapshot=%s",
                 "обновлено из сети" if nra_refreshed else "использован локальный кэш",
                 nra_rows,
+                nra_snapshot_rows,
             )
+            pbar.update(1)
             pbar.update(1)
             pbar.update(1)
         stage_times["Этап 4: Рейтинги НРА (Excel + отдельная SQLite)"] = perf_counter() - s
@@ -772,7 +798,7 @@ def main() -> None:
                 pbar.update(1)
                 synced = sync_emitents_from_rates(conn, logger)
                 pbar.update(1)
-                with connect_db(nra_db_path) as nra_conn:
+                with connect_db(ratings_db_path) as nra_conn:
                     nra_synced = sync_nra_rate_to_emitents(conn, nra_conn, logger)
                 pbar.update(1)
                 dates_fixed = ensure_scoring_dates(conn, logger, today_str)
