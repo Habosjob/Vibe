@@ -78,6 +78,7 @@ python main.py
 - Таблица: `acra_ratings`.
 - Поля записи: `issuer_url`, `issuer_name`, `rating`, `forecast`, `rating_date`, `inn`, `loaded_at_utc`.
 - Если ссылка известна и ИНН по ней уже есть в БД, карточка эмитента не парсится повторно.
+- Если в локальном `raw/acra_dump/issuers_list.html` есть прогнозы, они используются для backfill пустого `forecast` в SQLite без повторной загрузки сайта.
 - Для нестабильных соединений используются ретраи `goto` и "человеческие" паузы между действиями.
 - Дополнительно формируются дампы: `raw/acra_dump/issuers_list.html`, `raw/acra_dump/issuers_list.mhtml`, карточки в `raw/acra_dump/issuers/`, прогресс в `raw/acra_dump/progress.jsonl`.
 

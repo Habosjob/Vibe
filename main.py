@@ -509,6 +509,45 @@ def should_refresh_acra(conn: sqlite3.Connection, now_utc: datetime) -> bool:
     return now_utc - last_refresh >= timedelta(hours=config.ACRA_CACHE_TTL_HOURS)
 
 
+def backfill_acra_forecast_from_local_dump(conn: sqlite3.Connection, logger: logging.Logger) -> int:
+    list_dump_path = config.ACRA_DUMP_DIR / config.ACRA_LIST_HTML_FILENAME
+    if not list_dump_path.exists():
+        return 0
+
+    try:
+        html_text = list_dump_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("АКРА backfill прогноза пропущен: не удалось прочитать %s (%s)", list_dump_path, exc)
+        return 0
+
+    parsed_rows = parse_acra_list(html_text)
+    forecast_by_url = {
+        row["issuer_url"]: (row.get("forecast") or "").strip()
+        for row in parsed_rows
+        if (row.get("issuer_url") or "").strip() and (row.get("forecast") or "").strip()
+    }
+    if not forecast_by_url:
+        return 0
+
+    updated = 0
+    for issuer_url, forecast in forecast_by_url.items():
+        cursor = conn.execute(
+            f'''
+            UPDATE "{config.ACRA_TABLE_NAME}"
+            SET "forecast" = ?
+            WHERE "issuer_url" = ? AND TRIM(COALESCE("forecast", '')) = ''
+            ''',
+            (forecast, issuer_url),
+        )
+        if cursor.rowcount and cursor.rowcount > 0:
+            updated += int(cursor.rowcount)
+
+    if updated:
+        conn.commit()
+        logger.info("АКРА backfill прогноза из локального дампа: обновлено строк=%s", updated)
+    return updated
+
+
 def parse_acra_list(html_text: str) -> list[dict[str, str]]:
     soup = BeautifulSoup(html_text, "lxml")
     parsed_rows: list[dict[str, str]] = []
@@ -525,6 +564,19 @@ def parse_acra_list(html_text: str) -> list[dict[str, str]]:
         rating_container = row.select_one('div.emits-row__item[data-type="rate"]')
         rating_raw = rating_container.get_text("\n", strip=True) if rating_container else ""
         rating, forecast = split_acra_rating_and_forecast(rating_raw)
+
+        forecast = ""
+        forecast_container = row.select_one('div.emits-row__item[data-type="forecast"]')
+        if forecast_container:
+            forecast = forecast_container.get_text(" ", strip=True)
+
+        rating_container = row.select_one('div.emits-row__item[data-type="rate"]')
+        rating_raw = rating_container.get_text("\n", strip=True) if rating_container else ""
+        fallback_rating, fallback_forecast = split_acra_rating_and_forecast(rating_raw)
+        if not rating:
+            rating = fallback_rating
+        if not forecast:
+            forecast = fallback_forecast
 
         date_node = row.select_one('div.emits-row__item[data-type="pressRelease"] a')
         date_raw = date_node.get_text(" ", strip=True) if date_node else ""
@@ -544,6 +596,48 @@ def split_acra_rating_and_forecast(raw_value: str) -> tuple[str, str]:
     normalized_lines = [line.strip() for line in re.split(r"[\r\n]+", raw_value or "") if line.strip()]
     if not normalized_lines:
         return "", ""
+<<<<<<< codex/update-a-to-parse-from-html-zb5cdu
+
+    forecast_line = ""
+    rating_line = ""
+
+    for line in normalized_lines:
+        if not forecast_line and is_acra_forecast_value(line):
+            forecast_line = line
+            continue
+        if not rating_line and is_acra_rating_value(line):
+            rating_line = line
+
+    if rating_line:
+        return rating_line, forecast_line
+
+    one_line = normalized_lines[0]
+    match = re.match(r"^(.*?)\s*[;,]\s*([^;,]+)$", one_line)
+    if match:
+        left = match.group(1).strip()
+        right = match.group(2).strip()
+        if is_acra_forecast_value(right):
+            return left, right
+    return one_line, forecast_line
+
+
+def is_acra_rating_value(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return False
+    normalized = text.replace(" ", "")
+    return bool(re.search(r"[A-ZА-Я][+\-]?(?:\([A-ZА-Я]{2}\))", normalized))
+
+
+def is_acra_forecast_value(value: str) -> bool:
+    normalized = (value or "").strip().lower()
+    return normalized in {
+        "стабильный",
+        "позитивный",
+        "негативный",
+        "развивающийся",
+    }
+=======
     if len(normalized_lines) == 1:
         one_line = normalized_lines[0]
         match = re.match(r"^(.*?)\s*[;,]\s*([^;,]+)$", one_line)
@@ -551,6 +645,7 @@ def split_acra_rating_and_forecast(raw_value: str) -> tuple[str, str]:
             return match.group(1).strip(), match.group(2).strip()
         return one_line, ""
     return normalized_lines[0], normalized_lines[1]
+>>>>>>> main
 
 
 def extract_inn_from_acra_card(html_text: str) -> str:
@@ -722,6 +817,7 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
     current = conn.execute(f'SELECT COUNT(*) FROM "{config.ACRA_TABLE_NAME}"').fetchone()
     current_total = int(current[0]) if current else 0
     if not should_refresh_acra(conn, now_utc):
+        backfill_acra_forecast_from_local_dump(conn, logger)
         return False, current_total, 0
 
     inn_cache_by_url = {
@@ -773,6 +869,7 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
         return False, current_total, 0
 
     conn.commit()
+    backfill_acra_forecast_from_local_dump(conn, logger)
     set_meta_value(conn, "acra_last_refresh_utc", now_utc.isoformat())
     set_meta_value(conn, "acra_last_rows_count", str(len(unique_rows)))
     logger.info(
