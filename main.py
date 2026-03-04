@@ -192,13 +192,17 @@ def ensure_emitents_table(conn: sqlite3.Connection) -> None:
             "EMITENTNAME" TEXT NOT NULL,
             "Scoring" TEXT,
             "DateScoring" TEXT,
-            "NRA_Rate" TEXT
+            "NRA_Rate" TEXT,
+            "Acra_Rate" TEXT
         )
         '''
     )
     conn.execute(
         f'ALTER TABLE "{config.EMITENTS_TABLE_NAME}" ADD COLUMN "NRA_Rate" TEXT'
     ) if _column_absent(conn, config.EMITENTS_TABLE_NAME, "NRA_Rate") else None
+    conn.execute(
+        f'ALTER TABLE "{config.EMITENTS_TABLE_NAME}" ADD COLUMN "Acra_Rate" TEXT'
+    ) if _column_absent(conn, config.EMITENTS_TABLE_NAME, "Acra_Rate") else None
     conn.commit()
 
 
@@ -788,6 +792,54 @@ def sync_nra_rate_to_emitents(main_conn: sqlite3.Connection, nra_conn: sqlite3.C
     return len(updates)
 
 
+def sync_acra_rate_to_emitents(main_conn: sqlite3.Connection, ratings_conn: sqlite3.Connection, logger: logging.Logger) -> int:
+    rows = ratings_conn.execute(
+        f'''
+        SELECT src."inn", src."rating"
+        FROM "{config.ACRA_TABLE_NAME}" src
+        JOIN (
+            SELECT "inn", MAX(
+                (CASE
+                    WHEN instr("rating_date", '.') > 0 THEN substr("rating_date", 7, 4) || '-' || substr("rating_date", 4, 2) || '-' || substr("rating_date", 1, 2)
+                    ELSE "rating_date"
+                END) || '|' || "loaded_at_utc"
+            ) AS max_key
+            FROM "{config.ACRA_TABLE_NAME}"
+            WHERE TRIM(COALESCE("inn", '')) <> ''
+            GROUP BY "inn"
+        ) latest ON latest."inn" = src."inn"
+        WHERE
+            (CASE
+                WHEN instr(src."rating_date", '.') > 0 THEN substr(src."rating_date", 7, 4) || '-' || substr(src."rating_date", 4, 2) || '-' || substr(src."rating_date", 1, 2)
+                ELSE src."rating_date"
+            END) || '|' || src."loaded_at_utc" = latest.max_key
+        '''
+    ).fetchall()
+
+    updates: list[tuple[str, str]] = []
+    for inn, rating in rows:
+        rating_text = (rating or "").strip()
+        if not rating_text:
+            continue
+
+        parts = [part.strip() for part in re.split(r"[,;]", rating_text, maxsplit=1) if part.strip()]
+        base_rating = parts[0] if parts else ""
+        forecast = parts[1].lower() if len(parts) > 1 else ""
+        if not base_rating:
+            continue
+
+        rate_for_showcase = f"{base_rating}({forecast})" if forecast else base_rating
+        updates.append((rate_for_showcase, inn.strip()))
+
+    main_conn.executemany(
+        f'UPDATE "{config.EMITENTS_TABLE_NAME}" SET "Acra_Rate" = ? WHERE "INN" = ?',
+        updates,
+    )
+    main_conn.commit()
+    logger.info("Acra_Rate синхронизирован для INN: %s", len(updates))
+    return len(updates)
+
+
 def sync_emitents_from_rates(conn: sqlite3.Connection, logger: logging.Logger) -> int:
     cursor = conn.execute(
         f'''
@@ -889,7 +941,7 @@ def ensure_scoring_dates(conn: sqlite3.Connection, logger: logging.Logger, today
 def export_emitents_excel(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate"
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate"
         FROM "{config.EMITENTS_TABLE_NAME}"
         ORDER BY "EMITENTNAME", "INN"
         '''
@@ -946,7 +998,7 @@ def export_emitents_excel(conn: sqlite3.Connection) -> int:
 def export_emitents_snapshot(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate"
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate"
         FROM "{config.EMITENTS_TABLE_NAME}"
         ORDER BY RANDOM()
         LIMIT 5
@@ -1170,7 +1222,7 @@ def main() -> None:
 
         print("Этап 5: Витрина эмитентов (SQL + Excel)")
         s = perf_counter()
-        with progress(total=6, desc="Emitents", unit="шаг") as pbar:
+        with progress(total=7, desc="Emitents", unit="шаг") as pbar:
             today_str = datetime.now().strftime(config.DATE_SCORING_FORMAT)
             with connect_db(db_path) as conn:
                 ensure_emitents_table(conn)
@@ -1180,6 +1232,7 @@ def main() -> None:
                 pbar.update(1)
                 with connect_db(ratings_db_path) as nra_conn:
                     nra_synced = sync_nra_rate_to_emitents(conn, nra_conn, logger)
+                    acra_synced = sync_acra_rate_to_emitents(conn, nra_conn, logger)
                 pbar.update(1)
                 dates_fixed = ensure_scoring_dates(conn, logger, today_str)
                 pbar.update(1)
@@ -1189,10 +1242,11 @@ def main() -> None:
                 pbar.update(1)
 
             logger.info(
-                "Витрина эмитентов: перенос из Excel=%s, upsert из rates=%s, NRA_Rate=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
+                "Витрина эмитентов: перенос из Excel=%s, upsert из rates=%s, NRA_Rate=%s, Acra_Rate=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
                 pulled,
                 synced,
                 nra_synced,
+                acra_synced,
                 dates_fixed,
                 emitents_count,
                 emitents_snapshot,
