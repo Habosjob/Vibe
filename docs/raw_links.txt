@@ -12,23 +12,6 @@ https://raw.githubusercontent.com/Habosjob/Vibe/main/main.py
 https://raw.githubusercontent.com/Habosjob/Vibe/main/requirements.txt
 
 ------------------------------------------------------------
-Директория: BaseSnapshots/
-------------------------------------------------------------
-
-https://raw.githubusercontent.com/Habosjob/Vibe/main/BaseSnapshots/.gitkeep
-https://raw.githubusercontent.com/Habosjob/Vibe/main/BaseSnapshots/emitents_snapshot.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/BaseSnapshots/nra_snapshot.xlsx
-https://raw.githubusercontent.com/Habosjob/Vibe/main/BaseSnapshots/rates_snapshot.xlsx
-
-------------------------------------------------------------
-Директория: DB/
-------------------------------------------------------------
-
-https://raw.githubusercontent.com/Habosjob/Vibe/main/DB/.gitkeep
-https://raw.githubusercontent.com/Habosjob/Vibe/main/DB/moex_rates.sqlite3
-https://raw.githubusercontent.com/Habosjob/Vibe/main/DB/raitings.sqlite3
-
-------------------------------------------------------------
 Директория: __pycache__/
 ------------------------------------------------------------
 
