@@ -94,3 +94,34 @@ DATE_SCORING_FORMAT = "%Y-%m-%d"
 
 # Имя Excel-файла снапшота по таблице эмитентов (5 случайных строк).
 EMITENTS_SNAPSHOT_FILENAME = "emitents_snapshot.xlsx"
+
+# URL страницы НРА «Рейтинги», где находится кнопка выгрузки Excel.
+# Значение: строка URL.
+# По умолчанию: публичная страница НРА.
+NRA_RATINGS_PAGE_URL = "https://www.ra-national.ru/ratings/"
+
+# Имя raw-файла НРА в папке /raw.
+# Это оригинальный файл, скачанный по кнопке выгрузки Excel.
+NRA_RAW_FILENAME = "nra_ratings.xlsx"
+
+# Имя файла базы SQLite с рейтингами (отдельная БД от основной).
+NRA_DB_FILENAME = "nra_ratings.sqlite3"
+
+# Имя таблицы НРА c сырыми записями из выгрузки.
+NRA_TABLE_NAME = "nra_ratings"
+
+# Имя таблицы последних уникальных рейтингов НРА по ИНН.
+NRA_LATEST_TABLE_NAME = "nra_latest_by_inn"
+
+# TTL для повторной загрузки Excel НРА.
+# Значение: целое число > 0 (в часах).
+# По умолчанию: 12 часов.
+NRA_CACHE_TTL_HOURS = 12
+
+# HTTP User-Agent для запросов к странице/файлу НРА.
+# По умолчанию: нейтральный desktop User-Agent.
+NRA_REQUEST_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
