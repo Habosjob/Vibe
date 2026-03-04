@@ -114,8 +114,11 @@ NRA_TABLE_NAME = "nra_ratings"
 # Имя таблицы последних уникальных рейтингов НРА по ИНН.
 NRA_LATEST_TABLE_NAME = "nra_latest_by_inn"
 
-# Имя Excel-файла снапшота по последним рейтингам НРА (5 случайных строк).
+# Имя Excel-файла снапшота по последним рейтингам НРА (5 самых свежих строк по дате).
 NRA_SNAPSHOT_FILENAME = "nra_snapshot.xlsx"
+
+# Имя Excel-файла снапшота по рейтингам АКРА (5 самых свежих строк по дате).
+ACRA_SNAPSHOT_FILENAME = "acra_snapshot.xlsx"
 
 # TTL для повторной загрузки Excel НРА.
 # Значение: целое число > 0 (в часах).
@@ -129,3 +132,21 @@ NRA_REQUEST_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+# URL списка рейтингов АКРА (эмитенты).
+# Значение: строка URL.
+# По умолчанию: страница со всеми эмитентами (count=1000).
+ACRA_RATINGS_LIST_URL = (
+    "https://www.acra-ratings.ru/ratings/issuers/"
+    "?text=&sectors[]=&activities[]=&countries[]=&forecasts[]=&on_revision=0"
+    "&rating_scale=0&rate_from=0&rate_to=0&page=1&sort=&count=1000&"
+)
+
+# Имя таблицы АКРА с инкрементальной историей рейтингов.
+# Ключ уникальности: (issuer_url, rating_date, rating).
+ACRA_TABLE_NAME = "acra_ratings"
+
+# TTL для первого этапа АКРА (парсинг списка рейтингов).
+# Значение: целое число > 0 (в часах).
+# По умолчанию: 12 часов.
+ACRA_CACHE_TTL_HOURS = 12
