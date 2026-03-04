@@ -104,14 +104,18 @@ NRA_RATINGS_PAGE_URL = "https://www.ra-national.ru/ratings/"
 # Это оригинальный файл, скачанный по кнопке выгрузки Excel.
 NRA_RAW_FILENAME = "nra_ratings.xlsx"
 
-# Имя файла базы SQLite с рейтингами (отдельная БД от основной).
-NRA_DB_FILENAME = "nra_ratings.sqlite3"
+# Имя файла общей базы SQLite с рейтингами агентств (отдельная БД от основной).
+# По умолчанию: raitings.sqlite3 (единая БД под несколько рейтинговых агентств).
+RAITINGS_DB_FILENAME = "raitings.sqlite3"
 
 # Имя таблицы НРА c сырыми записями из выгрузки.
 NRA_TABLE_NAME = "nra_ratings"
 
 # Имя таблицы последних уникальных рейтингов НРА по ИНН.
 NRA_LATEST_TABLE_NAME = "nra_latest_by_inn"
+
+# Имя Excel-файла снапшота по последним рейтингам НРА (5 случайных строк).
+NRA_SNAPSHOT_FILENAME = "nra_snapshot.xlsx"
 
 # TTL для повторной загрузки Excel НРА.
 # Значение: целое число > 0 (в часах).

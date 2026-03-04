@@ -9,7 +9,7 @@
 4. Загружает Excel-выгрузку рейтингов НРА со страницы `https://www.ra-national.ru/ratings/`:
    - автоматически находит ссылку на `.xlsx/.xls` на странице,
    - сохраняет оригинальный файл в `raw/nra_ratings.xlsx`,
-   - обновляет отдельную SQLite-базу `DB/nra_ratings.sqlite3`,
+   - обновляет отдельную SQLite-базу `DB/raitings.sqlite3`,
    - работает с TTL 12 часов (настраивается `NRA_CACHE_TTL_HOURS`).
 5. В отдельной БД НРА:
    - хранит сырые строки в `nra_ratings` инкрементально (upsert по `id`),
@@ -35,7 +35,8 @@
    - жесткая проверка `Scoring` через выпадающий список (`Red`, `Yellow`, `Green`).
 11. Создает снапшоты в `BaseSnapshots`:
    - `rates_snapshot.xlsx` (5 случайных строк с уникальными `SECID`),
-   - `emitents_snapshot.xlsx` (5 случайных строк из `emitents`).
+   - `emitents_snapshot.xlsx` (5 случайных строк из `emitents`),
+   - `nra_snapshot.xlsx` (5 случайных строк из `nra_latest_by_inn`).
 12. Пишет технический лог в `logs/main.log` (перезаписывается каждый запуск).
 
 ## Запуск
@@ -53,7 +54,7 @@ python main.py
 - Источник: страница `NRA_RATINGS_PAGE_URL`.
 - TTL загрузки: `NRA_CACHE_TTL_HOURS` (по умолчанию 12 часов).
 - Raw-файл: `raw/nra_ratings.xlsx`.
-- Отдельная БД: `DB/nra_ratings.sqlite3`.
+- Отдельная БД: `DB/raitings.sqlite3`.
 - Таблица для витрины НРА: `nra_latest_by_inn`.
 - Колонки в витрине НРА:
   - `Название организации`,
@@ -82,7 +83,7 @@ python main.py
 - `NRA_CACHE_TTL_HOURS` — срок жизни кэша НРА в часах.
 - `REQUEST_TIMEOUT_SECONDS` — таймаут HTTP.
 - `NRA_RATINGS_PAGE_URL` — страница НРА с кнопкой выгрузки.
-- `NRA_DB_FILENAME` — файл отдельной SQLite-базы НРА.
+- `RAITINGS_DB_FILENAME` — файл общей SQLite-базы рейтинговых агентств.
 - `EMITENTS_TABLE_NAME` — таблица витрины эмитентов в SQLite.
 - `EMITENTS_XLSX_FILENAME` — имя Excel-витрины в корне проекта.
 - `SCORING_ALLOWED_VALUES` — разрешенные значения в выпадающем списке `Scoring`.
