@@ -3043,19 +3043,27 @@ def _is_other_coupon_type(raw_value: object) -> bool:
 def parse_floater_terms(formula_raw: object) -> tuple[str, float | None, float] | None:
     formula = str(formula_raw or "")
     normalized = formula.casefold().replace("ё", "е")
-    stripped = re.sub(r"(max|min)\s*\([^\)]*\)", " ", normalized)
+    normalized = normalized.translate(str.maketrans({
+        "к": "k",
+        "с": "c",
+        "К": "k",
+        "С": "c",
+    }))
+    stripped = re.sub(r"[∑Σ?]+", " ", normalized)
+    stripped = re.sub(r"(max|min|avg|average)\s*\([^\)]*\)", " ", stripped)
     stripped = re.sub(r"не\s+более[^,;]*|не\s+менее[^,;]*|cap\w*[^,;]*|floor\w*[^,;]*", " ", stripped)
+    stripped = " ".join(stripped.split())
 
     index_type = ""
     tenor_years: float | None = None
 
-    zcyc_match = re.search(r"(?:g\s*[- ]?curve|zcyc)\s*([0-9]+(?:[\.,][0-9]+)?)\s*y", stripped)
+    zcyc_match = re.search(r"(?:g\s*[- ]?curve|zcyc)\s*([0-9]+(?:[\.,][0-9]+)?)\s*(?:y|лет|год(?:а|ов)?)", stripped)
     if zcyc_match:
         index_type = "zcyc"
         tenor_years = float(zcyc_match.group(1).replace(",", "."))
     elif "ruonia" in stripped:
         index_type = "ruonia"
-    elif "ключев" in stripped or re.search(r"\bкс\b", stripped):
+    elif "ключев" in stripped or re.search(r"\bkc\b", stripped):
         index_type = "key"
 
     if not index_type:
@@ -3085,12 +3093,48 @@ def _fetch_cbr_last_numeric(url: str) -> float | None:
     session = create_resilient_http_session(pool_size=4)
     response = session.get(url, timeout=30)
     response.raise_for_status()
-    soup = BeautifulSoup(response.text, "lxml")
+    parser = etree.HTMLParser(recover=True)
+    root = etree.HTML(response.text, parser=parser)
+    if root is None:
+        return None
+
+    table_rows = root.xpath("//table//tr[td]")
+    if "keyrate" in url.casefold():
+        latest_rate: float | None = None
+        latest_dt: datetime | None = None
+        for row in table_rows:
+            cells = [" ".join("".join(x.itertext()).split()) for x in row.xpath("./td")]
+            if len(cells) < 2:
+                continue
+            row_dt = _parse_bond_date(cells[0])
+            rate = _parse_decimal_value(cells[1])
+            if row_dt is None or rate is None:
+                continue
+            if latest_dt is None or row_dt > latest_dt:
+                latest_dt = row_dt
+                latest_rate = rate
+        return latest_rate
+
+    if "ruonia" in url.casefold():
+        for row in table_rows:
+            row_text = [" ".join("".join(x.itertext()).split()) for x in row.xpath("./td")]
+            if not row_text:
+                continue
+            label = _normalize_label(row_text[0])
+            if "ruonia" not in label or "%" not in row_text[0]:
+                continue
+            numeric_values = [_parse_decimal_value(cell) for cell in row_text[1:]]
+            numeric_values = [val for val in numeric_values if val is not None]
+            if numeric_values:
+                return float(numeric_values[-1])
+        return None
+
     values: list[float] = []
-    for cell in soup.select("table td"):
-        parsed = _parse_decimal_value(" ".join(cell.stripped_strings))
-        if parsed is not None:
-            values.append(parsed)
+    for row in table_rows:
+        for cell in row.xpath("./td"):
+            parsed = _parse_decimal_value(" ".join(cell.itertext()))
+            if parsed is not None:
+                values.append(parsed)
     return values[-1] if values else None
 
 
@@ -3098,18 +3142,37 @@ def _fetch_cbr_zcyc_curve() -> dict[float, float]:
     session = create_resilient_http_session(pool_size=4)
     response = session.get(config.CBR_ZCYC_URL, timeout=30)
     response.raise_for_status()
-    soup = BeautifulSoup(response.text, "lxml")
+    parser = etree.HTMLParser(recover=True)
+    root = etree.HTML(response.text, parser=parser)
     curve: dict[float, float] = {}
-    for row in soup.select("table tr"):
-        text = " ".join(row.stripped_strings).casefold()
-        match = re.search(r"([0-9]+(?:[\.,][0-9]+)?)\s*y", text)
-        if not match:
+    if root is None:
+        return curve
+
+    rows = root.xpath("//table//tr")
+    tenors: list[float] = []
+    for row in rows:
+        cells = [" ".join("".join(cell.itertext()).split()) for cell in row.xpath("./th|./td")]
+        values = [_parse_decimal_value(value) for value in cells]
+        numeric_values = [value for value in values if value is not None]
+        if len(cells) >= 12 and len(numeric_values) >= 11 and any("0,25" in c or "0.25" in c for c in cells):
+            tenors = [float(v) for v in numeric_values]
+            break
+
+    if not tenors:
+        tenors = [0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0]
+
+    for row in rows:
+        cells = [" ".join("".join(cell.itertext()).split()) for cell in row.xpath("./td")]
+        if len(cells) < len(tenors) + 1:
             continue
-        tenor = float(match.group(1).replace(",", "."))
-        nums = [_parse_decimal_value(part) for part in row.stripped_strings]
-        nums = [num for num in nums if num is not None]
-        if nums:
-            curve[tenor] = float(nums[-1])
+        row_date = _parse_bond_date(cells[0])
+        if row_date is None:
+            continue
+        yields = [_parse_decimal_value(cell) for cell in cells[1 : len(tenors) + 1]]
+        if any(val is None for val in yields):
+            continue
+        curve = {tenor: float(yld or 0.0) for tenor, yld in zip(tenors, yields)}
+        break
     return curve
 
 
@@ -3179,6 +3242,21 @@ def _pick_zcyc_point(zcyc: dict[object, object], tenor_years: float | None) -> f
         normalized[float(key_num)] = float(val_num)
     if not normalized:
         return None
+    points = sorted(normalized.items())
+    if tenor_years <= points[0][0]:
+        return points[0][1]
+    if tenor_years >= points[-1][0]:
+        return points[-1][1]
+    for idx in range(1, len(points)):
+        left_tenor, left_yield = points[idx - 1]
+        right_tenor, right_yield = points[idx]
+        if abs(left_tenor - tenor_years) < 1e-9:
+            return left_yield
+        if abs(right_tenor - tenor_years) < 1e-9:
+            return right_yield
+        if left_tenor < tenor_years < right_tenor:
+            alpha = (tenor_years - left_tenor) / (right_tenor - left_tenor)
+            return left_yield + alpha * (right_yield - left_yield)
     nearest_key = min(normalized.keys(), key=lambda k: abs(k - tenor_years))
     return normalized.get(nearest_key)
 
@@ -3187,12 +3265,14 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
     terms = parse_floater_terms(coupon_formula)
     if not terms:
         logger.info("Floater YTM skipped SECID=%s: parse formula fail", secid)
+        _write_ytm_debug_record({"secid": secid, "coupon_formula": str(coupon_formula or ""), "reason": "parse_fail"})
         return ""
 
     index_type, tenor_years, premium = terms
     key_current = _parse_decimal_value(cbr_data.get("key_rate"))
     if key_current is None:
         logger.info("Floater YTM skipped SECID=%s: key rate unavailable", secid)
+        _write_ytm_debug_record({"secid": secid, "coupon_formula": str(coupon_formula or ""), "reason": "no_keyrate"})
         return ""
 
     if index_type == "key":
@@ -3201,6 +3281,7 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
         idx = _parse_decimal_value(cbr_data.get("ruonia"))
         if idx is None:
             logger.info("Floater YTM skipped SECID=%s: RUONIA unavailable", secid)
+            _write_ytm_debug_record({"secid": secid, "coupon_formula": str(coupon_formula or ""), "reason": "no_ruonia"})
             return ""
         spread_to_key = key_current - idx
     else:
@@ -3208,6 +3289,7 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
         idx = _pick_zcyc_point(zcyc, tenor_years)
         if idx is None:
             logger.info("Floater YTM skipped SECID=%s: G-Curve unavailable", secid)
+            _write_ytm_debug_record({"secid": secid, "coupon_formula": str(coupon_formula or ""), "reason": "no_zcyc"})
             return ""
         spread_to_key = key_current - idx
 
@@ -3216,6 +3298,7 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
     facevalue_value = _parse_decimal_value(facevalue)
     target_date = _parse_bond_date(str(offerdate or "")) or _parse_bond_date(str(matdate or ""))
     if price is None or coupon_freq is None or facevalue_value is None or target_date is None:
+        _write_ytm_debug_record({"secid": secid, "coupon_formula": str(coupon_formula or ""), "reason": "no_price_or_dates"})
         return ""
 
     nkd_value, _ = _resolve_nkd_for_dirty_price(
@@ -3231,6 +3314,7 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
     coupon_dates = _build_coupon_dates(target_date=target_date, coupon_frequency=coupon_freq, coupon_period_days=coupon_period_days, next_coupon_date=next_coupon_date)
     if not coupon_dates:
         logger.info("Floater YTM skipped SECID=%s: no coupon periods", secid)
+        _write_ytm_debug_record({"secid": secid, "coupon_formula": str(coupon_formula or ""), "reason": "no_dates"})
         return ""
 
     valuation_date = datetime.now().date()
@@ -3554,7 +3638,15 @@ def parse_corpbonds_page_fields(raw_html: str) -> dict[str, str]:
     if root is None:
         return parsed
 
-    for row in root.xpath("//tr[td]"):
+    target_tables = root.xpath(
+        "//h1[contains(translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'доходность')]/following::table[1]"
+        " | //*[contains(translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'купонные выплаты')]/following::table[1]"
+        " | //*[contains(translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'доходность и цена')]/following::table[1]"
+    )
+    if not target_tables:
+        target_tables = root.xpath("//table")
+
+    for row in [r for table in target_tables for r in table.xpath('.//tr[td]')]:
         tds = row.xpath("./td")
         if len(tds) < 2:
             continue
@@ -4500,20 +4592,34 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
             )
 
             ytm_num = _parse_decimal_value(ytm_value)
-            if (not ytm_value) or (ytm_num is not None and (ytm_num < -5 or ytm_num > 200)):
+            if (not ytm_value) or (ytm_num is not None and (ytm_num < -10 or ytm_num > 200)):
+                price_used = _pick_price_for_ytm(row[25], row[26], row[27], row[28])
+                nkd_used = _parse_decimal_value(row[17]) if _parse_decimal_value(row[17]) is not None else _parse_decimal_value(row[18])
+                facevalue_value = _parse_decimal_value(row[22])
+                dirty_price = None
+                floater_terms = parse_floater_terms(row[21]) if _is_floater_coupon_type(coupon_type) else None
+                if price_used is not None and facevalue_value is not None:
+                    dirty_price = _normalize_purchase_price(price_used, facevalue_value, nkd_used)
                 _write_ytm_debug_record(
                     {
                         "secid": secid,
                         "isin": str(row[1] or "").strip(),
+                        "coupon_formula": str(row[21] or "").strip(),
                         "faceunit": str(row[23] or "").strip(),
-                        "facevalue": _parse_decimal_value(row[22]),
-                        "price_used": _pick_price_for_ytm(row[25], row[26], row[27], row[28]),
-                        "nkd_used": str(row[17] or row[18] or "").strip(),
-                        "dirty_price": None,
+                        "facevalue": facevalue_value,
+                        "price_used": price_used,
+                        "nkd_used": nkd_used,
+                        "dirty_price": dirty_price,
                         "coupon_type": str(coupon_type or ""),
                         "coupon_rate": _parse_decimal_value(row[19]),
                         "freq": _parse_decimal_value(row[20]),
                         "target_date": offer_date or _normalize_date_to_iso(row[11]),
+                        "cbr_snapshot": {
+                            "key_rate": cbr_data.get("key_rate"),
+                            "ruonia": cbr_data.get("ruonia"),
+                            "zcyc_tenor_used": floater_terms[1] if floater_terms else None,
+                            "zcyc_yield_used": _pick_zcyc_point(cbr_data.get("zcyc") if isinstance(cbr_data.get("zcyc"), dict) else {}, floater_terms[1]) if floater_terms else None,
+                        },
                         "result_yield": ytm_num,
                         "reason": "empty" if not ytm_value else "anomaly",
                     }
