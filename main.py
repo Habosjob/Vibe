@@ -2247,11 +2247,14 @@ def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
 def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, scoring: str) -> int:
     ensure_merge_table(conn, table_name)
 
-    moex_select = [f'm."{column}"' for column in MERGE_MOEX_COLUMNS]
-    dohod_select = [f'd."{column}"' for column in MERGE_DOHOD_COLUMNS]
-    selected_columns = moex_select + dohod_select
     insert_columns = [f'"{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"]
     insert_columns = ['"ISIN"'] + insert_columns + [f'"{column}"' for column in MERGE_DOHOD_COLUMNS]
+
+    selected_columns = [f'm."ISIN"']
+    selected_columns.extend(
+        f'm."{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"
+    )
+    selected_columns.extend(f'd."{column}"' for column in MERGE_DOHOD_COLUMNS)
     placeholders = ", ".join(["?"] * len(insert_columns))
 
     rows = conn.execute(
