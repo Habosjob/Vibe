@@ -2528,6 +2528,16 @@ def _parse_decimal_value(raw_value: object) -> float | None:
         return None
 
 
+def _screener_sort_key(row_values: tuple[object, ...]) -> tuple[int, datetime, str, str]:
+    amort_raw = row_values[6] if len(row_values) > 6 else None
+    amort_dt = _parse_bond_date(None if amort_raw is None else str(amort_raw))
+    empty_amort = 1 if amort_dt is None else 0
+    fallback_dt = datetime.max if amort_dt is None else amort_dt
+    name = str(row_values[1] or "").strip() if len(row_values) > 1 else ""
+    isin = str(row_values[0] or "").strip() if len(row_values) > 0 else ""
+    return (empty_amort, fallback_dt, name, isin)
+
+
 def _prepare_screener_export_row(headers: list[str], row_values: list[object]) -> list[object]:
     date_columns = {"AmortStarrtDate", "MATDATE", "Offerdate", "Ближайший купон"}
 
@@ -3530,10 +3540,11 @@ def export_screener_excel(conn: sqlite3.Connection) -> dict[str, int]:
             SELECT {", ".join(f'"{name}"' for name, _ in SCREENER_EXPORT_COLUMNS)}
             FROM "{SCREENER_TABLE_NAME}"
             WHERE "SourceList" = ?
-            ORDER BY "Название", "ISIN"
             ''',
             (sheet_name,),
         ).fetchall()
+        if getattr(config, "SCREENER_SORT_BY_AMORT_START_DATE", True):
+            rows = sorted(rows, key=_screener_sort_key)
         for row in rows:
             row_values = list(row)
             row_values[2] = _symbolize_boolean(row_values[2])
