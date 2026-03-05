@@ -556,6 +556,32 @@ def parse_dohod_excel(content: bytes) -> tuple[list[str], list[dict[str, str]]]:
     return headers, parsed_rows
 
 
+def _normalize_isin(value: str | None) -> str:
+    return str(value or "").strip().upper()
+
+
+def _deduplicate_dohod_rows(rows: list[dict[str, str]], headers: list[str]) -> list[dict[str, str]]:
+    """Схлопывает дубли по ISIN, объединяя непустые значения по колонкам."""
+    normalized_headers = [header for header in headers if header]
+    grouped: dict[str, dict[str, str]] = {}
+
+    for row in rows:
+        isin = _normalize_isin(row.get("ISIN", ""))
+        if not isin:
+            continue
+
+        target = grouped.setdefault(isin, {"ISIN": isin})
+        for header in normalized_headers:
+            if header == "ISIN":
+                continue
+            current_value = str(target.get(header, "")).strip()
+            next_value = str(row.get(header, "")).strip()
+            if not current_value and next_value:
+                target[header] = next_value
+
+    return list(grouped.values())
+
+
 def should_refresh_dohod(conn: sqlite3.Connection, now_utc: datetime) -> bool:
     last_refresh_raw = get_meta_value(conn, "dohod_last_refresh_utc")
     rows_count_raw = get_meta_value(conn, "dohod_last_rows_count")
@@ -2079,6 +2105,7 @@ def refresh_dohod_data_if_needed(conn: sqlite3.Connection, logger: logging.Logge
     raw_path.write_bytes(content)
 
     headers, rows = parse_dohod_excel(content)
+    deduplicated_rows = _deduplicate_dohod_rows(rows, headers)
     ensure_dohod_table(conn, headers)
     ensure_table_has_columns(conn, config.DOHOD_TABLE_NAME, headers)
 
@@ -2087,7 +2114,12 @@ def refresh_dohod_data_if_needed(conn: sqlite3.Connection, logger: logging.Logge
     placeholders = ", ".join(["?"] * (len(insert_columns) + 1))
     update_cols = [column for column in insert_columns if column != "ISIN"]
     update_expr = ", ".join([f'"{column}"=excluded."{column}"' for column in update_cols] + ['"loaded_at_utc"=excluded."loaded_at_utc"'])
-    payload = [tuple((row.get(column, "") for column in insert_columns)) + (now_utc.isoformat(),) for row in rows if row.get("ISIN", "")]
+    payload = [
+        tuple(((_normalize_isin(row.get(column, "")) if column == "ISIN" else row.get(column, "")) for column in insert_columns))
+        + (now_utc.isoformat(),)
+        for row in deduplicated_rows
+        if _normalize_isin(row.get("ISIN", ""))
+    ]
 
     conn.execute("BEGIN")
     conn.executemany(
@@ -2103,7 +2135,12 @@ def refresh_dohod_data_if_needed(conn: sqlite3.Connection, logger: logging.Logge
     set_meta_value(conn, "dohod_last_refresh_utc", now_utc.isoformat())
     set_meta_value(conn, "dohod_last_rows_count", str(len(payload)))
     set_meta_value(conn, "dohod_last_headers", "|".join(insert_columns))
-    logger.info("Доходъ: данные обновлены, строк=%s, колонок=%s", len(payload), len(insert_columns))
+    logger.info(
+        "Доходъ: данные обновлены, исходных строк=%s, после дедупликации по ISIN=%s, колонок=%s",
+        len(rows),
+        len(payload),
+        len(insert_columns),
+    )
     return True, len(payload)
 
 
