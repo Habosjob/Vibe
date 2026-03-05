@@ -690,6 +690,18 @@ def get_emitents_inns_for_raex(main_db_path: Path) -> list[str]:
     return [row[0] for row in rows if row and row[0]]
 
 
+def get_raex_company_urls_by_inn(conn: sqlite3.Connection) -> dict[str, str]:
+    rows = conn.execute(
+        f'''
+        SELECT "inn", "company_url"
+        FROM "{config.RAEX_LATEST_TABLE_NAME}"
+        WHERE TRIM(COALESCE("inn", '')) <> ''
+          AND TRIM(COALESCE("company_url", '')) <> ''
+        '''
+    ).fetchall()
+    return {str(inn).strip(): str(company_url).strip() for inn, company_url in rows if inn and company_url}
+
+
 def _extract_raex_csrf_token(html_text: str) -> str:
     soup = BeautifulSoup(html_text, "lxml")
     token_input = soup.select_one('input[name="CSRFToken"]')
@@ -760,9 +772,28 @@ def parse_raex_company_page(html_text: str) -> dict[str, str] | None:
     return None
 
 
-def fetch_raex_rating_by_inn(inn: str, timeout_seconds: int | float) -> dict[str, str] | None:
+def fetch_raex_rating_by_inn(
+    inn: str,
+    timeout_seconds: int | float,
+    known_company_url: str = "",
+) -> dict[str, str] | None:
     session = requests.Session()
     session.headers.update({"User-Agent": config.NRA_REQUEST_USER_AGENT})
+
+    company_url = (known_company_url or "").strip()
+    if company_url:
+        company_response = session.get(company_url, timeout=timeout_seconds)
+        company_response.raise_for_status()
+        parsed = parse_raex_company_page(company_response.text)
+        if parsed:
+            return {
+                "inn": inn,
+                "company_name": "",
+                "rating": parsed["rating"],
+                "forecast": parsed["forecast"],
+                "rating_date": parsed["rating_date"],
+                "company_url": company_url,
+            }
 
     search_page = session.get(config.RAEX_SEARCH_URL, timeout=timeout_seconds)
     search_page.raise_for_status()
@@ -817,10 +848,16 @@ def refresh_raex_data_if_needed(
     loaded_at = now_utc.isoformat()
     parsed_rows: list[dict[str, str]] = []
     errors_count = 0
+    known_company_urls = get_raex_company_urls_by_inn(ratings_conn)
     with progress(total=len(inns), desc="RAEX INN", unit="inn") as raex_pbar:
         with ThreadPoolExecutor(max_workers=max(1, int(config.RAEX_MAX_WORKERS))) as executor:
             futures = {
-                executor.submit(fetch_raex_rating_by_inn, inn, config.REQUEST_TIMEOUT_SECONDS): inn
+                executor.submit(
+                    fetch_raex_rating_by_inn,
+                    inn,
+                    config.REQUEST_TIMEOUT_SECONDS,
+                    known_company_urls.get(inn, ""),
+                ): inn
                 for inn in inns
             }
             for future in as_completed(futures):
@@ -1841,6 +1878,13 @@ def export_emitents_excel(conn: sqlite3.Connection) -> int:
             value = "" if cell.value is None else str(cell.value)
             max_len = max(max_len, len(value))
         ws.column_dimensions[column_letter].width = min(max_len + 2, 80)
+
+    for rating_column_name in ("NRA_Rate", "Acra_Rate", "NKR_Rate", "RAEX_Rate"):
+        if rating_column_name not in headers:
+            continue
+        rating_column_index = headers.index(rating_column_name) + 1
+        rating_column_letter = ws.cell(row=1, column=rating_column_index).column_letter
+        ws.column_dimensions[rating_column_letter].width = config.EMITENTS_RATINGS_COLUMN_WIDTH
 
     excel_path = config.BASE_DIR / config.EMITENTS_XLSX_FILENAME
     wb.save(excel_path)

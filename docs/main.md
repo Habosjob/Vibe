@@ -132,6 +132,7 @@ python main.py
 - При отсутствии актуального значения (пусто/отозван) запись по ИНН не обновляется.
 - TTL: `RAEX_CACHE_TTL_HOURS` (по умолчанию 12 часов); если `raex_latest_by_inn` пустая, выполняется принудительное обновление RAEX независимо от TTL.
 - Производительность: параллельные запросы по ИНН (`RAEX_MAX_WORKERS`).
+- Оптимизация повторных прогонов RAEX: если в `raex_latest_by_inn` уже есть `company_url` для ИНН, скрипт сразу открывает карточку эмитента и не выполняет этап поиска `/search/`.
 - Snapshot: `BaseSnapshots/raex_snapshot.xlsx` (5 самых свежих записей).
 
 ## Настройка
@@ -158,7 +159,8 @@ python main.py
 - `NKR_TABLE_NAME` / `NKR_LATEST_TABLE_NAME` — таблицы НКР в БД рейтинговых агентств.
 - `RAEX_SEARCH_URL` — URL поиска RAEX.
 - `RAEX_CACHE_TTL_HOURS` — TTL обновления RAEX в часах.
-- `RAEX_MAX_WORKERS` — число потоков параллельного парсинга RAEX.
+- `RAEX_MAX_WORKERS` — число потоков параллельного парсинга RAEX (дефолт увеличен до 12).
+- `EMITENTS_RATINGS_COLUMN_WIDTH` — фиксированная ширина колонок рейтингов в `Emitents.xlsx` (`NRA_Rate`, `Acra_Rate`, `NKR_Rate`, `RAEX_Rate`).
 - `RAEX_TABLE_NAME` / `RAEX_LATEST_TABLE_NAME` — таблицы RAEX в БД рейтинговых агентств.
 - `RAITINGS_DB_FILENAME` — файл общей SQLite-базы рейтинговых агентств.
 - `ACRA_TABLE_NAME` — таблица АКРА в БД рейтинговых агентств.
