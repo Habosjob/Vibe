@@ -336,8 +336,8 @@ SCREENER_SORT_BY_AMORT_START_DATE = True
 
 # Сколько знаков после запятой сохранять в колонке YTM в таблице Screener.
 # Значение: целое число >= 0.
-# По умолчанию: 4.
-YTM_OUTPUT_PRECISION = 4
+# По умолчанию: 2.
+YTM_OUTPUT_PRECISION = 2
 
 # Включать ли встроенный self-check расчета YTM на этапе Screener.
 # Проверки не пишут в консоль, только в лог.
