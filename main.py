@@ -2517,7 +2517,14 @@ def _pick_offer_date(corpbonds_offer: str | None, smartlab_offer: str | None) ->
 def _parse_decimal_value(raw_value: object) -> float | None:
     if raw_value is None:
         return None
-    value = str(raw_value).replace("\xa0", " ").strip()
+    value = (
+        str(raw_value)
+        .replace("\xa0", " ")
+        .replace("\u202f", " ")
+        .replace("\u2009", " ")
+        .replace("−", "-")
+        .strip()
+    )
     if not value:
         return None
 
@@ -2985,6 +2992,18 @@ def _screener_sort_key(row_values: tuple[object, ...]) -> tuple[int, datetime, s
 
 def _prepare_screener_export_row(headers: list[str], row_values: list[object]) -> list[object]:
     date_columns = {"AmortStarrtDate", "MATDATE", "Offerdate", "Ближайший купон"}
+    float_columns = {
+        "НКД",
+        "Купон, %",
+        "YTM",
+        "Премия, индекс",
+        "FACEVALUE",
+        "Цена Corpbonds",
+        "Цена Доход",
+        "Цена Smartlab",
+        "Цена MOEX",
+        "Ликвидность",
+    }
 
     for index, header in enumerate(headers):
         value = row_values[index]
@@ -2992,8 +3011,12 @@ def _prepare_screener_export_row(headers: list[str], row_values: list[object]) -
             parsed = _parse_bond_date(None if value is None else str(value))
             row_values[index] = parsed.date() if parsed else None
             continue
-        if header == "Ликвидность":
+        if header in float_columns:
             row_values[index] = _parse_decimal_value(value)
+            continue
+        if header == "КупонПериод":
+            parsed = _parse_decimal_value(value)
+            row_values[index] = int(parsed) if parsed is not None else None
 
     return row_values
 
@@ -4055,20 +4078,38 @@ def export_screener_excel(conn: sqlite3.Connection) -> dict[str, int]:
                 max_len = max(max_len, len(value))
             ws.column_dimensions[column_letter].width = min(max_len + 2, 80)
 
-        liquidity_col_idx = headers.index("Ликвидность") + 1
         date_col_indices = [
             headers.index(column_name) + 1
             for column_name in ("AmortStarrtDate", "MATDATE", "Offerdate", "Ближайший купон")
         ]
+        number_formats = {
+            "YTM": "0.00",
+            "Купон, %": "0.00",
+            "НКД": "0.00",
+            "Премия, индекс": "0.0000",
+            "FACEVALUE": "#,##0",
+            "Цена Corpbonds": "0.0000",
+            "Цена Доход": "0.0000",
+            "Цена Smartlab": "0.0000",
+            "Цена MOEX": "0.0000",
+            "КупонПериод": "0",
+            "Ликвидность": "0.0",
+        }
+        number_format_indices = {
+            headers.index(column_name) + 1: number_format
+            for column_name, number_format in number_formats.items()
+        }
         if ws.max_row >= 2:
             for row_idx in range(2, ws.max_row + 1):
                 for col_idx in date_col_indices:
                     ws.cell(row=row_idx, column=col_idx).number_format = "yyyy-mm-dd"
 
+        liquidity_col_idx = headers.index("Ликвидность") + 1
         liquidity_col_letter = ws.cell(row=1, column=liquidity_col_idx).column_letter
         if ws.max_row >= 2:
             for row_idx in range(2, ws.max_row + 1):
-                ws.cell(row=row_idx, column=liquidity_col_idx).number_format = "0.0"
+                for col_idx, number_format in number_format_indices.items():
+                    ws.cell(row=row_idx, column=col_idx).number_format = number_format
             data_bar_rule = Rule(
                 type="dataBar",
                 dataBar=DataBar(
