@@ -2242,6 +2242,16 @@ CORPBONDS_COLUMNS_MAP = {
     'Corpbonds_Купон лесенкой': 'Купон лесенкой',
 }
 
+SMARTLAB_COLUMNS_MAP = {
+    'Smartlab_Котировка облигации, %': 'Котировка облигации, %',
+    'Smartlab_Изм за день, %': 'Изм за день, %',
+    'Smartlab_Объем день, млн. руб': 'Объем день, млн. руб',
+    'Smartlab_Объем день, штук': 'Объем день, штук',
+    'Smartlab_Дата оферты': 'Дата оферты',
+    'Smartlab_Только для квалов?': 'Только для квалов?',
+    'Smartlab_Длительность купона, дней': 'Длительность купона, дней',
+}
+
 
 def ensure_table_columns(conn: sqlite3.Connection, table_name: str, columns: list[str]) -> None:
     existing_columns = {
@@ -2262,8 +2272,10 @@ def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
         columns_sql.append(f'"{column}" TEXT')
     for column in CORPBONDS_COLUMNS_MAP:
         columns_sql.append(f'"{column}" TEXT')
+    for column in SMARTLAB_COLUMNS_MAP:
+        columns_sql.append(f'"{column}" TEXT')
     conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({", ".join(columns_sql)})')
-    ensure_table_columns(conn, table_name, list(CORPBONDS_COLUMNS_MAP.keys()))
+    ensure_table_columns(conn, table_name, list(CORPBONDS_COLUMNS_MAP.keys()) + list(SMARTLAB_COLUMNS_MAP.keys()))
     conn.commit()
 
 
@@ -2275,6 +2287,7 @@ def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, sc
     insert_columns = [f'"{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"]
     insert_columns = ['"ISIN"'] + insert_columns + [f'"{column}"' for column in MERGE_DOHOD_COLUMNS]
     insert_columns += [f'"{column}"' for column in CORPBONDS_COLUMNS_MAP]
+    insert_columns += [f'"{column}"' for column in SMARTLAB_COLUMNS_MAP]
 
     selected_columns = [f'm."ISIN"']
     selected_columns.extend(
@@ -2282,6 +2295,7 @@ def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, sc
     )
     selected_columns.extend(f'd."{column}"' for column in MERGE_DOHOD_COLUMNS)
     selected_columns.extend(f"'' AS \"{column}\"" for column in CORPBONDS_COLUMNS_MAP)
+    selected_columns.extend(f"'' AS \"{column}\"" for column in SMARTLAB_COLUMNS_MAP)
     placeholders = ", ".join(["?"] * len(insert_columns))
 
     rows = conn.execute(
@@ -2610,6 +2624,187 @@ def refresh_corpbonds_data_if_needed(
     return len(secids), len(stale_secids), len(fetched_rows)
 
 
+def ensure_smartlab_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.SMARTLAB_TABLE_NAME}" (
+            "SECID" TEXT PRIMARY KEY,
+            "Котировка облигации, %" TEXT,
+            "Изм за день, %" TEXT,
+            "Объем день, млн. руб" TEXT,
+            "Объем день, штук" TEXT,
+            "Дата оферты" TEXT,
+            "Только для квалов?" TEXT,
+            "Длительность купона, дней" TEXT,
+            "source_url" TEXT,
+            "updated_at_utc" TEXT NOT NULL
+        )
+        '''
+    )
+    conn.commit()
+
+
+def parse_smartlab_page_fields(raw_html: str) -> dict[str, str]:
+    soup = BeautifulSoup(raw_html, "lxml")
+    parsed = {
+        "Котировка облигации, %": "",
+        "Изм за день, %": "",
+        "Объем день, млн. руб": "",
+        "Объем день, штук": "",
+        "Дата оферты": "",
+        "Только для квалов?": "",
+        "Длительность купона, дней": "",
+    }
+
+    for row in soup.select("div.quotes-simple-table__row"):
+        items = row.select("div.quotes-simple-table__item")
+        if len(items) < 2:
+            continue
+        label = " ".join(items[0].stripped_strings)
+        value = " ".join(items[1].stripped_strings)
+        normalized = _normalize_label(label)
+        if normalized.startswith("котировка облигации"):
+            parsed["Котировка облигации, %"] = value
+        elif normalized.startswith("изм за день"):
+            parsed["Изм за день, %"] = value
+        elif normalized.startswith("объем день, млн. руб"):
+            parsed["Объем день, млн. руб"] = value
+        elif normalized.startswith("объем день, штук"):
+            parsed["Объем день, штук"] = value
+        elif normalized.startswith("дата оферты"):
+            parsed["Дата оферты"] = value
+        elif normalized.startswith("только для квалов"):
+            parsed["Только для квалов?"] = value
+        elif normalized.startswith("длительность купона"):
+            parsed["Длительность купона, дней"] = value
+
+    return parsed
+
+
+def _is_smartlab_stale(updated_at_raw: str | None, now_utc: datetime) -> bool:
+    if not updated_at_raw:
+        return True
+    try:
+        updated_at = datetime.fromisoformat(updated_at_raw)
+    except ValueError:
+        return True
+    return now_utc - updated_at >= timedelta(hours=config.SMARTLAB_CACHE_TTL_HOURS)
+
+
+def get_stale_smartlab_secids(conn: sqlite3.Connection, secids: list[str], now_utc: datetime) -> list[str]:
+    if not secids:
+        return []
+
+    stale: list[str] = []
+    chunk_size = 500
+    for start in range(0, len(secids), chunk_size):
+        chunk = secids[start : start + chunk_size]
+        placeholders = ", ".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f'SELECT "SECID", "updated_at_utc" FROM "{config.SMARTLAB_TABLE_NAME}" WHERE "SECID" IN ({placeholders})',
+            tuple(chunk),
+        ).fetchall()
+        actual = {str(row[0]): str(row[1] or "") for row in rows}
+        for secid in chunk:
+            if _is_smartlab_stale(actual.get(secid), now_utc):
+                stale.append(secid)
+
+    return stale
+
+
+def fetch_smartlab_payload(secid: str) -> dict[str, str]:
+    if not hasattr(fetch_smartlab_payload, "_thread_local"):
+        fetch_smartlab_payload._thread_local = threading.local()  # type: ignore[attr-defined]
+    thread_local = fetch_smartlab_payload._thread_local  # type: ignore[attr-defined]
+    if not hasattr(thread_local, "session"):
+        thread_local.session = requests.Session()
+
+    url = f"{config.SMARTLAB_BOND_URL_PREFIX}{secid}/"
+    response = thread_local.session.get(url, timeout=config.SMARTLAB_REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    data = parse_smartlab_page_fields(response.text)
+    data["SECID"] = secid
+    data["source_url"] = url
+    return data
+
+
+def refresh_smartlab_data_if_needed(
+    conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime
+) -> tuple[int, int, int]:
+    ensure_smartlab_table(conn)
+    secids = collect_merge_secids(conn)
+    if not secids:
+        return 0, 0, 0
+
+    stale_secids = get_stale_smartlab_secids(conn, secids, now_utc)
+    fetched_rows: list[dict[str, str]] = []
+    errors = 0
+
+    if stale_secids:
+        with ThreadPoolExecutor(max_workers=config.SMARTLAB_MAX_WORKERS) as executor:
+            futures = {executor.submit(fetch_smartlab_payload, secid): secid for secid in stale_secids}
+            with progress(total=len(stale_secids), desc="Smartlab fetch", unit="бумаг", position=1) as pbar:
+                for future in as_completed(futures):
+                    secid = futures[future]
+                    try:
+                        fetched_rows.append(future.result())
+                    except Exception as exc:
+                        errors += 1
+                        logger.warning("Smartlab: ошибка SECID=%s: %s", secid, exc)
+                    pbar.update(1)
+
+    if fetched_rows:
+        now_iso = now_utc.isoformat()
+        payload = [
+            (
+                row.get("SECID", ""),
+                row.get("Котировка облигации, %", ""),
+                row.get("Изм за день, %", ""),
+                row.get("Объем день, млн. руб", ""),
+                row.get("Объем день, штук", ""),
+                row.get("Дата оферты", ""),
+                row.get("Только для квалов?", ""),
+                row.get("Длительность купона, дней", ""),
+                row.get("source_url", ""),
+                now_iso,
+            )
+            for row in fetched_rows
+            if row.get("SECID", "")
+        ]
+        conn.execute("BEGIN")
+        conn.executemany(
+            f'''
+            INSERT INTO "{config.SMARTLAB_TABLE_NAME}" (
+                "SECID", "Котировка облигации, %", "Изм за день, %", "Объем день, млн. руб",
+                "Объем день, штук", "Дата оферты", "Только для квалов?", "Длительность купона, дней",
+                "source_url", "updated_at_utc"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT("SECID") DO UPDATE SET
+                "Котировка облигации, %"=excluded."Котировка облигации, %",
+                "Изм за день, %"=excluded."Изм за день, %",
+                "Объем день, млн. руб"=excluded."Объем день, млн. руб",
+                "Объем день, штук"=excluded."Объем день, штук",
+                "Дата оферты"=excluded."Дата оферты",
+                "Только для квалов?"=excluded."Только для квалов?",
+                "Длительность купона, дней"=excluded."Длительность купона, дней",
+                "source_url"=excluded."source_url",
+                "updated_at_utc"=excluded."updated_at_utc"
+            ''',
+            payload,
+        )
+        conn.commit()
+
+    logger.info(
+        "Smartlab: SECID в Merge=%s, запрошено=%s, сохранено=%s, ошибок=%s, TTL=%s ч",
+        len(secids),
+        len(stale_secids),
+        len(fetched_rows),
+        errors,
+        config.SMARTLAB_CACHE_TTL_HOURS,
+    )
+    return len(secids), len(stale_secids), len(fetched_rows)
+
+
 def _get_table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
 
@@ -2655,6 +2850,47 @@ def apply_corpbonds_inner_join_to_merge_table(conn: sqlite3.Connection, table_na
     return int(rows_after)
 
 
+def apply_smartlab_inner_join_to_merge_table(conn: sqlite3.Connection, table_name: str) -> int:
+    ensure_merge_table(conn, table_name)
+    merge_columns = _get_table_columns(conn, table_name)
+    require_match = bool(getattr(config, "MERGE_REQUIRE_SMARTLAB_SECID_MATCH", True))
+    select_columns: list[str] = []
+    for column in merge_columns:
+        if column in SMARTLAB_COLUMNS_MAP:
+            source_column = SMARTLAB_COLUMNS_MAP[column]
+            select_columns.append(f's."{source_column}" AS "{column}"')
+        else:
+            select_columns.append(f'm."{column}"')
+
+    join_type = "INNER" if require_match else "LEFT"
+    secid_condition = "WHERE TRIM(COALESCE(m.\"SECID\", '')) <> ''" if require_match else ""
+
+    conn.execute("BEGIN")
+    conn.execute(f'DROP TABLE IF EXISTS "{table_name}__tmp_smartlab"')
+    conn.execute(
+        f'''
+        CREATE TABLE "{table_name}__tmp_smartlab" AS
+        SELECT {", ".join(select_columns)}
+        FROM "{table_name}" m
+        {join_type} JOIN "{config.SMARTLAB_TABLE_NAME}" s
+            ON TRIM(COALESCE(m."SECID", '')) = TRIM(COALESCE(s."SECID", ''))
+        {secid_condition}
+        '''
+    )
+    conn.execute(f'DELETE FROM "{table_name}"')
+    conn.execute(
+        f'''
+        INSERT OR REPLACE INTO "{table_name}" ({", ".join(f'"{column}"' for column in merge_columns)})
+        SELECT {", ".join(f'"{column}"' for column in merge_columns)}
+        FROM "{table_name}__tmp_smartlab"
+        '''
+    )
+    conn.execute(f'DROP TABLE "{table_name}__tmp_smartlab"')
+    rows_after = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+    conn.commit()
+    return int(rows_after)
+
+
 def export_corpbonds_snapshot(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
@@ -2680,6 +2916,35 @@ def export_corpbonds_snapshot(conn: sqlite3.Connection) -> int:
         ws.append(list(row))
 
     snapshot_path = config.BASE_SNAPSHOTS_DIR / config.CORPBONDS_SNAPSHOT_FILENAME
+    wb.save(snapshot_path)
+    return len(rows)
+
+
+def export_smartlab_snapshot(conn: sqlite3.Connection) -> int:
+    cursor = conn.execute(
+        f'''
+        SELECT *
+        FROM "{config.SMARTLAB_TABLE_NAME}"
+        WHERE rowid IN (
+            SELECT MIN(rowid)
+            FROM "{config.SMARTLAB_TABLE_NAME}"
+            GROUP BY "SECID"
+            ORDER BY RANDOM()
+            LIMIT 5
+        )
+        '''
+    )
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "smartlab_snapshot"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / config.SMARTLAB_SNAPSHOT_FILENAME
     wb.save(snapshot_path)
     return len(rows)
 
@@ -2937,6 +3202,49 @@ def main() -> None:
                 yellow_snapshot,
             )
         stage_times["Этап 9: Обогащение Merge* из Corpbonds"] = perf_counter() - s
+
+        print("Этап 10: Обогащение Merge* из Smartlab")
+        s = perf_counter()
+        with progress(total=6, desc="Smartlab enrich", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                secids_total, secids_requested, secids_saved = refresh_smartlab_data_if_needed(
+                    conn, logger, datetime.now(timezone.utc)
+                )
+                pbar.update(1)
+                green_rows_after_smartlab = apply_smartlab_inner_join_to_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
+                pbar.update(1)
+                yellow_rows_after_smartlab = apply_smartlab_inner_join_to_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
+                pbar.update(1)
+                smartlab_snapshot = export_smartlab_snapshot(conn)
+                pbar.update(1)
+                green_snapshot = export_merge_snapshot(
+                    conn,
+                    config.MERGE_GREEN_TABLE_NAME,
+                    config.MERGE_GREEN_SNAPSHOT_FILENAME,
+                    "merge_green_snapshot",
+                )
+                pbar.update(1)
+                yellow_snapshot = export_merge_snapshot(
+                    conn,
+                    config.MERGE_YELLOW_TABLE_NAME,
+                    config.MERGE_YELLOW_SNAPSHOT_FILENAME,
+                    "merge_yellow_snapshot",
+                )
+                pbar.update(1)
+            logger.info(
+                "Smartlab: SECID в Merge=%s, к запросу по TTL=%s, успешно сохранено=%s, "
+                "INNER JOIN обновил MergeGreen=%s, MergeYellow=%s, smartlab_snapshot=%s, "
+                "merge_snapshots_after_smartlab: green=%s, yellow=%s",
+                secids_total,
+                secids_requested,
+                secids_saved,
+                green_rows_after_smartlab,
+                yellow_rows_after_smartlab,
+                smartlab_snapshot,
+                green_snapshot,
+                yellow_snapshot,
+            )
+        stage_times["Этап 10: Обогащение Merge* из Smartlab"] = perf_counter() - s
 
         print("=====\nГотово")
     except Exception as exc:

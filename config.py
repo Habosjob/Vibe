@@ -377,3 +377,39 @@ CORPBONDS_SNAPSHOT_FILENAME = "corpbonds_snapshot.xlsx"
 # Значения: True/False.
 # По умолчанию: True.
 MERGE_REQUIRE_CORPBONDS_SECID_MATCH = True
+
+# Базовый URL карточки облигации на Smart-Lab.
+# Для запроса используется SECID: <SMARTLAB_BOND_URL_PREFIX><SECID>/
+# По умолчанию: https://smart-lab.ru/q/bonds/
+SMARTLAB_BOND_URL_PREFIX = "https://smart-lab.ru/q/bonds/"
+
+# Имя таблицы с обогащением Merge* из Smart-Lab.
+# По умолчанию: SmartlabBonds.
+SMARTLAB_TABLE_NAME = "SmartlabBonds"
+
+# TTL для повторного запроса карточки Smart-Lab по SECID.
+# Значение: целое число > 0 (в часах).
+# По умолчанию: 12 часов.
+SMARTLAB_CACHE_TTL_HOURS = 12
+
+# Количество потоков для параллельной загрузки Smart-Lab.
+# Значение: целое число > 0.
+# По умолчанию: 16.
+SMARTLAB_MAX_WORKERS = 16
+
+# Таймаут HTTP-запроса к Smart-Lab (секунды).
+# Значение: число (int/float).
+# По умолчанию: 30.
+SMARTLAB_REQUEST_TIMEOUT_SECONDS = 30
+
+# Имя Excel-файла снапшота по Smart-Lab-обогащению (5 случайных SECID).
+# По умолчанию: smartlab_snapshot.xlsx.
+SMARTLAB_SNAPSHOT_FILENAME = "smartlab_snapshot.xlsx"
+
+# Режим объединения Merge* c Smart-Lab по SECID.
+# Если True, после этапа Smart-Lab в Merge* остаются только бумаги,
+# для которых найден SECID в Smart-Lab (INNER JOIN), и поля Smart-Lab
+# записываются прямо в Merge-таблицы в колонки с префиксом "Smartlab_".
+# Значения: True/False.
+# По умолчанию: True.
+MERGE_REQUIRE_SMARTLAB_SECID_MATCH = True
