@@ -2521,7 +2521,24 @@ def _parse_decimal_value(raw_value: object) -> float | None:
     if not value:
         return None
 
-    normalized = value.replace(" ", "").replace(",", ".")
+    cleaned = re.sub(r"[^0-9,\.\-]", "", value.replace(" ", ""))
+    if not cleaned or cleaned in {"-", ".", ",", "-.", "-,"}:
+        return None
+
+    # Поддерживаем форматы: 101,2 / 101.2 / 1 234,56% / 1,234.56
+    last_comma = cleaned.rfind(",")
+    last_dot = cleaned.rfind(".")
+    decimal_pos = max(last_comma, last_dot)
+
+    if decimal_pos >= 0:
+        int_part = re.sub(r"[^0-9\-]", "", cleaned[:decimal_pos])
+        frac_part = re.sub(r"[^0-9]", "", cleaned[decimal_pos + 1 :])
+        if not int_part or int_part == "-":
+            int_part = "0" if int_part == "" else int_part
+        normalized = f"{int_part}.{frac_part}" if frac_part else int_part
+    else:
+        normalized = re.sub(r"[^0-9\-]", "", cleaned)
+
     try:
         return float(normalized)
     except ValueError:
@@ -2533,6 +2550,11 @@ def _is_false_like(raw_value: object) -> bool:
     return value in {"false", "нет", "0", "❌", "x", "х", "крестик"}
 
 
+def _is_true_like(raw_value: object) -> bool:
+    value = str(raw_value or "").strip().casefold()
+    return value in {"true", "да", "1", "✅", "галочка", "yes"}
+
+
 def _is_fixed_coupon_type(raw_value: object) -> bool:
     value = str(raw_value or "").strip().casefold()
     return value.startswith("фикс")
@@ -2541,16 +2563,13 @@ def _is_fixed_coupon_type(raw_value: object) -> bool:
 def _pick_price_for_ytm(*prices: object) -> float | None:
     for raw_price in prices:
         parsed = _parse_decimal_value(raw_price)
-        if parsed is not None:
+        if parsed is not None and parsed > 0:
             return parsed
     return None
 
 
-def _normalize_price_share_from_nominal(price_value: float) -> float:
-    normalized_price = price_value * float(config.YTM_PRICE_FACEVALUE_MULTIPLIER)
-    if normalized_price > 2:
-        normalized_price /= 100.0
-    return normalized_price
+def _normalize_purchase_price(price_percent: float, facevalue: float, nkd: float) -> float:
+    return (facevalue * (price_percent / 100.0)) + nkd
 
 
 def _resolve_coupon_frequency_per_year(raw_coupon_period: object) -> float | None:
@@ -2565,63 +2584,209 @@ def _resolve_coupon_frequency_per_year(raw_coupon_period: object) -> float | Non
     return parsed_value
 
 
+def _load_amortization_schedule(
+    conn: sqlite3.Connection,
+    secids: set[str],
+    facevalues: dict[str, float],
+) -> dict[str, list[tuple[datetime, float]]]:
+    schedule: dict[str, list[tuple[datetime, float]]] = {secid: [] for secid in secids}
+    if not secids:
+        return schedule
+
+    placeholders = ", ".join(["?"] * len(secids))
+    rows = conn.execute(
+        f'''
+        SELECT "secid", "amortdate", "value", "valueprc"
+        FROM "{config.MOEX_AMORTIZATION_TABLE_NAME}"
+        WHERE TRIM(COALESCE("secid", '')) IN ({placeholders})
+        ORDER BY "secid", "amortdate"
+        ''',
+        tuple(secids),
+    ).fetchall()
+
+    for secid_raw, amortdate_raw, value_raw, valueprc_raw in rows:
+        secid = str(secid_raw or "").strip()
+        amortdate = _parse_bond_date(str(amortdate_raw or ""))
+        if not secid or amortdate is None:
+            continue
+
+        payment = _parse_decimal_value(value_raw)
+        if payment is None or payment <= 0:
+            valueprc = _parse_decimal_value(valueprc_raw)
+            facevalue = facevalues.get(secid)
+            if valueprc is not None and valueprc > 0 and facevalue is not None and facevalue > 0:
+                payment = facevalue * (valueprc / 100.0)
+
+        if payment is None or payment <= 0:
+            continue
+
+        schedule.setdefault(secid, []).append((amortdate, float(payment)))
+
+    return schedule
+
+
+def _dates_match_with_tolerance(date_a: datetime.date, date_b: datetime.date, tolerance_days: int = 1) -> bool:
+    return abs((date_a - date_b).days) <= tolerance_days
+
+
+def _resolve_coupon_period_days(coupon_period_days: object, coupon_frequency: float) -> int:
+    period_days = _parse_decimal_value(coupon_period_days)
+    if period_days is None or period_days <= 0:
+        period_days = 365.25 / coupon_frequency
+    return max(1, int(round(period_days)))
+
+
+def _build_coupon_dates(
+    *,
+    target_date: datetime,
+    coupon_frequency: float,
+    coupon_period_days: object,
+    next_coupon_date: object,
+) -> list[datetime.date]:
+    today = datetime.now().date()
+    target = target_date.date()
+    if target <= today:
+        return []
+
+    period_days = _resolve_coupon_period_days(coupon_period_days, coupon_frequency)
+    first_coupon_dt = _parse_bond_date(str(next_coupon_date or ""))
+    first_coupon = first_coupon_dt.date() if first_coupon_dt is not None else None
+
+    coupon_dates: list[datetime.date] = []
+    if first_coupon is not None and first_coupon > today:
+        current = first_coupon
+        safety_limit = 2000
+        while current <= target and len(coupon_dates) < safety_limit:
+            coupon_dates.append(current)
+            current = current + timedelta(days=period_days)
+    else:
+        current = today + timedelta(days=period_days)
+        safety_limit = 2000
+        while current <= target and len(coupon_dates) < safety_limit:
+            coupon_dates.append(current)
+            current = current + timedelta(days=period_days)
+
+    return coupon_dates
+
+
 def _build_cashflow_times_years(
     *,
     target_date: datetime,
     coupon_frequency: float,
     coupon_period_days: object,
     next_coupon_date: object,
-) -> list[float]:
+    period_coupon: float,
+    facevalue: float,
+) -> list[tuple[float, float]]:
     today = datetime.now().date()
-    years_to_redemption = (target_date.date() - today).days / 365.25
-    periods = max(1, int(round(years_to_redemption * coupon_frequency)))
+    target = target_date.date()
+    if target <= today:
+        return []
 
-    nearest_coupon_dt = _parse_bond_date(str(next_coupon_date or ""))
-    if nearest_coupon_dt is None:
-        return [period_idx / coupon_frequency for period_idx in range(1, periods + 1)]
+    coupon_dates = _build_coupon_dates(
+        target_date=target_date,
+        coupon_frequency=coupon_frequency,
+        coupon_period_days=coupon_period_days,
+        next_coupon_date=next_coupon_date,
+    )
+    target_has_coupon = any(_dates_match_with_tolerance(coupon_date, target) for coupon_date in coupon_dates)
 
-    first_payment_days = (nearest_coupon_dt.date() - today).days
-    if first_payment_days <= 0:
-        return [period_idx / coupon_frequency for period_idx in range(1, periods + 1)]
+    cashflows: list[tuple[float, float]] = []
+    for coupon_date in coupon_dates:
+        if _dates_match_with_tolerance(coupon_date, target):
+            continue
+        if coupon_date > target:
+            continue
+        years = (coupon_date - today).days / 365.25
+        if years > 0:
+            cashflows.append((years, period_coupon))
 
-    coupon_period_days_value = _parse_decimal_value(coupon_period_days)
-    if coupon_period_days_value is None or coupon_period_days_value <= 0:
-        coupon_period_days_value = 365.25 / coupon_frequency
+    target_years = (target - today).days / 365.25
+    if target_years <= 0:
+        return []
 
-    times_years: list[float] = []
-    payment_days = float(first_payment_days)
-    safety_limit = max(4, periods + 4)
-    while payment_days <= (target_date.date() - today).days + 1 and len(times_years) < safety_limit:
-        times_years.append(payment_days / 365.25)
-        payment_days += coupon_period_days_value
+    target_amount = facevalue
+    if target_has_coupon:
+        target_amount += period_coupon
+    cashflows.append((target_years, target_amount))
+    return cashflows
 
-    if not times_years:
-        return [period_idx / coupon_frequency for period_idx in range(1, periods + 1)]
 
-    final_time = (target_date.date() - today).days / 365.25
-    if final_time > times_years[-1] + 1e-9:
-        times_years.append(final_time)
-    else:
-        times_years[-1] = final_time
+def _build_amortized_cashflows(
+    *,
+    target_date: datetime,
+    coupon_frequency: float,
+    coupon_period_days: object,
+    next_coupon_date: object,
+    facevalue: float,
+    coupon_rate: float,
+    amortization_schedule: list[tuple[datetime, float]] | None,
+) -> list[tuple[float, float]]:
+    today = datetime.now().date()
+    target = target_date.date()
+    if target <= today:
+        return []
 
-    return [t for t in times_years if t > 0]
+    coupon_dates = _build_coupon_dates(
+        target_date=target_date,
+        coupon_frequency=coupon_frequency,
+        coupon_period_days=coupon_period_days,
+        next_coupon_date=next_coupon_date,
+    )
+    amort_map: dict[datetime.date, float] = {}
+    for amort_dt, amount in (amortization_schedule or []):
+        amort_date = amort_dt.date()
+        if today < amort_date <= target and amount > 0:
+            amort_map[amort_date] = amort_map.get(amort_date, 0.0) + float(amount)
+
+    event_dates = sorted(set(coupon_dates) | set(amort_map.keys()) | {target})
+    if not event_dates:
+        return []
+
+    outstanding = facevalue
+    period_coupon_rate = coupon_rate / coupon_frequency
+    cashflows: list[tuple[float, float]] = []
+
+    for event_date in event_dates:
+        if outstanding <= 0:
+            break
+
+        amount = 0.0
+        if event_date in coupon_dates:
+            amount += outstanding * period_coupon_rate
+
+        amort_payment = amort_map.get(event_date, 0.0)
+        if amort_payment > 0:
+            principal_payment = min(outstanding, amort_payment)
+            amount += principal_payment
+            outstanding -= principal_payment
+
+        if event_date == target and outstanding > 0:
+            amount += outstanding
+            outstanding = 0.0
+
+        years = (event_date - today).days / 365.25
+        if amount > 0 and years > 0:
+            cashflows.append((years, amount))
+
+    return cashflows
 
 
 def _solve_ytm_bisection(
     dirty_price: float,
-    period_coupon: float,
-    facevalue: float,
     coupon_frequency: float,
-    cashflow_times_years: list[float],
+    cashflows: list[tuple[float, float]],
 ) -> float | None:
+    if not cashflows:
+        return None
+
     def npv(rate: float) -> float:
         discount = 1.0 + rate / coupon_frequency
+        if discount <= 0:
+            return float("inf")
         total = 0.0
-        for period_idx, cashflow_time_years in enumerate(cashflow_times_years, start=1):
-            cash_flow = period_coupon
-            if period_idx == len(cashflow_times_years):
-                cash_flow += facevalue
-            total += cash_flow / (discount ** (cashflow_time_years * coupon_frequency))
+        for years, amount in cashflows:
+            total += amount / (discount ** (years * coupon_frequency))
         return total - dirty_price
 
     left = -0.95
@@ -2649,7 +2814,6 @@ def _calculate_fixed_coupon_ytm(
     *,
     subord_flag: object,
     amort_flag: object,
-    ladder_flag: object,
     coupon_type: object,
     coupon_percent: object,
     coupon_frequency: object,
@@ -2663,9 +2827,8 @@ def _calculate_fixed_coupon_ytm(
     dohod_price: object,
     smartlab_price: object,
     moex_price: object,
+    amortization_schedule: list[tuple[datetime, float]] | None,
 ) -> str:
-    if not (_is_false_like(subord_flag) and _is_false_like(amort_flag) and _is_false_like(ladder_flag)):
-        return ""
     if not _is_fixed_coupon_type(coupon_type):
         return ""
 
@@ -2693,28 +2856,47 @@ def _calculate_fixed_coupon_ytm(
     if days_to_redemption <= 0:
         return ""
 
-    price_share_from_nominal = _normalize_price_share_from_nominal(price)
-    dirty_price = price_share_from_nominal * facevalue_value + nkd_value
+    dirty_price = _normalize_purchase_price(price, facevalue_value, nkd_value)
 
     coupon_rate = coupon_rate_percent / 100.0
     annual_coupon = facevalue_value * coupon_rate
-    period_coupon = annual_coupon / coupon_freq
 
-    cashflow_times_years = _build_cashflow_times_years(
-        target_date=target_date,
-        coupon_frequency=coupon_freq,
-        coupon_period_days=coupon_period_days,
-        next_coupon_date=next_coupon_date,
-    )
-    if not cashflow_times_years:
+    is_subord = _is_true_like(subord_flag)
+    is_amort = _is_true_like(amort_flag)
+    if is_subord:
+        current_coupon_yield = annual_coupon / dirty_price
+        effective_yield = (1.0 + current_coupon_yield / coupon_freq) ** coupon_freq - 1.0
+        precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 4)))
+        return f"{effective_yield * 100:.{precision}f}"
+
+    if is_amort:
+        cashflows = _build_amortized_cashflows(
+            target_date=target_date,
+            coupon_frequency=coupon_freq,
+            coupon_period_days=coupon_period_days,
+            next_coupon_date=next_coupon_date,
+            facevalue=facevalue_value,
+            coupon_rate=coupon_rate,
+            amortization_schedule=amortization_schedule,
+        )
+    else:
+        period_coupon = annual_coupon / coupon_freq
+        cashflows = _build_cashflow_times_years(
+            target_date=target_date,
+            coupon_frequency=coupon_freq,
+            coupon_period_days=coupon_period_days,
+            next_coupon_date=next_coupon_date,
+            period_coupon=period_coupon,
+            facevalue=facevalue_value,
+        )
+
+    if not cashflows:
         return ""
 
     ytm_decimal = _solve_ytm_bisection(
-        dirty_price,
-        period_coupon,
-        facevalue_value,
-        coupon_freq,
-        cashflow_times_years,
+        dirty_price=dirty_price,
+        coupon_frequency=coupon_freq,
+        cashflows=cashflows,
     )
     if ytm_decimal is None:
         return ""
@@ -2722,6 +2904,65 @@ def _calculate_fixed_coupon_ytm(
     precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 4)))
     return f"{ytm_decimal * 100:.{precision}f}"
 
+
+def _run_ytm_self_check() -> list[str]:
+    errors: list[str] = []
+
+    coupon_freq = 4.0
+    period_coupon = 40.0
+    facevalue = 1000.0
+
+    target_coupon = datetime.now() + timedelta(days=180)
+    cashflows_coupon = _build_cashflow_times_years(
+        target_date=target_coupon,
+        coupon_frequency=coupon_freq,
+        coupon_period_days=90,
+        next_coupon_date=datetime.now() + timedelta(days=90),
+        period_coupon=period_coupon,
+        facevalue=facevalue,
+    )
+    ytm_1 = _solve_ytm_bisection(dirty_price=980.0, coupon_frequency=coupon_freq, cashflows=cashflows_coupon)
+    if ytm_1 is None:
+        errors.append("Self-check #1: не удалось решить YTM для базового фиксированного кейса.")
+    else:
+        pv_1 = sum(amount / ((1 + ytm_1 / coupon_freq) ** (years * coupon_freq)) for years, amount in cashflows_coupon)
+        if abs(pv_1 - 980.0) > 1e-6:
+            errors.append("Self-check #1: PV(cashflows, ytm) не совпадает с dirty price.")
+
+    target_non_coupon = datetime.now() + timedelta(days=150)
+    cashflows_non_coupon = _build_cashflow_times_years(
+        target_date=target_non_coupon,
+        coupon_frequency=coupon_freq,
+        coupon_period_days=91,
+        next_coupon_date=datetime.now() + timedelta(days=90),
+        period_coupon=period_coupon,
+        facevalue=facevalue,
+    )
+    if len(cashflows_non_coupon) > 1 and abs(cashflows_non_coupon[-1][1] - facevalue) > 1e-9:
+        errors.append("Self-check #2: на некупонной target_date появился лишний купон.")
+
+    amort_schedule = [
+        (datetime.now() + timedelta(days=120), 300.0),
+        (datetime.now() + timedelta(days=240), 300.0),
+    ]
+    cashflows_amort = _build_amortized_cashflows(
+        target_date=datetime.now() + timedelta(days=360),
+        coupon_frequency=2.0,
+        coupon_period_days=182,
+        next_coupon_date=datetime.now() + timedelta(days=182),
+        facevalue=1000.0,
+        coupon_rate=0.12,
+        amortization_schedule=amort_schedule,
+    )
+    ytm_3 = _solve_ytm_bisection(dirty_price=960.0, coupon_frequency=2.0, cashflows=cashflows_amort)
+    if ytm_3 is None:
+        errors.append("Self-check #3: не удалось решить YTM для амортизационного кейса.")
+    else:
+        pv_3 = sum(amount / ((1 + ytm_3 / 2.0) ** (years * 2.0)) for years, amount in cashflows_amort)
+        if abs(pv_3 - 960.0) > 1e-6:
+            errors.append("Self-check #3: PV(cashflows, ytm) для амортизации не совпадает с dirty price.")
+
+    return errors
 
 def _screener_sort_key(row_values: tuple[object, ...]) -> tuple[int, datetime, str, str]:
     amort_raw = row_values[6] if len(row_values) > 6 else None
@@ -3644,7 +3885,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
         rows = conn.execute(
             f'''
             SELECT
-                "ISIN", "Название", "IS_QUALIFIED_INVESTORS", "Smartlab_Только для квалов?",
+                "SECID", "ISIN", "Название", "IS_QUALIFIED_INVESTORS", "Smartlab_Только для квалов?",
                 "Субординированная (да/нет)", "Corpbonds_Наличие амортизации", "Corpbonds_Купон лесенкой",
                 "{AMORTIZATION_START_COLUMN}", "MATDATE", "Corpbonds_Дата ближайшей оферты", "Smartlab_Дата оферты",
                 "Corpbonds_Дата ближайшего купона", "Corpbonds_Тип купона", "Smartlab_Длительность купона, дней",
@@ -3658,48 +3899,60 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
         ).fetchall()
         totals[source_list] = len(rows)
 
+        facevalues_by_secid: dict[str, float] = {}
+        secids_with_amort: set[str] = set()
+        for row in rows:
+            secid = str(row[0] or "").strip()
+            facevalue_value = _parse_decimal_value(row[21])
+            if secid and facevalue_value is not None:
+                facevalues_by_secid[secid] = facevalue_value
+            if secid and not _is_false_like(row[6]):
+                secids_with_amort.add(secid)
+
+        amortization_map = _load_amortization_schedule(conn, secids_with_amort, facevalues_by_secid)
+
         records: list[tuple[str, ...]] = []
         for row in rows:
-            offer_date = _pick_offer_date(row[9], row[10])
+            offer_date = _pick_offer_date(row[10], row[11])
+            secid = str(row[0] or "").strip()
             ytm_value = _calculate_fixed_coupon_ytm(
-                subord_flag=row[4],
-                amort_flag=row[5],
-                ladder_flag=row[6],
-                coupon_type=row[12],
-                coupon_percent=row[15],
-                coupon_frequency=row[16],
-                coupon_period_days=row[13],
-                next_coupon_date=row[11],
-                nkd=row[14],
-                facevalue=row[20],
-                matdate=row[8],
+                subord_flag=row[5],
+                amort_flag=row[6],
+                coupon_type=row[13],
+                coupon_percent=row[16],
+                coupon_frequency=row[17],
+                coupon_period_days=row[14],
+                next_coupon_date=row[12],
+                nkd=row[15],
+                facevalue=row[21],
+                matdate=row[9],
                 offerdate=offer_date,
-                corpbonds_price=row[22],
-                dohod_price=row[23],
-                smartlab_price=row[24],
-                moex_price=row[25],
+                corpbonds_price=row[24],
+                dohod_price=row[25],
+                smartlab_price=row[26],
+                moex_price=row[27],
+                amortization_schedule=amortization_map.get(secid),
             )
             if ytm_value:
                 ytm_fixed_count += 1
 
             records.append(
                 (
-                    str(row[0] or "").strip(),
                     str(row[1] or "").strip(),
-                    str(_merge_qualified(row[2], row[3])),
-                    str(row[4] or "").strip(),
+                    str(row[2] or "").strip(),
+                    str(_merge_qualified(row[3], row[4])),
                     str(row[5] or "").strip(),
                     str(row[6] or "").strip(),
-                    _normalize_date_to_iso(row[7]),
+                    str(row[7] or "").strip(),
                     _normalize_date_to_iso(row[8]),
+                    _normalize_date_to_iso(row[9]),
                     offer_date,
-                    _normalize_date_to_iso(row[11]),
-                    str(row[12] or "").strip(),
+                    _normalize_date_to_iso(row[12]),
                     str(row[13] or "").strip(),
                     str(row[14] or "").strip(),
                     str(row[15] or "").strip(),
+                    str(row[16] or "").strip(),
                     ytm_value,
-                    str(row[17] or "").strip(),
                     str(row[18] or "").strip(),
                     str(row[19] or "").strip(),
                     str(row[20] or "").strip(),
@@ -3709,6 +3962,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                     str(row[24] or "").strip(),
                     str(row[25] or "").strip(),
                     str(row[26] or "").strip(),
+                    str(row[27] or "").strip(),
                     str(score),
                     source_list,
                 )
@@ -4203,11 +4457,22 @@ def main() -> None:
 
         print("Этап 12: Screener (SQL + Excel)")
         s = perf_counter()
-        with progress(total=2, desc="Screener", unit="шаг") as pbar:
+        self_check_enabled = bool(getattr(config, "YTM_SELFCHECK_ENABLED", True))
+        screener_steps = 3 if self_check_enabled else 2
+        with progress(total=screener_steps, desc="Screener", unit="шаг") as pbar:
             with connect_db(db_path) as conn:
                 screener_stats = rebuild_screener_table(conn)
                 pbar.update(1)
                 screener_export = export_screener_excel(conn)
+                pbar.update(1)
+            if self_check_enabled:
+                ytm_self_check_errors = _run_ytm_self_check()
+                if ytm_self_check_errors:
+                    logger.warning("YTM self-check: %s", " | ".join(ytm_self_check_errors))
+                    if bool(getattr(config, "YTM_SELFCHECK_STRICT", False)):
+                        raise RuntimeError("YTM self-check failed")
+                else:
+                    logger.info("YTM self-check: OK")
                 pbar.update(1)
             logger.info(
                 "Screener: SQL rows green=%s yellow=%s total=%s ytm_fixed=%s; Excel rows green=%s yellow=%s total=%s",

@@ -334,20 +334,23 @@ SCREENER_XLSX_FILENAME = "Screener.xlsx"
 # По умолчанию: True.
 SCREENER_SORT_BY_AMORT_START_DATE = True
 
-# Множитель для нормализации цены в расчете YTM на этапе Screener.
-# Формула: price_share = PRICE * YTM_PRICE_FACEVALUE_MULTIPLIER,
-# затем dirty_price = price_share * FACEVALUE + НКД.
-# Если после умножения получается значение > 2, цена дополнительно делится на 100
-# (авто-режим для источников, где PRICE приходит в процентах: 94.39 => 0.9439).
-# Значение: число > 0.
-# По умолчанию: 1.0.
-# Для принудительной работы «как раньше» с процентными ценами можно выставить 0.01.
-YTM_PRICE_FACEVALUE_MULTIPLIER = 1.0
-
 # Сколько знаков после запятой сохранять в колонке YTM в таблице Screener.
 # Значение: целое число >= 0.
 # По умолчанию: 4.
 YTM_OUTPUT_PRECISION = 4
+
+# Включать ли встроенный self-check расчета YTM на этапе Screener.
+# Проверки не пишут в консоль, только в лог.
+# Значения: True/False.
+# По умолчанию: True.
+YTM_SELFCHECK_ENABLED = True
+
+# Режим strict для self-check YTM.
+# Если True и проверка не пройдена — скрипт завершится ошибкой.
+# Если False — ошибки self-check попадут в лог как warning.
+# Значения: True/False.
+# По умолчанию: False.
+YTM_SELFCHECK_STRICT = False
 
 # Режим склейки Merge-таблиц по ISIN между MOEX и Доходъ.
 # Если True, в Merge попадают только бумаги, которые есть в обеих таблицах
