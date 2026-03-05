@@ -2514,6 +2514,35 @@ def _pick_offer_date(corpbonds_offer: str | None, smartlab_offer: str | None) ->
     return _normalize_date_to_iso(smartlab_offer)
 
 
+def _parse_decimal_value(raw_value: object) -> float | None:
+    if raw_value is None:
+        return None
+    value = str(raw_value).replace("\xa0", " ").strip()
+    if not value:
+        return None
+
+    normalized = value.replace(" ", "").replace(",", ".")
+    try:
+        return float(normalized)
+    except ValueError:
+        return None
+
+
+def _prepare_screener_export_row(headers: list[str], row_values: list[object]) -> list[object]:
+    date_columns = {"AmortStarrtDate", "MATDATE", "Offerdate", "Ближайший купон"}
+
+    for index, header in enumerate(headers):
+        value = row_values[index]
+        if header in date_columns:
+            parsed = _parse_bond_date(None if value is None else str(value))
+            row_values[index] = parsed.date() if parsed else None
+            continue
+        if header == "Ликвидность":
+            row_values[index] = _parse_decimal_value(value)
+
+    return row_values
+
+
 def _normalize_bond_type(raw_value: str | None) -> str:
     value = str(raw_value or "").replace("\xa0", " ")
     return " ".join(value.split()).casefold()
@@ -3511,6 +3540,7 @@ def export_screener_excel(conn: sqlite3.Connection) -> dict[str, int]:
             row_values[3] = _symbolize_yes_no(row_values[3])
             row_values[4] = _symbolize_yes_no(row_values[4])
             row_values[5] = _symbolize_yes_no(row_values[5])
+            row_values = _prepare_screener_export_row(headers, row_values)
             ws.append(row_values)
         counts[sheet_name] = len(rows)
 
@@ -3529,8 +3559,19 @@ def export_screener_excel(conn: sqlite3.Connection) -> dict[str, int]:
             ws.column_dimensions[column_letter].width = min(max_len + 2, 80)
 
         liquidity_col_idx = headers.index("Ликвидность") + 1
+        date_col_indices = [
+            headers.index(column_name) + 1
+            for column_name in ("AmortStarrtDate", "MATDATE", "Offerdate", "Ближайший купон")
+        ]
+        if ws.max_row >= 2:
+            for row_idx in range(2, ws.max_row + 1):
+                for col_idx in date_col_indices:
+                    ws.cell(row=row_idx, column=col_idx).number_format = "yyyy-mm-dd"
+
         liquidity_col_letter = ws.cell(row=1, column=liquidity_col_idx).column_letter
         if ws.max_row >= 2:
+            for row_idx in range(2, ws.max_row + 1):
+                ws.cell(row=row_idx, column=liquidity_col_idx).number_format = "0.0"
             data_bar_rule = Rule(
                 type="dataBar",
                 dataBar=DataBar(
