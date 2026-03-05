@@ -3630,6 +3630,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                     str(row[23] or "").strip(),
                     str(row[24] or "").strip(),
                     str(row[25] or "").strip(),
+                    str(row[26] or "").strip(),
                     str(score),
                     source_list,
                 )
