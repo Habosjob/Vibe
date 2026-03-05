@@ -339,6 +339,19 @@ SCREENER_SORT_BY_AMORT_START_DATE = True
 # По умолчанию: 4.
 YTM_OUTPUT_PRECISION = 4
 
+# Включать ли встроенный self-check расчета YTM на этапе Screener.
+# Проверки не пишут в консоль, только в лог.
+# Значения: True/False.
+# По умолчанию: True.
+YTM_SELFCHECK_ENABLED = True
+
+# Режим strict для self-check YTM.
+# Если True и проверка не пройдена — скрипт завершится ошибкой.
+# Если False — ошибки self-check попадут в лог как warning.
+# Значения: True/False.
+# По умолчанию: False.
+YTM_SELFCHECK_STRICT = False
+
 # Режим склейки Merge-таблиц по ISIN между MOEX и Доходъ.
 # Если True, в Merge попадают только бумаги, которые есть в обеих таблицах
 # (INNER JOIN по ISIN). Если False — используются все бумаги из MOEX и
