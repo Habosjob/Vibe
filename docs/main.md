@@ -204,7 +204,14 @@ python main.py
 - TTL: `CORPBONDS_CACHE_TTL_HOURS` (по умолчанию 12 часов). Если запись по `SECID` свежее TTL, повторный HTTP-запрос не выполняется.
 - Производительность:
   - многопоточная загрузка (`ThreadPoolExecutor`) с числом потоков `CORPBONDS_MAX_WORKERS`;
+  - HTTP-сессия переиспользуется внутри каждого потока (меньше накладных расходов на TLS/соединения);
   - HTTP-таймаут настраивается `CORPBONDS_REQUEST_TIMEOUT_SECONDS`.
+- После обновления `CorpbondsBonds` данные переносятся в `MergeGreenBonds` и `MergeYellowBonds`:
+  - маппинг идет строго по `SECID`;
+  - колонки добавляются в Merge-таблицы с префиксом `Corpbonds_`;
+  - режим матчинга управляется `MERGE_REQUIRE_CORPBONDS_SECID_MATCH`:
+    - `True` (по умолчанию) — `INNER JOIN` (в Merge остаются только бумаги, у которых `SECID` найден в Corpbonds);
+    - `False` — `LEFT JOIN` (строки Merge сохраняются, Corpbonds-колонки заполняются при наличии совпадения).
 - Snapshot: `BaseSnapshots/corpbonds_snapshot.xlsx` (5 случайных уникальных `SECID`).
 
 ## Логика MergeGreenBonds / MergeYellowBonds

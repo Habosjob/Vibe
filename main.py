@@ -10,6 +10,7 @@ import random
 import re
 import sqlite3
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
@@ -2231,6 +2232,25 @@ MERGE_DOHOD_COLUMNS = [
     "Премия/Дисконт к базовому индексу (для FRN)",
 ]
 
+CORPBONDS_COLUMNS_MAP = {
+    'Corpbonds_Цена последняя': 'Цена последняя',
+    'Corpbonds_Тип купона': 'Тип купона',
+    'Corpbonds_Формула купона': 'Формула купона',
+    'Corpbonds_Дата ближайшего купона': 'Дата ближайшего купона',
+    'Corpbonds_Дата ближайшей оферты': 'Дата ближайшей оферты',
+    'Corpbonds_Наличие амортизации': 'Наличие амортизации',
+    'Corpbonds_Купон лесенкой': 'Купон лесенкой',
+}
+
+
+def ensure_table_columns(conn: sqlite3.Connection, table_name: str, columns: list[str]) -> None:
+    existing_columns = {
+        str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    }
+    for column in columns:
+        if column not in existing_columns:
+            conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{column}" TEXT')
+
 
 def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
     columns_sql = ['"ISIN" TEXT PRIMARY KEY']
@@ -2240,7 +2260,10 @@ def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
         columns_sql.append(f'"{column}" TEXT')
     for column in MERGE_DOHOD_COLUMNS:
         columns_sql.append(f'"{column}" TEXT')
+    for column in CORPBONDS_COLUMNS_MAP:
+        columns_sql.append(f'"{column}" TEXT')
     conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({", ".join(columns_sql)})')
+    ensure_table_columns(conn, table_name, list(CORPBONDS_COLUMNS_MAP.keys()))
     conn.commit()
 
 
@@ -2251,12 +2274,14 @@ def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, sc
 
     insert_columns = [f'"{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"]
     insert_columns = ['"ISIN"'] + insert_columns + [f'"{column}"' for column in MERGE_DOHOD_COLUMNS]
+    insert_columns += [f'"{column}"' for column in CORPBONDS_COLUMNS_MAP]
 
     selected_columns = [f'm."ISIN"']
     selected_columns.extend(
         f'm."{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"
     )
     selected_columns.extend(f'd."{column}"' for column in MERGE_DOHOD_COLUMNS)
+    selected_columns.extend(f"'' AS \"{column}\"" for column in CORPBONDS_COLUMNS_MAP)
     placeholders = ", ".join(["?"] * len(insert_columns))
 
     rows = conn.execute(
@@ -2493,8 +2518,14 @@ def get_stale_corpbonds_secids(conn: sqlite3.Connection, secids: list[str], now_
 
 
 def fetch_corpbonds_payload(secid: str) -> dict[str, str]:
+    if not hasattr(fetch_corpbonds_payload, "_thread_local"):
+        fetch_corpbonds_payload._thread_local = threading.local()  # type: ignore[attr-defined]
+    thread_local = fetch_corpbonds_payload._thread_local  # type: ignore[attr-defined]
+    if not hasattr(thread_local, "session"):
+        thread_local.session = requests.Session()
+
     url = f"{config.CORPBONDS_BOND_URL_PREFIX}{secid}"
-    response = requests.get(url, timeout=config.CORPBONDS_REQUEST_TIMEOUT_SECONDS)
+    response = thread_local.session.get(url, timeout=config.CORPBONDS_REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     data = parse_corpbonds_page_fields(response.text)
     data["SECID"] = secid
@@ -2577,6 +2608,51 @@ def refresh_corpbonds_data_if_needed(
         config.CORPBONDS_CACHE_TTL_HOURS,
     )
     return len(secids), len(stale_secids), len(fetched_rows)
+
+
+def _get_table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
+    return [str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
+
+
+def apply_corpbonds_inner_join_to_merge_table(conn: sqlite3.Connection, table_name: str) -> int:
+    ensure_merge_table(conn, table_name)
+    merge_columns = _get_table_columns(conn, table_name)
+    require_match = bool(getattr(config, "MERGE_REQUIRE_CORPBONDS_SECID_MATCH", True))
+    select_columns: list[str] = []
+    for column in merge_columns:
+        if column in CORPBONDS_COLUMNS_MAP:
+            source_column = CORPBONDS_COLUMNS_MAP[column]
+            select_columns.append(f'c."{source_column}" AS "{column}"')
+        else:
+            select_columns.append(f'm."{column}"')
+
+    join_type = "INNER" if require_match else "LEFT"
+    secid_condition = "WHERE TRIM(COALESCE(m.\"SECID\", '')) <> ''" if require_match else ""
+
+    conn.execute("BEGIN")
+    conn.execute(f'DROP TABLE IF EXISTS "{table_name}__tmp_corpbonds"')
+    conn.execute(
+        f'''
+        CREATE TABLE "{table_name}__tmp_corpbonds" AS
+        SELECT {", ".join(select_columns)}
+        FROM "{table_name}" m
+        {join_type} JOIN "{config.CORPBONDS_TABLE_NAME}" c
+            ON TRIM(COALESCE(m."SECID", '')) = TRIM(COALESCE(c."SECID", ''))
+        {secid_condition}
+        '''
+    )
+    conn.execute(f'DELETE FROM "{table_name}"')
+    conn.execute(
+        f'''
+        INSERT OR REPLACE INTO "{table_name}" ({", ".join(f'"{column}"' for column in merge_columns)})
+        SELECT {", ".join(f'"{column}"' for column in merge_columns)}
+        FROM "{table_name}__tmp_corpbonds"
+        '''
+    )
+    conn.execute(f'DROP TABLE "{table_name}__tmp_corpbonds"')
+    rows_after = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+    conn.commit()
+    return int(rows_after)
 
 
 def export_corpbonds_snapshot(conn: sqlite3.Connection) -> int:
@@ -2837,19 +2913,26 @@ def main() -> None:
 
         print("Этап 9: Обогащение Merge* из Corpbonds")
         s = perf_counter()
-        with progress(total=2, desc="Corpbonds enrich", unit="шаг") as pbar:
+        with progress(total=4, desc="Corpbonds enrich", unit="шаг") as pbar:
             with connect_db(db_path) as conn:
                 secids_total, secids_requested, secids_saved = refresh_corpbonds_data_if_needed(
                     conn, logger, datetime.now(timezone.utc)
                 )
                 pbar.update(1)
+                green_rows_after_corpbonds = apply_corpbonds_inner_join_to_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
+                pbar.update(1)
+                yellow_rows_after_corpbonds = apply_corpbonds_inner_join_to_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
+                pbar.update(1)
                 corpbonds_snapshot = export_corpbonds_snapshot(conn)
                 pbar.update(1)
             logger.info(
-                "Corpbonds: SECID в Merge=%s, к запросу по TTL=%s, успешно сохранено=%s, snapshot=%s",
+                "Corpbonds: SECID в Merge=%s, к запросу по TTL=%s, успешно сохранено=%s, "
+                "INNER JOIN обновил MergeGreen=%s, MergeYellow=%s, snapshot=%s",
                 secids_total,
                 secids_requested,
                 secids_saved,
+                green_rows_after_corpbonds,
+                yellow_rows_after_corpbonds,
                 corpbonds_snapshot,
             )
         stage_times["Этап 9: Обогащение Merge* из Corpbonds"] = perf_counter() - s

@@ -369,3 +369,11 @@ CORPBONDS_REQUEST_TIMEOUT_SECONDS = 30
 # Имя Excel-файла снапшота по Corpbonds-обогащению (5 случайных SECID).
 # По умолчанию: corpbonds_snapshot.xlsx.
 CORPBONDS_SNAPSHOT_FILENAME = "corpbonds_snapshot.xlsx"
+
+# Режим объединения Merge* c Corpbonds по SECID.
+# Если True, после этапа Corpbonds в Merge* остаются только бумаги,
+# для которых найден SECID в Corpbonds (INNER JOIN), и поля Corpbonds
+# записываются прямо в Merge-таблицы в колонки с префиксом "Corpbonds_".
+# Значения: True/False.
+# По умолчанию: True.
+MERGE_REQUIRE_CORPBONDS_SECID_MATCH = True
