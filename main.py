@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
+from openpyxl.formatting.rule import DataBar, FormatObject, Rule
 from playwright.sync_api import Error as PWError
 from playwright.sync_api import TimeoutError as PWTimeoutError
 from playwright.sync_api import sync_playwright
@@ -2246,7 +2247,7 @@ MERGE_DOHOD_COLUMNS = [
     "Событие в дату",
     "Коэф. Ликвидности (max=100)",
     "Медиана дневного оборота (млн в валюте торгов)",
-    "Цена, % от номинала",
+    "Цена Доход",
     "НКД",
     "Размер купона",
     "Текущий купон, %",
@@ -2255,6 +2256,71 @@ MERGE_DOHOD_COLUMNS = [
     "Субординированная (да/нет)",
     "Базовый индекс (для FRN)",
     "Премия/Дисконт к базовому индексу (для FRN)",
+]
+
+SCREENER_TABLE_NAME = config.SCREENER_TABLE_NAME
+
+SCREENER_SOURCE_TABLES = (
+    (config.MERGE_GREEN_TABLE_NAME, "Green", 1),
+    (config.MERGE_YELLOW_TABLE_NAME, "Yellow", 0),
+)
+
+SCREENER_COLUMNS = [
+    "ISIN",
+    "Название",
+    "QUALIFIED",
+    "Субординированная (да/нет)",
+    "Corpbonds_Наличие амортизации",
+    "Corpbonds_Купон лесенкой",
+    "AmortStarrtDate",
+    "MATDATE",
+    "Offerdate",
+    "Corpbonds_Дата ближайшего купона",
+    "Corpbonds_Тип купона",
+    "Smartlab_Длительность купона, дней",
+    "НКД",
+    "Текущий купон, %",
+    "YTM",
+    "Базовый индекс (для FRN)",
+    "Премия/Дисконт к базовому индексу (для FRN)",
+    "Corpbonds_Формула купона",
+    "FACEVALUE",
+    "FACEUNIT",
+    "Коэф. Ликвидности (max=100)",
+    "Corpbonds_Цена последняя",
+    "Цена Доход",
+    "Smartlab_Котировка облигации, %",
+    "PRICE",
+    "Score",
+    "SourceList",
+]
+
+SCREENER_EXPORT_COLUMNS = [
+    ("ISIN", "ISIN"),
+    ("Название", "Название"),
+    ("QUALIFIED", "Квал"),
+    ("Субординированная (да/нет)", "Суборд"),
+    ("Corpbonds_Наличие амортизации", "Аморт"),
+    ("Corpbonds_Купон лесенкой", "Лесенка"),
+    ("AmortStarrtDate", "AmortStarrtDate"),
+    ("MATDATE", "MATDATE"),
+    ("Offerdate", "Offerdate"),
+    ("Corpbonds_Дата ближайшего купона", "Ближайший купон"),
+    ("Corpbonds_Тип купона", "Тип купона"),
+    ("Smartlab_Длительность купона, дней", "КупонПериод"),
+    ("НКД", "НКД"),
+    ("Текущий купон, %", "Купон, %"),
+    ("YTM", "YTM"),
+    ("Базовый индекс (для FRN)", "Базовый индекс"),
+    ("Премия/Дисконт к базовому индексу (для FRN)", "Премия, индекс"),
+    ("Corpbonds_Формула купона", "Формула купона"),
+    ("FACEVALUE", "FACEVALUE"),
+    ("FACEUNIT", "FACEUNIT"),
+    ("Коэф. Ликвидности (max=100)", "Ликвидность"),
+    ("Corpbonds_Цена последняя", "Цена Corpbonds"),
+    ("Цена Доход", "Цена Доход"),
+    ("Smartlab_Котировка облигации, %", "Цена Smartlab"),
+    ("PRICE", "Цена MOEX"),
 ]
 
 CORPBONDS_COLUMNS_MAP = {
@@ -2304,10 +2370,27 @@ def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
         columns_sql.append(f'"{column}" TEXT')
     columns_sql.append(f'"{AMORTIZATION_START_COLUMN}" TEXT')
     conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({", ".join(columns_sql)})')
+    # Обратная совместимость: в старых БД колонка называлась
+    # "Цена, % от номинала". Новый пайплайн использует "Цена Доход".
+    existing_columns = {
+        str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    }
+    if "Цена Доход" not in existing_columns and "Цена, % от номинала" in existing_columns:
+        conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "Цена Доход" TEXT')
+        conn.execute(
+            f'''
+            UPDATE "{table_name}"
+            SET "Цена Доход" = COALESCE(NULLIF(TRIM(COALESCE("Цена Доход", '')), ''), "Цена, % от номинала")
+            '''
+        )
     ensure_table_columns(
         conn,
         table_name,
-        list(CORPBONDS_COLUMNS_MAP.keys()) + list(SMARTLAB_COLUMNS_MAP.keys()) + [AMORTIZATION_START_COLUMN],
+        [column for column in MERGE_MOEX_COLUMNS if column != "ISIN"]
+        + MERGE_DOHOD_COLUMNS
+        + list(CORPBONDS_COLUMNS_MAP.keys())
+        + list(SMARTLAB_COLUMNS_MAP.keys())
+        + [AMORTIZATION_START_COLUMN],
     )
     conn.commit()
 
@@ -2327,7 +2410,11 @@ def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, sc
     selected_columns.extend(
         f'm."{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"
     )
-    selected_columns.extend(f'd."{column}"' for column in MERGE_DOHOD_COLUMNS)
+    for column in MERGE_DOHOD_COLUMNS:
+        if column == "Цена Доход":
+            selected_columns.append('d."Цена, % от номинала" AS "Цена Доход"')
+            continue
+        selected_columns.append(f'd."{column}"')
     selected_columns.extend(f"'' AS \"{column}\"" for column in CORPBONDS_COLUMNS_MAP)
     selected_columns.extend(f"'' AS \"{column}\"" for column in SMARTLAB_COLUMNS_MAP)
     selected_columns.append(f"'' AS \"{AMORTIZATION_START_COLUMN}\"")
@@ -2402,6 +2489,31 @@ def _parse_bond_date(raw_value: str | None) -> datetime | None:
     return None
 
 
+def _normalize_date_to_iso(raw_value: str | None) -> str:
+    parsed = _parse_bond_date(raw_value)
+    return parsed.strftime("%Y-%m-%d") if parsed else ""
+
+
+def _to_binary_flag(raw_value: str | None) -> int:
+    value = str(raw_value or "").strip().casefold()
+    if value in {"1", "да", "yes", "true"}:
+        return 1
+    return 0
+
+
+def _merge_qualified(is_qualified_investors: str | None, smartlab_qualified: str | None) -> int:
+    if _to_binary_flag(is_qualified_investors) == 1:
+        return 1
+    return 1 if _to_binary_flag(smartlab_qualified) == 1 else 0
+
+
+def _pick_offer_date(corpbonds_offer: str | None, smartlab_offer: str | None) -> str:
+    corpbonds_date = _normalize_date_to_iso(corpbonds_offer)
+    if corpbonds_date:
+        return corpbonds_date
+    return _normalize_date_to_iso(smartlab_offer)
+
+
 def _normalize_bond_type(raw_value: str | None) -> str:
     value = str(raw_value or "").replace("\xa0", " ")
     return " ".join(value.split()).casefold()
@@ -2415,14 +2527,16 @@ def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, 
 
     rows_before = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
     rows = conn.execute(
-        f'SELECT "ISIN", "MATDATE", "Ближайшая дата погашения/оферты (Дата)", "BOND_TYPE" FROM "{table_name}"'
+        f'SELECT "ISIN", "MATDATE", "Ближайшая дата погашения/оферты (Дата)", "BOND_TYPE", "Corpbonds_Дата ближайшей оферты", "Smartlab_Дата оферты", "{AMORTIZATION_START_COLUMN}" FROM "{table_name}"'
     ).fetchall()
 
     matdate_rule_isins: set[str] = set()
     dohod_nearest_rule_isins: set[str] = set()
     bond_type_rule_isins: set[str] = set()
+    offerdate_rule_isins: set[str] = set()
+    amortstartdate_rule_isins: set[str] = set()
 
-    for isin, matdate, nearest_date, bond_type in rows:
+    for isin, matdate, nearest_date, bond_type, corpbonds_offer, smartlab_offer, amort_start in rows:
         isin_value = str(isin or "").strip()
         if not isin_value:
             continue
@@ -2439,7 +2553,21 @@ def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, 
         if excluded_bond_type and _normalize_bond_type(bond_type) == excluded_bond_type:
             bond_type_rule_isins.add(isin_value)
 
-    isins_to_delete = matdate_rule_isins | dohod_nearest_rule_isins | bond_type_rule_isins
+        offer_dt = _parse_bond_date(_pick_offer_date(corpbonds_offer, smartlab_offer))
+        if offer_dt is not None and (offer_dt.date() - today).days < min_days:
+            offerdate_rule_isins.add(isin_value)
+
+        amort_dt = _parse_bond_date(amort_start)
+        if amort_dt is not None and (amort_dt.date() - today).days < min_days:
+            amortstartdate_rule_isins.add(isin_value)
+
+    isins_to_delete = (
+        matdate_rule_isins
+        | dohod_nearest_rule_isins
+        | bond_type_rule_isins
+        | offerdate_rule_isins
+        | amortstartdate_rule_isins
+    )
     if isins_to_delete:
         placeholders = ", ".join(["?"] * len(isins_to_delete))
         conn.execute("BEGIN")
@@ -2453,6 +2581,8 @@ def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, 
         "excluded_by_matdate_rule": len(matdate_rule_isins),
         "excluded_by_dohod_nearest_rule": len(dohod_nearest_rule_isins),
         "excluded_by_bond_type_rule": len(bond_type_rule_isins),
+        "excluded_by_offerdate_rule": len(offerdate_rule_isins),
+        "excluded_by_amortstartdate_rule": len(amortstartdate_rule_isins),
         "excluded_total": len(isins_to_delete),
     }
 
@@ -3262,6 +3392,161 @@ def export_smartlab_snapshot(conn: sqlite3.Connection) -> int:
     return len(rows)
 
 
+def ensure_screener_table(conn: sqlite3.Connection) -> None:
+    columns_sql = ['"ISIN" TEXT PRIMARY KEY']
+    columns_sql.extend(f'"{column}" TEXT' for column in SCREENER_COLUMNS if column != "ISIN")
+    conn.execute(f'CREATE TABLE IF NOT EXISTS "{SCREENER_TABLE_NAME}" ({", ".join(columns_sql)})')
+    ensure_table_columns(conn, SCREENER_TABLE_NAME, [column for column in SCREENER_COLUMNS if column != "ISIN"])
+    conn.commit()
+
+
+def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
+    ensure_screener_table(conn)
+    conn.execute(f'DELETE FROM "{SCREENER_TABLE_NAME}"')
+
+    totals: dict[str, int] = {"Green": 0, "Yellow": 0}
+    for source_table, source_list, score in SCREENER_SOURCE_TABLES:
+        rows = conn.execute(
+            f'''
+            SELECT
+                "ISIN", "Название", "IS_QUALIFIED_INVESTORS", "Smartlab_Только для квалов?",
+                "Субординированная (да/нет)", "Corpbonds_Наличие амортизации", "Corpbonds_Купон лесенкой",
+                "{AMORTIZATION_START_COLUMN}", "MATDATE", "Corpbonds_Дата ближайшей оферты", "Smartlab_Дата оферты",
+                "Corpbonds_Дата ближайшего купона", "Corpbonds_Тип купона", "Smartlab_Длительность купона, дней",
+                "НКД", "Текущий купон, %", "Базовый индекс (для FRN)",
+                "Премия/Дисконт к базовому индексу (для FRN)", "Corpbonds_Формула купона",
+                "FACEVALUE", "FACEUNIT", "Коэф. Ликвидности (max=100)", "Corpbonds_Цена последняя",
+                "Цена Доход", "Smartlab_Котировка облигации, %", "PRICE"
+            FROM "{source_table}"
+            WHERE TRIM(COALESCE("ISIN", '')) <> ''
+            '''
+        ).fetchall()
+        totals[source_list] = len(rows)
+
+        records: list[tuple[str, ...]] = []
+        for row in rows:
+            records.append(
+                (
+                    str(row[0] or "").strip(),
+                    str(row[1] or "").strip(),
+                    str(_merge_qualified(row[2], row[3])),
+                    str(row[4] or "").strip(),
+                    str(row[5] or "").strip(),
+                    str(row[6] or "").strip(),
+                    _normalize_date_to_iso(row[7]),
+                    _normalize_date_to_iso(row[8]),
+                    _pick_offer_date(row[9], row[10]),
+                    _normalize_date_to_iso(row[11]),
+                    str(row[12] or "").strip(),
+                    str(row[13] or "").strip(),
+                    str(row[14] or "").strip(),
+                    str(row[15] or "").strip(),
+                    "",
+                    str(row[16] or "").strip(),
+                    str(row[17] or "").strip(),
+                    str(row[18] or "").strip(),
+                    str(row[19] or "").strip(),
+                    str(row[20] or "").strip(),
+                    str(row[21] or "").strip(),
+                    str(row[22] or "").strip(),
+                    str(row[23] or "").strip(),
+                    str(row[24] or "").strip(),
+                    str(row[25] or "").strip(),
+                    str(score),
+                    source_list,
+                )
+            )
+
+        if records:
+            column_names = ", ".join(f'"{column}"' for column in SCREENER_COLUMNS)
+            placeholders = ", ".join(["?"] * len(SCREENER_COLUMNS))
+            conn.executemany(
+                f'INSERT OR REPLACE INTO "{SCREENER_TABLE_NAME}" ({column_names}) VALUES ({placeholders})',
+                records,
+            )
+
+    conn.commit()
+    total = conn.execute(f'SELECT COUNT(*) FROM "{SCREENER_TABLE_NAME}"').fetchone()[0]
+    return {"green": totals["Green"], "yellow": totals["Yellow"], "total": int(total)}
+
+
+def _symbolize_boolean(raw_value: str | None) -> str:
+    return "✅" if _to_binary_flag(raw_value) == 1 else "❌"
+
+
+def _symbolize_yes_no(raw_value: str | None) -> str:
+    value = str(raw_value or "").strip().casefold()
+    if value == "да":
+        return "✅"
+    if value == "нет":
+        return "❌"
+    return ""
+
+
+def export_screener_excel(conn: sqlite3.Connection) -> dict[str, int]:
+    wb = Workbook()
+    ws_green = wb.active
+    ws_green.title = "Green"
+    ws_yellow = wb.create_sheet("Yellow")
+
+    headers = [target for _, target in SCREENER_EXPORT_COLUMNS]
+    for ws in (ws_green, ws_yellow):
+        ws.append(headers)
+
+    counts: dict[str, int] = {"Green": 0, "Yellow": 0}
+    for sheet_name in ("Green", "Yellow"):
+        ws = ws_green if sheet_name == "Green" else ws_yellow
+        rows = conn.execute(
+            f'''
+            SELECT {", ".join(f'"{name}"' for name, _ in SCREENER_EXPORT_COLUMNS)}
+            FROM "{SCREENER_TABLE_NAME}"
+            WHERE "SourceList" = ?
+            ORDER BY "Название", "ISIN"
+            ''',
+            (sheet_name,),
+        ).fetchall()
+        for row in rows:
+            row_values = list(row)
+            row_values[2] = _symbolize_boolean(row_values[2])
+            row_values[3] = _symbolize_yes_no(row_values[3])
+            row_values[4] = _symbolize_yes_no(row_values[4])
+            row_values[5] = _symbolize_yes_no(row_values[5])
+            ws.append(row_values)
+        counts[sheet_name] = len(rows)
+
+        header_fill = PatternFill(fill_type="solid", fgColor=config.EMITENTS_HEADER_FILL_COLOR)
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+        ws.auto_filter.ref = ws.dimensions
+        ws.freeze_panes = "A2"
+        for column_cells in ws.columns:
+            max_len = 0
+            column_letter = column_cells[0].column_letter
+            for cell in column_cells:
+                value = "" if cell.value is None else str(cell.value)
+                max_len = max(max_len, len(value))
+            ws.column_dimensions[column_letter].width = min(max_len + 2, 80)
+
+        liquidity_col_idx = headers.index("Ликвидность") + 1
+        liquidity_col_letter = ws.cell(row=1, column=liquidity_col_idx).column_letter
+        if ws.max_row >= 2:
+            data_bar_rule = Rule(
+                type="dataBar",
+                dataBar=DataBar(
+                    cfvo=[FormatObject(type="min"), FormatObject(type="max")],
+                    color="63C384",
+                    showValue=True,
+                ),
+            )
+            ws.conditional_formatting.add(f"{liquidity_col_letter}2:{liquidity_col_letter}{ws.max_row}", data_bar_rule)
+
+    screener_path = config.BASE_DIR / config.SCREENER_XLSX_FILENAME
+    wb.save(screener_path)
+    counts["total"] = counts["Green"] + counts["Yellow"]
+    return counts
+
+
 def main() -> None:
     logger = setup_logging()
     stage_times: dict[str, float] = {}
@@ -3454,20 +3739,24 @@ def main() -> None:
             presorter_summary["MergeGreen"] = green_presort
             presorter_summary["MergeYellow"] = yellow_presort
             logger.info(
-                "Presorter: MergeGreen rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, total=%s); "
-                "MergeYellow rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, total=%s); "
+                "Presorter: MergeGreen rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, offerdate=%s, amortstart=%s, total=%s); "
+                "MergeYellow rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, offerdate=%s, amortstart=%s, total=%s); "
                 "dohod_nearest_rule_enabled=%s",
                 green_presort["rows_before"],
                 green_presort["rows_after"],
                 green_presort["excluded_by_matdate_rule"],
                 green_presort["excluded_by_dohod_nearest_rule"],
                 green_presort["excluded_by_bond_type_rule"],
+                green_presort["excluded_by_offerdate_rule"],
+                green_presort["excluded_by_amortstartdate_rule"],
                 green_presort["excluded_total"],
                 yellow_presort["rows_before"],
                 yellow_presort["rows_after"],
                 yellow_presort["excluded_by_matdate_rule"],
                 yellow_presort["excluded_by_dohod_nearest_rule"],
                 yellow_presort["excluded_by_bond_type_rule"],
+                yellow_presort["excluded_by_offerdate_rule"],
+                yellow_presort["excluded_by_amortstartdate_rule"],
                 yellow_presort["excluded_total"],
                 config.PRESORTER_USE_DOHOD_NEAREST_DATE,
             )
@@ -3602,6 +3891,25 @@ def main() -> None:
             )
         stage_times["Этап 11: Обогащение Merge* из Smartlab"] = perf_counter() - s
 
+        print("Этап 12: Screener (SQL + Excel)")
+        s = perf_counter()
+        with progress(total=2, desc="Screener", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                screener_stats = rebuild_screener_table(conn)
+                pbar.update(1)
+                screener_export = export_screener_excel(conn)
+                pbar.update(1)
+            logger.info(
+                "Screener: SQL rows green=%s yellow=%s total=%s; Excel rows green=%s yellow=%s total=%s",
+                screener_stats.get("green", 0),
+                screener_stats.get("yellow", 0),
+                screener_stats.get("total", 0),
+                screener_export.get("Green", 0),
+                screener_export.get("Yellow", 0),
+                screener_export.get("total", 0),
+            )
+        stage_times["Этап 12: Screener (SQL + Excel)"] = perf_counter() - s
+
         print("=====\nГотово")
     except Exception as exc:
         logger.exception("Ошибка выполнения: %s", exc)
@@ -3625,6 +3933,12 @@ def main() -> None:
                 )
                 print(
                     f"Исключено бумаг по правилу Bond_TYPE: {item.get('excluded_by_bond_type_rule', 0)}"
+                )
+                print(
+                    f"Исключено бумаг по правилу Offerdate < {config.PRESORTER_MIN_DAYS_TO_EVENT} дней: {item.get('excluded_by_offerdate_rule', 0)}"
+                )
+                print(
+                    f"Исключено бумаг по правилу AmortStarrtDate < {config.PRESORTER_MIN_DAYS_TO_EVENT} дней: {item.get('excluded_by_amortstartdate_rule', 0)}"
                 )
         print(f"Всего: {total:.2f} сек")
 
