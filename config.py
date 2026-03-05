@@ -325,6 +325,15 @@ SCREENER_TABLE_NAME = "Screener"
 # По умолчанию: Screener.xlsx.
 SCREENER_XLSX_FILENAME = "Screener.xlsx"
 
+# Сортировать ли строки в Excel-витрине Screener по AmortStarrtDate.
+# Если True — в листах Green/Yellow сначала идут бумаги с ближайшей датой
+# амортизации (по возрастанию), пустые/невалидные даты — в конце; при
+# одинаковой дате добавляется вторичная сортировка по Названию и ISIN.
+# Если False — сохраняется исходный порядок строк из SQL-таблицы Screener.
+# Значения: True/False.
+# По умолчанию: True.
+SCREENER_SORT_BY_AMORT_START_DATE = True
+
 # Режим склейки Merge-таблиц по ISIN между MOEX и Доходъ.
 # Если True, в Merge попадают только бумаги, которые есть в обеих таблицах
 # (INNER JOIN по ISIN). Если False — используются все бумаги из MOEX и
