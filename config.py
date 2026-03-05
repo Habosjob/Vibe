@@ -394,8 +394,8 @@ SMARTLAB_CACHE_TTL_HOURS = 12
 
 # Количество потоков для параллельной загрузки Smart-Lab.
 # Значение: целое число > 0.
-# По умолчанию: 16.
-SMARTLAB_MAX_WORKERS = 16
+# По умолчанию: 32.
+SMARTLAB_MAX_WORKERS = 32
 
 # Таймаут HTTP-запроса к Smart-Lab (секунды).
 # Значение: число (int/float).
@@ -413,3 +413,41 @@ SMARTLAB_SNAPSHOT_FILENAME = "smartlab_snapshot.xlsx"
 # Значения: True/False.
 # По умолчанию: True.
 MERGE_REQUIRE_SMARTLAB_SECID_MATCH = True
+
+# URL-шаблон MOEX ISS для амортизаций по облигации.
+# Формат: строка с {secid}, подставляется тикер SECID.
+# По умолчанию: публичный endpoint MOEX с блоком amortizations.
+MOEX_AMORTIZATION_URL_TEMPLATE = (
+    "https://iss.moex.com/iss/statistics/engines/stock/markets/bonds/bondization/"
+    "{secid}.json?iss.only=amortizations&iss.meta=off"
+)
+
+# Имя таблицы с амортизациями MOEX.
+# По умолчанию: MoexAmortizations.
+MOEX_AMORTIZATION_TABLE_NAME = "MoexAmortizations"
+
+# TTL для повторного запроса амортизаций MOEX по SECID.
+# Значение: целое число > 0 (в часах).
+# По умолчанию: 12 часов.
+MOEX_AMORTIZATION_CACHE_TTL_HOURS = 12
+
+# Количество потоков для параллельной загрузки амортизаций MOEX.
+# Значение: целое число > 0.
+# По умолчанию: 24.
+MOEX_AMORTIZATION_MAX_WORKERS = 24
+
+# Таймаут HTTP-запроса к MOEX амортизациям (секунды).
+# Значение: число (int/float).
+# По умолчанию: 20.
+MOEX_AMORTIZATION_REQUEST_TIMEOUT_SECONDS = 20
+
+# Имя Excel-файла снапшота по амортизациям MOEX.
+# В файл выгружаются все строки по 5 случайным SECID.
+# По умолчанию: moex_amortizations_snapshot.xlsx.
+MOEX_AMORTIZATION_SNAPSHOT_FILENAME = "moex_amortizations_snapshot.xlsx"
+
+# Значение в Corpbonds_Наличие амортизации, при котором бумага идет в запрос MOEX.
+# Сравнение выполняется без учета регистра и лишних пробелов.
+# По умолчанию: "Да".
+MOEX_AMORTIZATION_REQUIRED_FLAG = "Да"
+
