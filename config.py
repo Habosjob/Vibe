@@ -368,7 +368,7 @@ CBR_CACHE_TTL_HOURS = 12
 # Если True, updated_at_utc очищается и индикаторы запрашиваются заново.
 # Значения: True/False.
 # По умолчанию: False.
-FORCE_CBR_TTL_RESET = False
+FORCE_CBR_TTL_RESET = True
 
 # Паттерны для детекта инфляционных линкеров.
 # Сравнение выполняется без учета регистра.
@@ -432,7 +432,7 @@ CORPBONDS_CACHE_TTL_HOURS = 12
 # Если True, updated_at_utc очищается у всех записей CorpbondsBonds.
 # Значения: True/False.
 # По умолчанию: False.
-FORCE_CORPBONDS_TTL_RESET = False
+FORCE_CORPBONDS_TTL_RESET = True
 
 # Количество потоков для параллельной загрузки Corpbonds.
 # Значение: целое число > 0.
