@@ -1,4 +1,4 @@
-# Скрипт `main.py` — загрузка MOEX bonds + Доходъ bonds + рейтинги НРА/АКРА/НКР/RAEX + витрина эмитентов
+# Скрипт `main.py` — загрузка MOEX bonds + Доходъ bonds + рейтинги НРА/АКРА/НКР/RAEX + витрина эмитентов + обогащение Corpbonds/Smartlab
 
 ## Что делает скрипт
 1. Загружает CSV с MOEX по ссылке из `config.py`.
@@ -168,6 +168,10 @@ python main.py
 - `PRESORTER_EXCLUDED_BOND_TYPE` — значение `BOND_TYPE`, которое исключается из Merge-таблиц на этапе Presorter.
 - `PRESORTER_USE_DOHOD_NEAREST_DATE` — включать отдельное правило Presorter по полю `Ближайшая дата погашения/оферты (Дата)` из Доходъ (`True` по умолчанию).
 - `MERGE_REQUIRE_DOHOD_ISIN_MATCH` — требовать наличие бумаги одновременно в MOEX и Доходъ при сборке Merge (`True` по умолчанию).
+- `CORPBONDS_CACHE_TTL_HOURS` / `CORPBONDS_MAX_WORKERS` / `CORPBONDS_REQUEST_TIMEOUT_SECONDS` — TTL, параллелизм и таймаут этапа Corpbonds.
+- `MERGE_REQUIRE_CORPBONDS_SECID_MATCH` — режим JOIN Merge* c Corpbonds (`INNER` при `True`, `LEFT` при `False`).
+- `SMARTLAB_CACHE_TTL_HOURS` / `SMARTLAB_MAX_WORKERS` / `SMARTLAB_REQUEST_TIMEOUT_SECONDS` — TTL, параллелизм и таймаут этапа Smartlab.
+- `MERGE_REQUIRE_SMARTLAB_SECID_MATCH` — режим JOIN Merge* c Smartlab (`INNER` при `True`, `LEFT` при `False`).
 
 ## Примечание для Windows
 Проект ориентирован на Windows-сценарий:
@@ -213,6 +217,33 @@ python main.py
     - `True` (по умолчанию) — `INNER JOIN` (в Merge остаются только бумаги, у которых `SECID` найден в Corpbonds);
     - `False` — `LEFT JOIN` (строки Merge сохраняются, Corpbonds-колонки заполняются при наличии совпадения).
 - Snapshot: `BaseSnapshots/corpbonds_snapshot.xlsx` (5 случайных уникальных `SECID`).
+
+
+## Логика обогащения Smartlab (этап 10)
+- Источник: `https://smart-lab.ru/q/bonds/<SECID>/` (используется именно `SECID`).
+- Входные данные: уникальные `SECID` из таблиц `MergeGreenBonds` и `MergeYellowBonds`.
+- Что собирается по каждой бумаге:
+  - `Котировка облигации, %`;
+  - `Изм за день, %`;
+  - `Объем день, млн. руб`;
+  - `Объем день, штук`;
+  - `Дата оферты`;
+  - `Только для квалов?`;
+  - `Длительность купона, дней`.
+- Куда сохраняется: `DB/bonds.sqlite3`, таблица `SmartlabBonds`.
+- Режим обновления: инкрементальный upsert по `SECID` (первичный ключ).
+- TTL: `SMARTLAB_CACHE_TTL_HOURS` (по умолчанию 12 часов). Если запись по `SECID` свежее TTL, повторный HTTP-запрос не выполняется.
+- Производительность:
+  - многопоточная загрузка (`ThreadPoolExecutor`) с числом потоков `SMARTLAB_MAX_WORKERS`;
+  - HTTP-сессия переиспользуется внутри каждого потока;
+  - HTTP-таймаут настраивается `SMARTLAB_REQUEST_TIMEOUT_SECONDS`.
+- После обновления `SmartlabBonds` данные переносятся в `MergeGreenBonds` и `MergeYellowBonds`:
+  - маппинг идет строго по `SECID`;
+  - колонки добавляются в Merge-таблицы с префиксом `Smartlab_`;
+  - режим матчинга управляется `MERGE_REQUIRE_SMARTLAB_SECID_MATCH`:
+    - `True` (по умолчанию) — `INNER JOIN`;
+    - `False` — `LEFT JOIN`.
+- Snapshot: `BaseSnapshots/smartlab_snapshot.xlsx` (5 случайных уникальных `SECID`).
 
 ## Логика MergeGreenBonds / MergeYellowBonds
 - БД: `DB/bonds.sqlite3` (основная база).
