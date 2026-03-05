@@ -2867,23 +2867,39 @@ def ensure_moex_amortizations_table(conn: sqlite3.Connection) -> None:
 
 
 def collect_amortization_secids(conn: sqlite3.Connection) -> list[str]:
-    expected = str(getattr(config, "MOEX_AMORTIZATION_REQUIRED_FLAG", "Да")).strip().casefold()
+    # Важно: в стандартной SQLite функция LOWER/UPPER без ICU корректно работает
+    # в основном для ASCII. Для кириллицы (например "Да") фильтрация через SQL
+    # может не сработать. Поэтому нормализуем значение в Python.
+    expected = str(getattr(config, "MOEX_AMORTIZATION_REQUIRED_FLAG", "Да"))
+
+    def normalize_flag(value: str | None) -> str:
+        raw = str(value or "").replace("\xa0", " ")
+        return " ".join(raw.split()).casefold()
+
+    expected_normalized = normalize_flag(expected)
     rows = conn.execute(
         f'''
-        SELECT DISTINCT TRIM(COALESCE("SECID", ''))
+        SELECT TRIM(COALESCE("SECID", '')) AS secid,
+               COALESCE("Corpbonds_Наличие амортизации", '') AS has_amort
         FROM "{config.MERGE_GREEN_TABLE_NAME}"
         WHERE TRIM(COALESCE("SECID", '')) <> ''
-          AND LOWER(TRIM(COALESCE("Corpbonds_Наличие амортизации", ''))) = ?
-        UNION
-        SELECT DISTINCT TRIM(COALESCE("SECID", ''))
+        UNION ALL
+        SELECT TRIM(COALESCE("SECID", '')) AS secid,
+               COALESCE("Corpbonds_Наличие амортизации", '') AS has_amort
         FROM "{config.MERGE_YELLOW_TABLE_NAME}"
         WHERE TRIM(COALESCE("SECID", '')) <> ''
-          AND LOWER(TRIM(COALESCE("Corpbonds_Наличие амортизации", ''))) = ?
-        ORDER BY 1
-        ''',
-        (expected, expected),
+        '''
     ).fetchall()
-    return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
+    secids: set[str] = set()
+    for secid, has_amort in rows:
+        secid_value = str(secid or "").strip()
+        if not secid_value:
+            continue
+        if normalize_flag(str(has_amort or "")) == expected_normalized:
+            secids.add(secid_value)
+
+    return sorted(secids)
 
 
 def get_stale_moex_amortization_secids(conn: sqlite3.Connection, secids: list[str], now_utc: datetime) -> list[str]:
