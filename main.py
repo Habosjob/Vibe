@@ -19,6 +19,8 @@ from time import perf_counter
 from urllib.parse import urljoin
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -49,6 +51,29 @@ def setup_logging() -> logging.Logger:
 def create_http_session() -> requests.Session:
     session = requests.Session()
     session.headers.update({"User-Agent": config.NRA_REQUEST_USER_AGENT})
+    return session
+
+
+def create_resilient_http_session(pool_size: int = 64) -> requests.Session:
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.2,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=retry)
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": config.NRA_REQUEST_USER_AGENT,
+        "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+    })
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     return session
 
 
@@ -2252,6 +2277,9 @@ SMARTLAB_COLUMNS_MAP = {
     'Smartlab_Длительность купона, дней': 'Длительность купона, дней',
 }
 
+AMORTIZATION_START_COLUMN = "AmortStarrtDate"
+
+
 
 def ensure_table_columns(conn: sqlite3.Connection, table_name: str, columns: list[str]) -> None:
     existing_columns = {
@@ -2274,8 +2302,13 @@ def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
         columns_sql.append(f'"{column}" TEXT')
     for column in SMARTLAB_COLUMNS_MAP:
         columns_sql.append(f'"{column}" TEXT')
+    columns_sql.append(f'"{AMORTIZATION_START_COLUMN}" TEXT')
     conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({", ".join(columns_sql)})')
-    ensure_table_columns(conn, table_name, list(CORPBONDS_COLUMNS_MAP.keys()) + list(SMARTLAB_COLUMNS_MAP.keys()))
+    ensure_table_columns(
+        conn,
+        table_name,
+        list(CORPBONDS_COLUMNS_MAP.keys()) + list(SMARTLAB_COLUMNS_MAP.keys()) + [AMORTIZATION_START_COLUMN],
+    )
     conn.commit()
 
 
@@ -2288,6 +2321,7 @@ def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, sc
     insert_columns = ['"ISIN"'] + insert_columns + [f'"{column}"' for column in MERGE_DOHOD_COLUMNS]
     insert_columns += [f'"{column}"' for column in CORPBONDS_COLUMNS_MAP]
     insert_columns += [f'"{column}"' for column in SMARTLAB_COLUMNS_MAP]
+    insert_columns.append(f'"{AMORTIZATION_START_COLUMN}"')
 
     selected_columns = [f'm."ISIN"']
     selected_columns.extend(
@@ -2296,6 +2330,7 @@ def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, sc
     selected_columns.extend(f'd."{column}"' for column in MERGE_DOHOD_COLUMNS)
     selected_columns.extend(f"'' AS \"{column}\"" for column in CORPBONDS_COLUMNS_MAP)
     selected_columns.extend(f"'' AS \"{column}\"" for column in SMARTLAB_COLUMNS_MAP)
+    selected_columns.append(f"'' AS \"{AMORTIZATION_START_COLUMN}\"")
     placeholders = ", ".join(["?"] * len(insert_columns))
 
     rows = conn.execute(
@@ -2717,7 +2752,7 @@ def fetch_smartlab_payload(secid: str) -> dict[str, str]:
         fetch_smartlab_payload._thread_local = threading.local()  # type: ignore[attr-defined]
     thread_local = fetch_smartlab_payload._thread_local  # type: ignore[attr-defined]
     if not hasattr(thread_local, "session"):
-        thread_local.session = requests.Session()
+        thread_local.session = create_resilient_http_session(pool_size=max(16, config.SMARTLAB_MAX_WORKERS))
 
     url = f"{config.SMARTLAB_BOND_URL_PREFIX}{secid}/"
     response = thread_local.session.get(url, timeout=config.SMARTLAB_REQUEST_TIMEOUT_SECONDS)
@@ -2803,6 +2838,284 @@ def refresh_smartlab_data_if_needed(
         config.SMARTLAB_CACHE_TTL_HOURS,
     )
     return len(secids), len(stale_secids), len(fetched_rows)
+
+
+def ensure_moex_amortizations_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.MOEX_AMORTIZATION_TABLE_NAME}" (
+            "secid" TEXT NOT NULL,
+            "isin" TEXT,
+            "name" TEXT,
+            "issuevalue" TEXT,
+            "amortdate" TEXT,
+            "facevalue" TEXT,
+            "initialfacevalue" TEXT,
+            "faceunit" TEXT,
+            "valueprc" TEXT,
+            "value" TEXT,
+            "value_rub" TEXT,
+            "data_source" TEXT,
+            "primary_boardid" TEXT,
+            "source_url" TEXT NOT NULL,
+            "updated_at_utc" TEXT NOT NULL,
+            PRIMARY KEY ("secid", "amortdate")
+        )
+        '''
+    )
+    conn.commit()
+
+
+def collect_amortization_secids(conn: sqlite3.Connection) -> list[str]:
+    # Важно: в стандартной SQLite функция LOWER/UPPER без ICU корректно работает
+    # в основном для ASCII. Для кириллицы (например "Да") фильтрация через SQL
+    # может не сработать. Поэтому нормализуем значение в Python.
+    expected = str(getattr(config, "MOEX_AMORTIZATION_REQUIRED_FLAG", "Да"))
+
+    def normalize_flag(value: str | None) -> str:
+        raw = str(value or "").replace("\xa0", " ")
+        return " ".join(raw.split()).casefold()
+
+    expected_normalized = normalize_flag(expected)
+    rows = conn.execute(
+        f'''
+        SELECT TRIM(COALESCE("SECID", '')) AS secid,
+               COALESCE("Corpbonds_Наличие амортизации", '') AS has_amort
+        FROM "{config.MERGE_GREEN_TABLE_NAME}"
+        WHERE TRIM(COALESCE("SECID", '')) <> ''
+        UNION ALL
+        SELECT TRIM(COALESCE("SECID", '')) AS secid,
+               COALESCE("Corpbonds_Наличие амортизации", '') AS has_amort
+        FROM "{config.MERGE_YELLOW_TABLE_NAME}"
+        WHERE TRIM(COALESCE("SECID", '')) <> ''
+        '''
+    ).fetchall()
+
+    secids: set[str] = set()
+    for secid, has_amort in rows:
+        secid_value = str(secid or "").strip()
+        if not secid_value:
+            continue
+        if normalize_flag(str(has_amort or "")) == expected_normalized:
+            secids.add(secid_value)
+
+    return sorted(secids)
+
+
+def get_stale_moex_amortization_secids(conn: sqlite3.Connection, secids: list[str], now_utc: datetime) -> list[str]:
+    if not secids:
+        return []
+
+    ttl = timedelta(hours=config.MOEX_AMORTIZATION_CACHE_TTL_HOURS)
+    stale: list[str] = []
+    chunk_size = 500
+    for start in range(0, len(secids), chunk_size):
+        chunk = secids[start : start + chunk_size]
+        placeholders = ", ".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f'''
+            SELECT "secid", MAX("updated_at_utc")
+            FROM "{config.MOEX_AMORTIZATION_TABLE_NAME}"
+            WHERE "secid" IN ({placeholders})
+            GROUP BY "secid"
+            ''',
+            tuple(chunk),
+        ).fetchall()
+        actual = {}
+        for secid, updated_at_raw in rows:
+            try:
+                actual[str(secid)] = datetime.fromisoformat(str(updated_at_raw))
+            except ValueError:
+                continue
+
+        for secid in chunk:
+            updated_at = actual.get(secid)
+            if not updated_at or now_utc - updated_at >= ttl:
+                stale.append(secid)
+
+    return stale
+
+
+def fetch_moex_amortization_payload(secid: str) -> list[dict[str, str]]:
+    if not hasattr(fetch_moex_amortization_payload, "_thread_local"):
+        fetch_moex_amortization_payload._thread_local = threading.local()  # type: ignore[attr-defined]
+    thread_local = fetch_moex_amortization_payload._thread_local  # type: ignore[attr-defined]
+    if not hasattr(thread_local, "session"):
+        thread_local.session = create_resilient_http_session(pool_size=max(16, config.MOEX_AMORTIZATION_MAX_WORKERS))
+
+    url = config.MOEX_AMORTIZATION_URL_TEMPLATE.format(secid=secid)
+    response = thread_local.session.get(url, timeout=config.MOEX_AMORTIZATION_REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    payload = response.json()
+    section = payload.get("amortizations") or {}
+    columns = section.get("columns") or []
+    data_rows = section.get("data") or []
+
+    rows: list[dict[str, str]] = []
+    for item in data_rows:
+        normalized = {
+            str(col): str(item[idx]) if idx < len(item) and item[idx] is not None else ""
+            for idx, col in enumerate(columns)
+        }
+        normalized["secid"] = normalized.get("secid") or secid
+        normalized["source_url"] = url
+        rows.append(normalized)
+    return rows
+
+
+def refresh_moex_amortizations_if_needed(
+    conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime
+) -> tuple[int, int, int]:
+    ensure_moex_amortizations_table(conn)
+    secids = collect_amortization_secids(conn)
+    if not secids:
+        return 0, 0, 0
+
+    stale_secids = get_stale_moex_amortization_secids(conn, secids, now_utc)
+    fetched_rows: list[dict[str, str]] = []
+    errors = 0
+
+    if stale_secids:
+        with ThreadPoolExecutor(max_workers=config.MOEX_AMORTIZATION_MAX_WORKERS) as executor:
+            futures = {executor.submit(fetch_moex_amortization_payload, secid): secid for secid in stale_secids}
+            with progress(total=len(stale_secids), desc="MOEX amort fetch", unit="бумаг", position=1) as pbar:
+                for future in as_completed(futures):
+                    secid = futures[future]
+                    try:
+                        fetched_rows.extend(future.result())
+                    except Exception as exc:
+                        errors += 1
+                        logger.warning("MOEX amortizations: ошибка SECID=%s: %s", secid, exc)
+                    pbar.update(1)
+
+    if stale_secids:
+        conn.execute("BEGIN")
+        placeholders = ", ".join(["?"] * len(stale_secids))
+        conn.execute(
+            f'DELETE FROM "{config.MOEX_AMORTIZATION_TABLE_NAME}" WHERE "secid" IN ({placeholders})',
+            tuple(stale_secids),
+        )
+        if fetched_rows:
+            now_iso = now_utc.isoformat()
+            payload = [
+                (
+                    row.get("secid", ""),
+                    row.get("isin", ""),
+                    row.get("name", ""),
+                    row.get("issuevalue", ""),
+                    row.get("amortdate", ""),
+                    row.get("facevalue", ""),
+                    row.get("initialfacevalue", ""),
+                    row.get("faceunit", ""),
+                    row.get("valueprc", ""),
+                    row.get("value", ""),
+                    row.get("value_rub", ""),
+                    row.get("data_source", ""),
+                    row.get("primary_boardid", ""),
+                    row.get("source_url", ""),
+                    now_iso,
+                )
+                for row in fetched_rows
+                if row.get("secid", "")
+            ]
+            conn.executemany(
+                f'''
+                INSERT OR REPLACE INTO "{config.MOEX_AMORTIZATION_TABLE_NAME}" (
+                    "secid", "isin", "name", "issuevalue", "amortdate", "facevalue",
+                    "initialfacevalue", "faceunit", "valueprc", "value", "value_rub",
+                    "data_source", "primary_boardid", "source_url", "updated_at_utc"
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                payload,
+            )
+        conn.commit()
+
+    logger.info(
+        "MOEX amortizations: SECID в Merge*=%s, к запросу по TTL=%s, строк сохранено=%s, ошибок=%s, TTL=%s ч",
+        len(secids),
+        len(stale_secids),
+        len(fetched_rows),
+        errors,
+        config.MOEX_AMORTIZATION_CACHE_TTL_HOURS,
+    )
+    return len(secids), len(stale_secids), len(fetched_rows)
+
+
+def apply_amortization_start_date_to_merge_table(conn: sqlite3.Connection, table_name: str) -> int:
+    ensure_merge_table(conn, table_name)
+    rows = conn.execute(
+        f'''
+        SELECT m."ISIN", MIN(a."amortdate")
+        FROM "{table_name}" m
+        LEFT JOIN "{config.MOEX_AMORTIZATION_TABLE_NAME}" a
+            ON TRIM(COALESCE(m."SECID", '')) = TRIM(COALESCE(a."secid", ''))
+        GROUP BY m."ISIN"
+        '''
+    ).fetchall()
+
+    conn.execute("BEGIN")
+    conn.executemany(
+        f'UPDATE "{table_name}" SET "{AMORTIZATION_START_COLUMN}" = ? WHERE "ISIN" = ?',
+        [(str(amortdate or ""), str(isin)) for isin, amortdate in rows if str(isin or "").strip()],
+    )
+    conn.commit()
+    return sum(1 for _, amortdate in rows if str(amortdate or "").strip())
+
+
+def export_moex_amortization_snapshot(conn: sqlite3.Connection) -> int:
+    sampled_secids = conn.execute(
+        f'''
+        SELECT DISTINCT "secid"
+        FROM "{config.MOEX_AMORTIZATION_TABLE_NAME}"
+        WHERE TRIM(COALESCE("secid", '')) <> ''
+        ORDER BY RANDOM()
+        LIMIT 5
+        '''
+    ).fetchall()
+    secids = [str(row[0]).strip() for row in sampled_secids if row and str(row[0]).strip()]
+
+    rows: list[tuple] = []
+    headers = [
+        "secid",
+        "isin",
+        "name",
+        "issuevalue",
+        "amortdate",
+        "facevalue",
+        "initialfacevalue",
+        "faceunit",
+        "valueprc",
+        "value",
+        "value_rub",
+        "data_source",
+        "primary_boardid",
+        "source_url",
+        "updated_at_utc",
+    ]
+    if secids:
+        placeholders = ", ".join(["?"] * len(secids))
+        cursor = conn.execute(
+            f'''
+            SELECT "secid", "isin", "name", "issuevalue", "amortdate", "facevalue", "initialfacevalue",
+                   "faceunit", "valueprc", "value", "value_rub", "data_source", "primary_boardid", "source_url", "updated_at_utc"
+            FROM "{config.MOEX_AMORTIZATION_TABLE_NAME}"
+            WHERE "secid" IN ({placeholders})
+            ORDER BY "secid", "amortdate"
+            ''',
+            tuple(secids),
+        )
+        rows = cursor.fetchall()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "moex_amortizations_snapshot"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / config.MOEX_AMORTIZATION_SNAPSHOT_FILENAME
+    wb.save(snapshot_path)
+    return len(rows)
 
 
 def _get_table_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
@@ -3203,7 +3516,50 @@ def main() -> None:
             )
         stage_times["Этап 9: Обогащение Merge* из Corpbonds"] = perf_counter() - s
 
-        print("Этап 10: Обогащение Merge* из Smartlab")
+        print("Этап 10: Обогащение Merge* из MOEX Amortizations")
+        s = perf_counter()
+        with progress(total=6, desc="MOEX amort enrich", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                secids_total, secids_requested, rows_saved = refresh_moex_amortizations_if_needed(
+                    conn, logger, datetime.now(timezone.utc)
+                )
+                pbar.update(1)
+                green_amort_applied = apply_amortization_start_date_to_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
+                pbar.update(1)
+                yellow_amort_applied = apply_amortization_start_date_to_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
+                pbar.update(1)
+                amort_snapshot = export_moex_amortization_snapshot(conn)
+                pbar.update(1)
+                green_snapshot = export_merge_snapshot(
+                    conn,
+                    config.MERGE_GREEN_TABLE_NAME,
+                    config.MERGE_GREEN_SNAPSHOT_FILENAME,
+                    "merge_green_snapshot",
+                )
+                pbar.update(1)
+                yellow_snapshot = export_merge_snapshot(
+                    conn,
+                    config.MERGE_YELLOW_TABLE_NAME,
+                    config.MERGE_YELLOW_SNAPSHOT_FILENAME,
+                    "merge_yellow_snapshot",
+                )
+                pbar.update(1)
+            logger.info(
+                "MOEX amortizations: SECID в Merge*=%s, к запросу по TTL=%s, строк сохранено=%s, "
+                "проставлено AmortStarrtDate: MergeGreen=%s, MergeYellow=%s, moex_amort_snapshot=%s, "
+                "merge_snapshots_after_moex_amort: green=%s, yellow=%s",
+                secids_total,
+                secids_requested,
+                rows_saved,
+                green_amort_applied,
+                yellow_amort_applied,
+                amort_snapshot,
+                green_snapshot,
+                yellow_snapshot,
+            )
+        stage_times["Этап 10: Обогащение Merge* из MOEX Amortizations"] = perf_counter() - s
+
+        print("Этап 11: Обогащение Merge* из Smartlab")
         s = perf_counter()
         with progress(total=6, desc="Smartlab enrich", unit="шаг") as pbar:
             with connect_db(db_path) as conn:
@@ -3244,7 +3600,7 @@ def main() -> None:
                 green_snapshot,
                 yellow_snapshot,
             )
-        stage_times["Этап 10: Обогащение Merge* из Smartlab"] = perf_counter() - s
+        stage_times["Этап 11: Обогащение Merge* из Smartlab"] = perf_counter() - s
 
         print("=====\nГотово")
     except Exception as exc:

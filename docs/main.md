@@ -1,4 +1,4 @@
-# Скрипт `main.py` — загрузка MOEX bonds + Доходъ bonds + рейтинги НРА/АКРА/НКР/RAEX + витрина эмитентов + обогащение Corpbonds/Smartlab
+# Скрипт `main.py` — загрузка MOEX bonds + Доходъ bonds + рейтинги НРА/АКРА/НКР/RAEX + витрина эмитентов + обогащение Corpbonds/MOEX Amortizations/Smartlab
 
 ## Что делает скрипт
 1. Загружает CSV с MOEX по ссылке из `config.py`.
@@ -80,7 +80,13 @@
    - `MergeYellowBonds` — облигации эмитентов, где `Scoring = Yellow`,
    - структура включает выбранные поля из `moex_bonds` и `Dohod_Bonds`,
    - для каждой merge-таблицы формируется отдельный snapshot по 5 случайных строк.
-22. Пишет технический лог в `logs/main.log` (перезаписывается каждый запуск).
+22. Обогащает Merge-таблицы амортизациями MOEX только для бумаг, где `Corpbonds_Наличие амортизации = Да`:
+   - источник: `https://iss.moex.com/.../bondization/<SECID>.json?iss.only=amortizations&iss.meta=off`,
+   - кэш и инкрементальные обновления по `SECID` с TTL 12 часов (`MOEX_AMORTIZATION_CACHE_TTL_HOURS`),
+   - сохраняет историю в таблицу `MoexAmortizations`,
+   - находит минимальную дату амортизации и записывает ее в `AmortStarrtDate` таблиц `MergeGreenBonds`/`MergeYellowBonds`,
+   - формирует snapshot `BaseSnapshots/moex_amortizations_snapshot.xlsx` (все строки по 5 случайным `SECID`).
+23. Пишет технический лог в `logs/main.log` (перезаписывается каждый запуск).
 
 ## Запуск
 ```bash
@@ -170,6 +176,7 @@ python main.py
 - `MERGE_REQUIRE_DOHOD_ISIN_MATCH` — требовать наличие бумаги одновременно в MOEX и Доходъ при сборке Merge (`True` по умолчанию).
 - `CORPBONDS_CACHE_TTL_HOURS` / `CORPBONDS_MAX_WORKERS` / `CORPBONDS_REQUEST_TIMEOUT_SECONDS` — TTL, параллелизм и таймаут этапа Corpbonds.
 - `MERGE_REQUIRE_CORPBONDS_SECID_MATCH` — режим JOIN Merge* c Corpbonds (`INNER` при `True`, `LEFT` при `False`).
+- `MOEX_AMORTIZATION_CACHE_TTL_HOURS` / `MOEX_AMORTIZATION_MAX_WORKERS` / `MOEX_AMORTIZATION_REQUEST_TIMEOUT_SECONDS` — TTL, параллелизм и таймаут этапа MOEX Amortizations.
 - `SMARTLAB_CACHE_TTL_HOURS` / `SMARTLAB_MAX_WORKERS` / `SMARTLAB_REQUEST_TIMEOUT_SECONDS` — TTL, параллелизм и таймаут этапа Smartlab.
 - `MERGE_REQUIRE_SMARTLAB_SECID_MATCH` — режим JOIN Merge* c Smartlab (`INNER` при `True`, `LEFT` при `False`).
 
@@ -219,7 +226,17 @@ python main.py
 - Snapshot: `BaseSnapshots/corpbonds_snapshot.xlsx` (5 случайных уникальных `SECID`).
 
 
-## Логика обогащения Smartlab (этап 10)
+## Логика обогащения MOEX Amortizations (этап 10)
+- Источник: MOEX ISS `.../bondization/<SECID>.json?iss.only=amortizations&iss.meta=off`.
+- Входные данные: уникальные `SECID` из Merge* c `Corpbonds_Наличие амортизации = Да`.
+- Куда сохраняется: `DB/bonds.sqlite3`, таблица `MoexAmortizations`.
+- Режим обновления: инкрементальный (перезапрос только просроченных по TTL `SECID`).
+- TTL: `MOEX_AMORTIZATION_CACHE_TTL_HOURS` (по умолчанию 12 часов).
+- Производительность: многопоточная загрузка (`MOEX_AMORTIZATION_MAX_WORKERS`) + keep-alive с retry.
+- Результат в Merge*: заполняется `AmortStarrtDate` самой ранней датой амортизации по `SECID`.
+- Snapshot: `BaseSnapshots/moex_amortizations_snapshot.xlsx` (все строки для 5 случайных `SECID`).
+
+## Логика обогащения Smartlab (этап 11)
 - Источник: `https://smart-lab.ru/q/bonds/<SECID>/` (используется именно `SECID`).
 - Входные данные: уникальные `SECID` из таблиц `MergeGreenBonds` и `MergeYellowBonds`.
 - Что собирается по каждой бумаге:
