@@ -2326,6 +2326,7 @@ SCREENER_EXPORT_COLUMNS = [
 CORPBONDS_COLUMNS_MAP = {
     'Corpbonds_Цена последняя': 'Цена последняя',
     'Corpbonds_Тип купона': 'Тип купона',
+    'Corpbonds_Ставка купона': 'Ставка купона',
     'Corpbonds_Формула купона': 'Формула купона',
     'Corpbonds_Дата ближайшего купона': 'Дата ближайшего купона',
     'Corpbonds_Дата ближайшей оферты': 'Дата ближайшей оферты',
@@ -2882,7 +2883,7 @@ def _calculate_fixed_coupon_ytm(
     if is_subord:
         current_coupon_yield = annual_coupon / dirty_price
         effective_yield = (1.0 + current_coupon_yield / coupon_freq) ** coupon_freq - 1.0
-        precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 4)))
+        precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 2)))
         return f"{effective_yield * 100:.{precision}f}"
 
     if is_amort:
@@ -2917,7 +2918,7 @@ def _calculate_fixed_coupon_ytm(
     if ytm_decimal is None:
         return ""
 
-    precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 4)))
+    precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 2)))
     return f"{ytm_decimal * 100:.{precision}f}"
 
 
@@ -3094,13 +3095,14 @@ def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, 
     }
 
 
-def ensure_corpbonds_table(conn: sqlite3.Connection) -> None:
+def ensure_corpbonds_table(conn: sqlite3.Connection) -> bool:
     conn.execute(
         f'''
         CREATE TABLE IF NOT EXISTS "{config.CORPBONDS_TABLE_NAME}" (
             "SECID" TEXT PRIMARY KEY,
             "Цена последняя" TEXT,
             "Тип купона" TEXT,
+            "Ставка купона" TEXT,
             "Формула купона" TEXT,
             "Дата ближайшего купона" TEXT,
             "Дата ближайшей оферты" TEXT,
@@ -3111,7 +3113,20 @@ def ensure_corpbonds_table(conn: sqlite3.Connection) -> None:
         )
         '''
     )
+    existing_columns = {
+        str(row[1]) for row in conn.execute(f'PRAGMA table_info("{config.CORPBONDS_TABLE_NAME}")').fetchall()
+    }
+    if "Ставка купона" not in existing_columns:
+        conn.execute(f'ALTER TABLE "{config.CORPBONDS_TABLE_NAME}" ADD COLUMN "Ставка купона" TEXT')
+
+    force_refresh_done = False
+    force_refresh_meta_key = "corpbonds_schema_v2_applied"
+    if get_meta_value(conn, force_refresh_meta_key) != "1":
+        conn.execute(f'UPDATE "{config.CORPBONDS_TABLE_NAME}" SET "updated_at_utc" = ? ', ("",))
+        set_meta_value(conn, force_refresh_meta_key, "1")
+        force_refresh_done = True
     conn.commit()
+    return force_refresh_done
 
 
 def collect_merge_secids(conn: sqlite3.Connection) -> list[str]:
@@ -3140,6 +3155,7 @@ def parse_corpbonds_page_fields(raw_html: str) -> dict[str, str]:
     parsed = {
         "Цена последняя": "",
         "Тип купона": "",
+        "Ставка купона": "",
         "Формула купона": "",
         "Дата ближайшего купона": "",
         "Дата ближайшей оферты": "",
@@ -3159,6 +3175,8 @@ def parse_corpbonds_page_fields(raw_html: str) -> dict[str, str]:
             parsed["Цена последняя"] = value
         elif normalized.startswith("тип купона"):
             parsed["Тип купона"] = value
+        elif normalized.startswith("ставка купона"):
+            parsed["Ставка купона"] = value
         elif normalized.startswith("формула купона") or normalized.startswith("формула флоатера"):
             parsed["Формула купона"] = value
         elif normalized.startswith("дата ближайшего купона"):
@@ -3222,7 +3240,9 @@ def fetch_corpbonds_payload(secid: str) -> dict[str, str]:
 def refresh_corpbonds_data_if_needed(
     conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime
 ) -> tuple[int, int, int]:
-    ensure_corpbonds_table(conn)
+    force_refresh_done = ensure_corpbonds_table(conn)
+    if force_refresh_done:
+        logger.info("Corpbonds: force refresh cache (schema_v2) выполнен одноразово.")
     secids = collect_merge_secids(conn)
     if not secids:
         return 0, 0, 0
@@ -3251,6 +3271,7 @@ def refresh_corpbonds_data_if_needed(
                 row.get("SECID", ""),
                 row.get("Цена последняя", ""),
                 row.get("Тип купона", ""),
+                row.get("Ставка купона", ""),
                 row.get("Формула купона", ""),
                 row.get("Дата ближайшего купона", ""),
                 row.get("Дата ближайшей оферты", ""),
@@ -3266,13 +3287,15 @@ def refresh_corpbonds_data_if_needed(
         conn.executemany(
             f'''
             INSERT INTO "{config.CORPBONDS_TABLE_NAME}" (
-                "SECID", "Цена последняя", "Тип купона", "Формула купона",
+                "SECID", "Цена последняя", "Тип купона", "Ставка купона",
+                "Формула купона",
                 "Дата ближайшего купона", "Дата ближайшей оферты", "Наличие амортизации",
                 "Купон лесенкой", "source_url", "updated_at_utc"
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT("SECID") DO UPDATE SET
                 "Цена последняя"=excluded."Цена последняя",
                 "Тип купона"=excluded."Тип купона",
+                "Ставка купона"=excluded."Ставка купона",
                 "Формула купона"=excluded."Формула купона",
                 "Дата ближайшего купона"=excluded."Дата ближайшего купона",
                 "Дата ближайшей оферты"=excluded."Дата ближайшей оферты",
@@ -3921,7 +3944,8 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                 "Субординированная (да/нет)", "Corpbonds_Наличие амортизации", "Corpbonds_Купон лесенкой",
                 "{AMORTIZATION_START_COLUMN}", "MATDATE", "Corpbonds_Дата ближайшей оферты", "Smartlab_Дата оферты",
                 "Corpbonds_Дата ближайшего купона", "Corpbonds_Тип купона", "Smartlab_Длительность купона, дней",
-                "НКД", "Текущий купон, %", "Купон (раз/год)", "Базовый индекс (для FRN)",
+                "НКД", COALESCE(NULLIF("Corpbonds_Ставка купона", ''), "Текущий купон, %") AS "Текущий купон, %",
+                "Купон (раз/год)", "Базовый индекс (для FRN)",
                 "Премия/Дисконт к базовому индексу (для FRN)", "Corpbonds_Формула купона",
                 "FACEVALUE", "FACEUNIT", "Коэф. Ликвидности (max=100)", "Corpbonds_Цена последняя",
                 "Цена Доход", "Smartlab_Котировка облигации, %", "PRICE"
@@ -4088,10 +4112,10 @@ def export_screener_excel(conn: sqlite3.Connection) -> dict[str, int]:
             "НКД": "0.00",
             "Премия, индекс": "0.0000",
             "FACEVALUE": "#,##0",
-            "Цена Corpbonds": "0.0000",
-            "Цена Доход": "0.0000",
-            "Цена Smartlab": "0.0000",
-            "Цена MOEX": "0.0000",
+            "Цена Corpbonds": "0.00",
+            "Цена Доход": "0.00",
+            "Цена Smartlab": "0.00",
+            "Цена MOEX": "0.00",
             "КупонПериод": "0",
             "Ликвидность": "0.0",
         }
