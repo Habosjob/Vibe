@@ -2902,15 +2902,21 @@ def _calculate_fixed_coupon_ytm(
     facevalue_value = _parse_decimal_value(facevalue)
     target_date = _parse_bond_date(str(offerdate or "")) or _parse_bond_date(str(matdate or ""))
 
-    if (
-        price is None
-        or coupon_rate_percent is None
-        or coupon_freq is None
-        or facevalue_value is None
-        or target_date is None
-    ):
+    if price is None or facevalue_value is None or target_date is None:
         return ""
-    if coupon_freq <= 0 or facevalue_value <= 0:
+    coupon_rate_percent = coupon_rate_percent or 0.0
+    is_zero_coupon = (
+        coupon_rate_percent <= 0
+        and (
+            coupon_freq is None
+            or coupon_freq <= 0
+            or _parse_bond_date(str(next_coupon_date or "")) is None
+        )
+    )
+
+    if facevalue_value <= 0:
+        return ""
+    if not is_zero_coupon and (coupon_freq is None or coupon_freq <= 0):
         return ""
 
     nkd_value, _ = _resolve_nkd_for_dirty_price(
@@ -2930,18 +2936,34 @@ def _calculate_fixed_coupon_ytm(
 
     coupon_rate = coupon_rate_percent / 100.0
     annual_coupon = facevalue_value * coupon_rate
+    solver_frequency = coupon_freq if coupon_freq is not None and coupon_freq > 0 else 1.0
 
     is_subord = _is_true_like(subord_flag)
     is_amort = _is_true_like(amort_flag)
     if is_subord:
         current_coupon_yield = annual_coupon / dirty_price
-        effective_yield = (1.0 + current_coupon_yield / coupon_freq) ** coupon_freq - 1.0
+        effective_yield = (1.0 + current_coupon_yield / solver_frequency) ** solver_frequency - 1.0
         return _format_ytm_percent(effective_yield)
 
-    if is_amort:
+    if is_zero_coupon:
         cashflows = _build_amortized_cashflows(
             target_date=target_date,
-            coupon_frequency=coupon_freq,
+            coupon_frequency=1.0,
+            coupon_period_days=coupon_period_days,
+            next_coupon_date=next_coupon_date,
+            facevalue=facevalue_value,
+            coupon_rate=0.0,
+            amortization_schedule=amortization_schedule,
+        )
+        if not cashflows:
+            years = (target_date.date() - datetime.now().date()).days / 365.25
+            if years <= 0:
+                return ""
+            cashflows = [(years, facevalue_value)]
+    elif is_amort:
+        cashflows = _build_amortized_cashflows(
+            target_date=target_date,
+            coupon_frequency=solver_frequency,
             coupon_period_days=coupon_period_days,
             next_coupon_date=next_coupon_date,
             facevalue=facevalue_value,
@@ -2949,10 +2971,10 @@ def _calculate_fixed_coupon_ytm(
             amortization_schedule=amortization_schedule,
         )
     else:
-        period_coupon = annual_coupon / coupon_freq
+        period_coupon = annual_coupon / solver_frequency
         cashflows = _build_cashflow_times_years(
             target_date=target_date,
-            coupon_frequency=coupon_freq,
+            coupon_frequency=solver_frequency,
             coupon_period_days=coupon_period_days,
             next_coupon_date=next_coupon_date,
             period_coupon=period_coupon,
@@ -2964,7 +2986,7 @@ def _calculate_fixed_coupon_ytm(
 
     ytm_decimal = _solve_ytm_bisection(
         dirty_price=dirty_price,
-        coupon_frequency=coupon_freq,
+        coupon_frequency=solver_frequency,
         cashflows=cashflows,
     )
     if ytm_decimal is None:
@@ -3042,37 +3064,36 @@ def _is_other_coupon_type(raw_value: object) -> bool:
 
 def parse_floater_terms(formula_raw: object) -> tuple[str, float | None, float] | None:
     formula = str(formula_raw or "")
+    if not formula.strip():
+        return None
+
     normalized = formula.casefold().replace("ё", "е")
-    normalized = normalized.translate(str.maketrans({
-        "к": "k",
-        "с": "c",
-        "К": "k",
-        "С": "c",
-    }))
-    stripped = re.sub(r"[∑Σ?]+", " ", normalized)
-    stripped = re.sub(r"(max|min|avg|average)\s*\([^\)]*\)", " ", stripped)
-    stripped = re.sub(r"не\s+более[^,;]*|не\s+менее[^,;]*|cap\w*[^,;]*|floor\w*[^,;]*", " ", stripped)
-    stripped = " ".join(stripped.split())
+    normalized = normalized.replace("∑", "").replace("Σ", "").replace("σ", "").replace("?", "")
+    normalized = normalized.replace(",", ".")
+    normalized = normalized.translate(str.maketrans({"к": "k", "с": "c"}))
+    normalized = re.sub(r"\s+", " ", normalized).strip()
 
     index_type = ""
     tenor_years: float | None = None
 
-    zcyc_match = re.search(r"(?:g\s*[- ]?curve|zcyc)\s*([0-9]+(?:[\.,][0-9]+)?)\s*(?:y|лет|год(?:а|ов)?)", stripped)
+    zcyc_match = re.search(r"(?:g\s*[- ]?curve|gcurve|zcyc)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:y|yr|year|лет|год(?:а|ов)?)", normalized)
     if zcyc_match:
         index_type = "zcyc"
-        tenor_years = float(zcyc_match.group(1).replace(",", "."))
-    elif "ruonia" in stripped:
+        tenor_years = float(zcyc_match.group(1))
+    elif "ruonia" in normalized:
         index_type = "ruonia"
-    elif "ключев" in stripped or re.search(r"\bkc\b", stripped):
+    elif "ключев" in normalized or re.search(r"\bkc\b", normalized):
         index_type = "key"
 
     if not index_type:
         return None
 
     premium = 0.0
-    for sign, value in re.findall(r"([+-])\s*([0-9]+(?:[\.,][0-9]+)?)\s*%", stripped):
-        number = float(value.replace(",", "."))
-        premium += number if sign == "+" else -number
+    premium_match = re.search(r"([+-])\s*([0-9]+(?:\.[0-9]+)?)\s*%", normalized)
+    if premium_match:
+        sign = premium_match.group(1)
+        number = float(premium_match.group(2))
+        premium = number if sign == "+" else -number
     return (index_type, tenor_years, premium)
 
 
@@ -3089,53 +3110,51 @@ def ensure_cbr_cache_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _fetch_cbr_last_numeric(url: str) -> float | None:
+def _fetch_cbr_key_rate() -> float | None:
     session = create_resilient_http_session(pool_size=4)
-    response = session.get(url, timeout=30)
+    response = session.get(config.CBR_KEY_RATE_URL, timeout=30)
     response.raise_for_status()
     parser = etree.HTMLParser(recover=True)
     root = etree.HTML(response.text, parser=parser)
     if root is None:
         return None
 
-    table_rows = root.xpath("//table//tr[td]")
-    if "keyrate" in url.casefold():
-        latest_rate: float | None = None
-        latest_dt: datetime | None = None
-        for row in table_rows:
-            cells = [" ".join("".join(x.itertext()).split()) for x in row.xpath("./td")]
-            if len(cells) < 2:
-                continue
-            row_dt = _parse_bond_date(cells[0])
-            rate = _parse_decimal_value(cells[1])
-            if row_dt is None or rate is None:
-                continue
-            if latest_dt is None or row_dt > latest_dt:
-                latest_dt = row_dt
-                latest_rate = rate
-        return latest_rate
+    latest_date: datetime | None = None
+    latest_rate: float | None = None
+    for row in root.xpath("//table//tr[td]"):
+        cells = [" ".join("".join(x.itertext()).split()) for x in row.xpath("./td")]
+        if len(cells) < 2:
+            continue
+        row_date = _parse_bond_date(cells[0])
+        rate = _parse_decimal_value(cells[1])
+        if row_date is None or rate is None:
+            continue
+        if latest_date is None or row_date > latest_date:
+            latest_date = row_date
+            latest_rate = rate
+    return latest_rate
 
-    if "ruonia" in url.casefold():
-        for row in table_rows:
-            row_text = [" ".join("".join(x.itertext()).split()) for x in row.xpath("./td")]
-            if not row_text:
-                continue
-            label = _normalize_label(row_text[0])
-            if "ruonia" not in label or "%" not in row_text[0]:
-                continue
-            numeric_values = [_parse_decimal_value(cell) for cell in row_text[1:]]
-            numeric_values = [val for val in numeric_values if val is not None]
-            if numeric_values:
-                return float(numeric_values[-1])
+
+def _fetch_cbr_ruonia() -> float | None:
+    session = create_resilient_http_session(pool_size=4)
+    response = session.get(config.CBR_RUONIA_URL, timeout=30)
+    response.raise_for_status()
+    parser = etree.HTMLParser(recover=True)
+    root = etree.HTML(response.text, parser=parser)
+    if root is None:
         return None
 
-    values: list[float] = []
-    for row in table_rows:
-        for cell in row.xpath("./td"):
-            parsed = _parse_decimal_value(" ".join(cell.itertext()))
-            if parsed is not None:
-                values.append(parsed)
-    return values[-1] if values else None
+    for row in root.xpath("//table//tr[td]"):
+        cells = [" ".join("".join(x.itertext()).split()) for x in row.xpath("./td")]
+        if len(cells) < 2:
+            continue
+        if "ruonia" not in _normalize_label(cells[0]):
+            continue
+        values = [_parse_decimal_value(value) for value in cells[1:]]
+        values = [value for value in values if value is not None]
+        if values:
+            return float(values[-1])
+    return None
 
 
 def _fetch_cbr_zcyc_curve() -> dict[float, float]:
@@ -3148,31 +3167,32 @@ def _fetch_cbr_zcyc_curve() -> dict[float, float]:
     if root is None:
         return curve
 
-    rows = root.xpath("//table//tr")
     tenors: list[float] = []
-    for row in rows:
-        cells = [" ".join("".join(cell.itertext()).split()) for cell in row.xpath("./th|./td")]
-        values = [_parse_decimal_value(value) for value in cells]
-        numeric_values = [value for value in values if value is not None]
-        if len(cells) >= 12 and len(numeric_values) >= 11 and any("0,25" in c or "0.25" in c for c in cells):
-            tenors = [float(v) for v in numeric_values]
-            break
-
-    if not tenors:
-        tenors = [0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0]
-
-    for row in rows:
+    latest_row_date: datetime | None = None
+    latest_curve: dict[float, float] = {}
+    for row in root.xpath("//table//tr"):
+        header_cells = [" ".join("".join(cell.itertext()).split()) for cell in row.xpath("./th")]
+        if header_cells and not tenors:
+            parsed_tenors = [_parse_decimal_value(cell) for cell in header_cells[1:]]
+            parsed_tenors = [float(x) for x in parsed_tenors if x is not None]
+            if len(parsed_tenors) >= 10 and any(abs(x - 7.0) < 1e-9 for x in parsed_tenors):
+                tenors = parsed_tenors
+                continue
         cells = [" ".join("".join(cell.itertext()).split()) for cell in row.xpath("./td")]
-        if len(cells) < len(tenors) + 1:
+        if len(cells) < 13:
             continue
         row_date = _parse_bond_date(cells[0])
         if row_date is None:
             continue
-        yields = [_parse_decimal_value(cell) for cell in cells[1 : len(tenors) + 1]]
-        if any(val is None for val in yields):
+        if not tenors:
+            tenors = [0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0]
+        yields = [_parse_decimal_value(value) for value in cells[1 : len(tenors) + 1]]
+        if any(v is None for v in yields):
             continue
-        curve = {tenor: float(yld or 0.0) for tenor, yld in zip(tenors, yields)}
-        break
+        if latest_row_date is None or row_date > latest_row_date:
+            latest_row_date = row_date
+            latest_curve = {tenor: float(yld or 0.0) for tenor, yld in zip(tenors, yields)}
+    curve = latest_curve
     return curve
 
 
@@ -3196,8 +3216,8 @@ def get_cbr_reference_data(conn: sqlite3.Connection, logger: logging.Logger, now
 
     payload: dict[str, object] = {"key_rate": None, "ruonia": None, "zcyc": {}}
     try:
-        payload["key_rate"] = _fetch_cbr_last_numeric(config.CBR_KEY_RATE_URL)
-        payload["ruonia"] = _fetch_cbr_last_numeric(config.CBR_RUONIA_URL)
+        payload["key_rate"] = _fetch_cbr_key_rate()
+        payload["ruonia"] = _fetch_cbr_ruonia()
         payload["zcyc"] = _fetch_cbr_zcyc_curve()
     except Exception as exc:
         logger.warning("CBR cache update error: %s", exc)
@@ -3230,7 +3250,7 @@ def _year_bucket(event_date: datetime.date, valuation_date: datetime.date) -> in
     return max(0, min(2, int((event_date - valuation_date).days / 365.25)))
 
 
-def _pick_zcyc_point(zcyc: dict[object, object], tenor_years: float | None) -> float | None:
+def pick_zcyc_point(zcyc: dict[object, object], tenor_years: float | None) -> float | None:
     if tenor_years is None or not zcyc:
         return None
     normalized: dict[float, float] = {}
@@ -3286,7 +3306,7 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
         spread_to_key = key_current - idx
     else:
         zcyc = cbr_data.get("zcyc") if isinstance(cbr_data.get("zcyc"), dict) else {}
-        idx = _pick_zcyc_point(zcyc, tenor_years)
+        idx = pick_zcyc_point(zcyc, tenor_years)
         if idx is None:
             logger.info("Floater YTM skipped SECID=%s: G-Curve unavailable", secid)
             _write_ytm_debug_record({"secid": secid, "coupon_formula": str(coupon_formula or ""), "reason": "no_zcyc"})
@@ -3731,6 +3751,7 @@ def fetch_corpbonds_payload(secid: str) -> dict[str, str]:
 def refresh_corpbonds_data_if_needed(
     conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime
 ) -> tuple[int, int, int]:
+    started_at = time.monotonic()
     force_refresh_done = ensure_corpbonds_table(conn)
     if force_refresh_done:
         logger.info("Corpbonds: force refresh cache (schema_v3) выполнен одноразово.")
@@ -3801,13 +3822,15 @@ def refresh_corpbonds_data_if_needed(
         )
         conn.commit()
 
+    duration_seconds = time.monotonic() - started_at
     logger.info(
-        "Corpbonds: SECID в Merge=%s, запрошено=%s, сохранено=%s, ошибок=%s, TTL=%s ч",
+        "Corpbonds: SECID в Merge=%s, запрошено=%s, сохранено=%s, ошибок=%s, TTL=%s ч, duration=%.2fs",
         len(secids),
         len(stale_secids),
         len(fetched_rows),
         errors,
         config.CORPBONDS_CACHE_TTL_HOURS,
+        duration_seconds,
     )
     return len(secids), len(stale_secids), len(fetched_rows)
 
@@ -4605,6 +4628,11 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                         "secid": secid,
                         "isin": str(row[1] or "").strip(),
                         "coupon_formula": str(row[21] or "").strip(),
+                        "parsed_terms": {
+                            "index_type": floater_terms[0] if floater_terms else None,
+                            "tenor": floater_terms[1] if floater_terms else None,
+                            "premium": floater_terms[2] if floater_terms else None,
+                        },
                         "faceunit": str(row[23] or "").strip(),
                         "facevalue": facevalue_value,
                         "price_used": price_used,
@@ -4618,7 +4646,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                             "key_rate": cbr_data.get("key_rate"),
                             "ruonia": cbr_data.get("ruonia"),
                             "zcyc_tenor_used": floater_terms[1] if floater_terms else None,
-                            "zcyc_yield_used": _pick_zcyc_point(cbr_data.get("zcyc") if isinstance(cbr_data.get("zcyc"), dict) else {}, floater_terms[1]) if floater_terms else None,
+                            "zcyc_yield_used": pick_zcyc_point(cbr_data.get("zcyc") if isinstance(cbr_data.get("zcyc"), dict) else {}, floater_terms[1]) if floater_terms else None,
                         },
                         "result_yield": ytm_num,
                         "reason": "empty" if not ytm_value else "anomaly",
