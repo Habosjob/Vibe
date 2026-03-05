@@ -3943,6 +3943,41 @@ def main() -> None:
             )
         stage_times["Этап 11: Обогащение Merge* из Smartlab"] = perf_counter() - s
 
+        print("Этап 11.5: Повторный Presorter после обогащений")
+        s = perf_counter()
+        with progress(total=2, desc="Presorter rerun", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                green_presort = presort_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
+                pbar.update(1)
+                yellow_presort = presort_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
+                pbar.update(1)
+            presorter_summary["MergeGreen_after_enrichment"] = green_presort
+            presorter_summary["MergeYellow_after_enrichment"] = yellow_presort
+            logger.info(
+                "Presorter rerun after enrichment: "
+                "MergeGreen rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, offerdate=%s, amortstart=%s, total=%s); "
+                "MergeYellow rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, offerdate=%s, amortstart=%s, total=%s); "
+                "dohod_nearest_rule_enabled=%s",
+                green_presort["rows_before"],
+                green_presort["rows_after"],
+                green_presort["excluded_by_matdate_rule"],
+                green_presort["excluded_by_dohod_nearest_rule"],
+                green_presort["excluded_by_bond_type_rule"],
+                green_presort["excluded_by_offerdate_rule"],
+                green_presort["excluded_by_amortstartdate_rule"],
+                green_presort["excluded_total"],
+                yellow_presort["rows_before"],
+                yellow_presort["rows_after"],
+                yellow_presort["excluded_by_matdate_rule"],
+                yellow_presort["excluded_by_dohod_nearest_rule"],
+                yellow_presort["excluded_by_bond_type_rule"],
+                yellow_presort["excluded_by_offerdate_rule"],
+                yellow_presort["excluded_by_amortstartdate_rule"],
+                yellow_presort["excluded_total"],
+                config.PRESORTER_USE_DOHOD_NEAREST_DATE,
+            )
+        stage_times["Этап 11.5: Повторный Presorter после обогащений"] = perf_counter() - s
+
         print("Этап 12: Screener (SQL + Excel)")
         s = perf_counter()
         with progress(total=2, desc="Screener", unit="шаг") as pbar:
