@@ -659,6 +659,15 @@ def should_refresh_nra(conn: sqlite3.Connection, now_utc: datetime) -> bool:
 
 
 def should_refresh_raex(conn: sqlite3.Connection, now_utc: datetime) -> bool:
+    latest_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (config.RAEX_LATEST_TABLE_NAME,),
+    ).fetchone()
+    if latest_exists:
+        latest_rows_count = conn.execute(f'SELECT COUNT(*) FROM "{config.RAEX_LATEST_TABLE_NAME}"').fetchone()
+        if not latest_rows_count or int(latest_rows_count[0]) <= 0:
+            return True
+
     last_refresh_raw = get_meta_value(conn, "raex_last_refresh_utc")
     rows_count_raw = get_meta_value(conn, "raex_last_rows_count")
     if not last_refresh_raw or not rows_count_raw:
@@ -688,7 +697,7 @@ def _extract_raex_csrf_token(html_text: str) -> str:
 
 
 def _extract_raex_company_url(html_text: str) -> str:
-    match = re.search(r"href=[\"'](?P<url>/database/companies/[^\"']+/)[\"']", html_text, flags=re.IGNORECASE)
+    match = re.search(r"href=[\"'](?P<url>/database/companies/[^\"']+/?)[\"']", html_text, flags=re.IGNORECASE)
     return match.group("url").strip() if match else ""
 
 
@@ -705,7 +714,13 @@ def parse_raex_company_page(html_text: str) -> dict[str, str] | None:
     if heading is None:
         return None
 
-    required_headers = {"национальная шкала", "прогноз", "дата"}
+    rating_header_aliases = (
+        "национальная шкала",
+        "шкала эксперт ра",
+        "шкала эксперт\xa0ра",
+    )
+    forecast_header_aliases = ("прогноз",)
+    date_header_aliases = ("дата",)
     for node in heading.find_all_next():
         node_text = node.get_text(" ", strip=True)
         if node is not heading and "Архив рейтингов" in node_text:
@@ -717,20 +732,24 @@ def parse_raex_company_page(html_text: str) -> dict[str, str] | None:
         if not headers:
             first_row = node.select_one("tr")
             headers = [cell.get_text(" ", strip=True).lower() for cell in first_row.select("th, td")] if first_row else []
-        if not required_headers.issubset(set(headers)):
+        rating_index = next((idx for idx, value in enumerate(headers) if value in rating_header_aliases), -1)
+        forecast_index = next((idx for idx, value in enumerate(headers) if value in forecast_header_aliases), -1)
+        date_index = next((idx for idx, value in enumerate(headers) if value in date_header_aliases), -1)
+        if rating_index < 0 or forecast_index < 0 or date_index < 0:
             continue
 
-        indexes = {name: headers.index(name) for name in required_headers}
         for tr in node.select("tbody tr") or node.select("tr")[1:]:
             cells = [td.get_text(" ", strip=True) for td in tr.select("td")]
             if not cells:
                 continue
-            rating_raw = cells[indexes["национальная шкала"]] if indexes["национальная шкала"] < len(cells) else ""
-            forecast_raw = cells[indexes["прогноз"]] if indexes["прогноз"] < len(cells) else ""
-            date_raw = cells[indexes["дата"]] if indexes["дата"] < len(cells) else ""
+            rating_raw = cells[rating_index] if rating_index < len(cells) else ""
+            forecast_raw = cells[forecast_index] if forecast_index < len(cells) else ""
+            date_raw = cells[date_index] if date_index < len(cells) else ""
             if _looks_like_raex_revoked(rating_raw):
                 return None
-            rating = re.sub(r"^ru", "", rating_raw.strip(), flags=re.IGNORECASE)
+            rating_clean = re.sub(r"\s+", " ", rating_raw.strip())
+            rating_head_match = re.match(r"[A-Za-zА-Яа-я0-9+\-.]+", rating_clean)
+            rating = re.sub(r"^ru", "", rating_head_match.group(0) if rating_head_match else rating_clean, flags=re.IGNORECASE)
             if _looks_like_raex_revoked(rating):
                 return None
             return {
