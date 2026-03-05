@@ -22,6 +22,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
+from lxml import etree
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.styles import Font, PatternFill
@@ -2254,8 +2255,6 @@ MERGE_DOHOD_COLUMNS = [
     "Тип купона",
     "Купон (раз/год)",
     "Субординированная (да/нет)",
-    "Базовый индекс (для FRN)",
-    "Премия/Дисконт к базовому индексу (для FRN)",
 ]
 
 SCREENER_TABLE_NAME = config.SCREENER_TABLE_NAME
@@ -2281,8 +2280,6 @@ SCREENER_COLUMNS = [
     "НКД",
     "Текущий купон, %",
     "YTM",
-    "Базовый индекс (для FRN)",
-    "Премия/Дисконт к базовому индексу (для FRN)",
     "Corpbonds_Формула купона",
     "FACEVALUE",
     "FACEUNIT",
@@ -2311,8 +2308,6 @@ SCREENER_EXPORT_COLUMNS = [
     ("НКД", "НКД"),
     ("Текущий купон, %", "Купон, %"),
     ("YTM", "YTM"),
-    ("Базовый индекс (для FRN)", "Базовый индекс"),
-    ("Премия/Дисконт к базовому индексу (для FRN)", "Премия, индекс"),
     ("Corpbonds_Формула купона", "Формула купона"),
     ("FACEVALUE", "FACEVALUE"),
     ("FACEUNIT", "FACEUNIT"),
@@ -2581,6 +2576,51 @@ def _normalize_purchase_price(price_percent: float, facevalue: float, nkd: float
     return (facevalue * (price_percent / 100.0)) + nkd
 
 
+def _format_ytm_percent(ytm_decimal: float) -> str:
+    precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 2)))
+    return f"{ytm_decimal * 100:.{precision}f}"
+
+
+def _is_ruble_faceunit(faceunit: object) -> bool:
+    return str(faceunit or "").strip().upper() in {"RUB", "RUR", "SUR"}
+
+
+def _resolve_nkd_for_dirty_price(
+    *,
+    faceunit: object,
+    facevalue: float,
+    corpbonds_nkd: object,
+    fallback_nkd: object,
+    secid: str,
+    logger: logging.Logger,
+) -> tuple[float, str]:
+    candidates: list[tuple[str, float | None]] = []
+    if _is_ruble_faceunit(faceunit):
+        candidates.append(("corpbonds", _parse_decimal_value(corpbonds_nkd)))
+    candidates.append(("fallback", _parse_decimal_value(fallback_nkd)))
+    candidates.append(("zero", 0.0))
+
+    threshold = facevalue * float(getattr(config, "NCD_FACEVALUE_SANITY_RATIO", 0.2))
+    for source, value in candidates:
+        if value is None:
+            continue
+        if value < 0:
+            continue
+        if facevalue > 0 and value > threshold:
+            logger.warning(
+                "YTM: suspicious NKD SECID=%s source=%s faceunit=%s nkd=%s facevalue=%s threshold=%s",
+                secid,
+                source,
+                faceunit,
+                value,
+                facevalue,
+                threshold,
+            )
+            continue
+        return value, source
+    return 0.0, "zero"
+
+
 def _resolve_coupon_frequency_per_year(raw_coupon_period: object) -> float | None:
     parsed_value = _parse_decimal_value(raw_coupon_period)
     if parsed_value is None or parsed_value <= 0:
@@ -2837,7 +2877,9 @@ def _calculate_fixed_coupon_ytm(
     coupon_frequency: object,
     coupon_period_days: object,
     next_coupon_date: object,
-    nkd: object,
+    faceunit: object,
+    corpbonds_nkd: object,
+    fallback_nkd: object,
     facevalue: object,
     matdate: object,
     offerdate: object,
@@ -2846,6 +2888,8 @@ def _calculate_fixed_coupon_ytm(
     smartlab_price: object,
     moex_price: object,
     amortization_schedule: list[tuple[datetime, float]] | None,
+    logger: logging.Logger,
+    secid: str,
 ) -> str:
     if not _is_fixed_coupon_type(coupon_type):
         return ""
@@ -2856,7 +2900,6 @@ def _calculate_fixed_coupon_ytm(
     if coupon_freq is None:
         coupon_freq = _resolve_coupon_frequency_per_year(coupon_period_days)
     facevalue_value = _parse_decimal_value(facevalue)
-    nkd_value = _parse_decimal_value(nkd) or 0.0
     target_date = _parse_bond_date(str(offerdate or "")) or _parse_bond_date(str(matdate or ""))
 
     if (
@@ -2869,6 +2912,15 @@ def _calculate_fixed_coupon_ytm(
         return ""
     if coupon_freq <= 0 or facevalue_value <= 0:
         return ""
+
+    nkd_value, _ = _resolve_nkd_for_dirty_price(
+        faceunit=faceunit,
+        facevalue=facevalue_value,
+        corpbonds_nkd=corpbonds_nkd,
+        fallback_nkd=fallback_nkd,
+        secid=secid,
+        logger=logger,
+    )
 
     days_to_redemption = (target_date.date() - datetime.now().date()).days
     if days_to_redemption <= 0:
@@ -2884,8 +2936,7 @@ def _calculate_fixed_coupon_ytm(
     if is_subord:
         current_coupon_yield = annual_coupon / dirty_price
         effective_yield = (1.0 + current_coupon_yield / coupon_freq) ** coupon_freq - 1.0
-        precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 2)))
-        return f"{effective_yield * 100:.{precision}f}"
+        return _format_ytm_percent(effective_yield)
 
     if is_amort:
         cashflows = _build_amortized_cashflows(
@@ -2919,8 +2970,7 @@ def _calculate_fixed_coupon_ytm(
     if ytm_decimal is None:
         return ""
 
-    precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 2)))
-    return f"{ytm_decimal * 100:.{precision}f}"
+    return _format_ytm_percent(ytm_decimal)
 
 
 def _run_ytm_self_check() -> list[str]:
@@ -2986,26 +3036,33 @@ def _is_floater_coupon_type(raw_value: object) -> bool:
     return "флоат" in str(raw_value or "").strip().casefold()
 
 
+def _is_other_coupon_type(raw_value: object) -> bool:
+    return "проч" in str(raw_value or "").strip().casefold()
+
+
 def parse_floater_terms(formula_raw: object) -> tuple[str, float | None, float] | None:
     formula = str(formula_raw or "")
     normalized = formula.casefold().replace("ё", "е")
+    stripped = re.sub(r"(max|min)\s*\([^\)]*\)", " ", normalized)
+    stripped = re.sub(r"не\s+более[^,;]*|не\s+менее[^,;]*|cap\w*[^,;]*|floor\w*[^,;]*", " ", stripped)
+
     index_type = ""
     tenor_years: float | None = None
 
-    g_curve_match = re.search(r"g\s*[- ]?curve\s*([0-9]+(?:[\.,][0-9]+)?)\s*y", normalized)
-    if g_curve_match:
-        index_type = "gcurve"
-        tenor_years = float(g_curve_match.group(1).replace(",", "."))
-    elif "ruonia" in normalized:
+    zcyc_match = re.search(r"(?:g\s*[- ]?curve|zcyc)\s*([0-9]+(?:[\.,][0-9]+)?)\s*y", stripped)
+    if zcyc_match:
+        index_type = "zcyc"
+        tenor_years = float(zcyc_match.group(1).replace(",", "."))
+    elif "ruonia" in stripped:
         index_type = "ruonia"
-    elif "ключев" in normalized or re.search(r"\bкс\b", normalized):
+    elif "ключев" in stripped or re.search(r"\bкс\b", stripped):
         index_type = "key"
 
     if not index_type:
         return None
 
     premium = 0.0
-    for sign, value in re.findall(r"([+-])\s*([0-9]+(?:[\.,][0-9]+)?)\s*%", normalized):
+    for sign, value in re.findall(r"([+-])\s*([0-9]+(?:[\.,][0-9]+)?)\s*%", stripped):
         number = float(value.replace(",", "."))
         premium += number if sign == "+" else -number
     return (index_type, tenor_years, premium)
@@ -3059,12 +3116,18 @@ def _fetch_cbr_zcyc_curve() -> dict[float, float]:
 def get_cbr_reference_data(conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime) -> dict[str, object]:
     ensure_cbr_cache_table(conn)
     cache_key = "cbr_reference_v1"
+    if getattr(config, "FORCE_CBR_TTL_RESET", False):
+        conn.execute('UPDATE "CBRIndicatorsCache" SET "updated_at_utc" = ?', ("",))
+        conn.commit()
+        logger.info("CBR cache TTL reset forced via config.FORCE_CBR_TTL_RESET")
     row = conn.execute('SELECT "payload_json", "updated_at_utc" FROM "CBRIndicatorsCache" WHERE "cache_key"=?', (cache_key,)).fetchone()
     if row:
         try:
             updated_at = datetime.fromisoformat(str(row[1]))
-            if now_utc - updated_at < timedelta(hours=getattr(config, "CBR_CACHE_TTL_HOURS", 12)):
-                return json.loads(str(row[0]))
+            cached_payload = json.loads(str(row[0]))
+            has_cached_data = bool(cached_payload.get("zcyc")) or _parse_decimal_value(cached_payload.get("key_rate")) is not None
+            if now_utc - updated_at < timedelta(hours=getattr(config, "CBR_CACHE_TTL_HOURS", 12)) and has_cached_data:
+                return cached_payload
         except Exception:
             pass
 
@@ -3076,11 +3139,15 @@ def get_cbr_reference_data(conn: sqlite3.Connection, logger: logging.Logger, now
     except Exception as exc:
         logger.warning("CBR cache update error: %s", exc)
 
-    conn.execute(
-        'INSERT OR REPLACE INTO "CBRIndicatorsCache" ("cache_key", "payload_json", "updated_at_utc") VALUES (?, ?, ?)',
-        (cache_key, json.dumps(payload, ensure_ascii=False), now_utc.isoformat()),
-    )
-    conn.commit()
+    has_fresh_data = bool(payload.get("zcyc")) or _parse_decimal_value(payload.get("key_rate")) is not None
+    if has_fresh_data:
+        conn.execute(
+            'INSERT OR REPLACE INTO "CBRIndicatorsCache" ("cache_key", "payload_json", "updated_at_utc") VALUES (?, ?, ?)',
+            (cache_key, json.dumps(payload, ensure_ascii=False), now_utc.isoformat()),
+        )
+        conn.commit()
+    else:
+        logger.warning("CBR cache payload is empty, TTL update skipped")
     return payload
 
 
@@ -3100,7 +3167,23 @@ def _year_bucket(event_date: datetime.date, valuation_date: datetime.date) -> in
     return max(0, min(2, int((event_date - valuation_date).days / 365.25)))
 
 
-def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupon_frequency: object, coupon_period_days: object, next_coupon_date: object, nkd: object, facevalue: object, matdate: object, offerdate: object, corpbonds_price: object, dohod_price: object, smartlab_price: object, moex_price: object, amortization_schedule: list[tuple[datetime, float]] | None, cbr_data: dict[str, object], logger: logging.Logger, secid: str) -> str:
+def _pick_zcyc_point(zcyc: dict[object, object], tenor_years: float | None) -> float | None:
+    if tenor_years is None or not zcyc:
+        return None
+    normalized: dict[float, float] = {}
+    for key, value in zcyc.items():
+        key_num = _parse_decimal_value(key)
+        val_num = _parse_decimal_value(value)
+        if key_num is None or val_num is None:
+            continue
+        normalized[float(key_num)] = float(val_num)
+    if not normalized:
+        return None
+    nearest_key = min(normalized.keys(), key=lambda k: abs(k - tenor_years))
+    return normalized.get(nearest_key)
+
+
+def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupon_frequency: object, coupon_period_days: object, next_coupon_date: object, faceunit: object, corpbonds_nkd: object, fallback_nkd: object, facevalue: object, matdate: object, offerdate: object, corpbonds_price: object, dohod_price: object, smartlab_price: object, moex_price: object, amortization_schedule: list[tuple[datetime, float]] | None, cbr_data: dict[str, object], logger: logging.Logger, secid: str) -> str:
     terms = parse_floater_terms(coupon_formula)
     if not terms:
         logger.info("Floater YTM skipped SECID=%s: parse formula fail", secid)
@@ -3122,7 +3205,7 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
         spread_to_key = key_current - idx
     else:
         zcyc = cbr_data.get("zcyc") if isinstance(cbr_data.get("zcyc"), dict) else {}
-        idx = _parse_decimal_value(zcyc.get(float(tenor_years))) if tenor_years is not None else None
+        idx = _pick_zcyc_point(zcyc, tenor_years)
         if idx is None:
             logger.info("Floater YTM skipped SECID=%s: G-Curve unavailable", secid)
             return ""
@@ -3131,10 +3214,18 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
     price = _pick_price_for_ytm(corpbonds_price, dohod_price, smartlab_price, moex_price)
     coupon_freq = _resolve_coupon_frequency_per_year(coupon_frequency) or _resolve_coupon_frequency_per_year(coupon_period_days)
     facevalue_value = _parse_decimal_value(facevalue)
-    nkd_value = _parse_decimal_value(nkd) or 0.0
     target_date = _parse_bond_date(str(offerdate or "")) or _parse_bond_date(str(matdate or ""))
     if price is None or coupon_freq is None or facevalue_value is None or target_date is None:
         return ""
+
+    nkd_value, _ = _resolve_nkd_for_dirty_price(
+        faceunit=faceunit,
+        facevalue=facevalue_value,
+        corpbonds_nkd=corpbonds_nkd,
+        fallback_nkd=fallback_nkd,
+        secid=secid,
+        logger=logger,
+    )
 
     dirty_price = _normalize_purchase_price(price, facevalue_value, nkd_value)
     coupon_dates = _build_coupon_dates(target_date=target_date, coupon_frequency=coupon_freq, coupon_period_days=coupon_period_days, next_coupon_date=next_coupon_date)
@@ -3170,27 +3261,32 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
         rate0 = _forecast_by_bucket(getattr(config, "KEY_RATE_FORECAST", {0: key_current, 2: key_current}), 0) - spread_to_key + premium
         current_coupon = facevalue_value * (rate0 / 100.0)
         effective = (1.0 + (current_coupon / dirty_price) / coupon_freq) ** coupon_freq - 1.0
-        precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 2)))
-        return f"{effective * 100:.{precision}f}"
+        return _format_ytm_percent(effective)
 
     ytm_decimal = _solve_ytm_bisection(dirty_price=dirty_price, coupon_frequency=coupon_freq, cashflows=cashflows)
     if ytm_decimal is None:
         return ""
-    precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 2)))
-    return f"{ytm_decimal * 100:.{precision}f}"
+    return _format_ytm_percent(ytm_decimal)
 
 
-def _calculate_linker_ytm(*, secid: str, bond_type: object, bond_subtype: object, coupon_percent: object, coupon_frequency: object, coupon_period_days: object, next_coupon_date: object, nkd: object, facevalue: object, matdate: object, offerdate: object, corpbonds_price: object, dohod_price: object, smartlab_price: object, moex_price: object) -> str:
+def _calculate_linker_ytm(*, secid: str, bond_type: object, bond_subtype: object, coupon_percent: object, coupon_frequency: object, coupon_period_days: object, next_coupon_date: object, faceunit: object, corpbonds_nkd: object, fallback_nkd: object, facevalue: object, matdate: object, offerdate: object, corpbonds_price: object, dohod_price: object, smartlab_price: object, moex_price: object, logger: logging.Logger) -> str:
     if not is_linker(secid, bond_type, bond_subtype):
         return ""
     price = _pick_price_for_ytm(corpbonds_price, dohod_price, smartlab_price, moex_price)
     coupon_rate_percent = _parse_decimal_value(coupon_percent)
     coupon_freq = _resolve_coupon_frequency_per_year(coupon_frequency) or _resolve_coupon_frequency_per_year(coupon_period_days)
     facevalue_value = _parse_decimal_value(facevalue)
-    nkd_value = _parse_decimal_value(nkd) or 0.0
     target_date = _parse_bond_date(str(offerdate or "")) or _parse_bond_date(str(matdate or ""))
     if price is None or coupon_rate_percent is None or coupon_freq is None or facevalue_value is None or target_date is None:
         return ""
+    nkd_value, _ = _resolve_nkd_for_dirty_price(
+        faceunit=faceunit,
+        facevalue=facevalue_value,
+        corpbonds_nkd=corpbonds_nkd,
+        fallback_nkd=fallback_nkd,
+        secid=secid,
+        logger=logger,
+    )
     dirty_price = _normalize_purchase_price(price, facevalue_value, nkd_value)
     coupon_dates = _build_coupon_dates(target_date=target_date, coupon_frequency=coupon_freq, coupon_period_days=coupon_period_days, next_coupon_date=next_coupon_date)
     valuation_date = datetime.now().date()
@@ -3214,8 +3310,48 @@ def _calculate_linker_ytm(*, secid: str, bond_type: object, bond_subtype: object
     ytm_decimal = _solve_ytm_bisection(dirty_price=dirty_price, coupon_frequency=coupon_freq, cashflows=cashflows)
     if ytm_decimal is None:
         return ""
-    precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 2)))
-    return f"{ytm_decimal * 100:.{precision}f}"
+    return _format_ytm_percent(ytm_decimal)
+
+
+def _calculate_other_coupon_ytm(*, subord_flag: object, coupon_frequency: object, faceunit: object, corpbonds_nkd: object, fallback_nkd: object, facevalue: object, matdate: object, offerdate: object, corpbonds_price: object, dohod_price: object, smartlab_price: object, moex_price: object, amortization_schedule: list[tuple[datetime, float]] | None, logger: logging.Logger, secid: str) -> str:
+    price = _pick_price_for_ytm(corpbonds_price, dohod_price, smartlab_price, moex_price)
+    coupon_freq = _resolve_coupon_frequency_per_year(coupon_frequency) or 2.0
+    facevalue_value = _parse_decimal_value(facevalue)
+    target_date = _parse_bond_date(str(offerdate or "")) or _parse_bond_date(str(matdate or ""))
+    if price is None or facevalue_value is None or facevalue_value <= 0 or target_date is None:
+        return ""
+
+    nkd_value, _ = _resolve_nkd_for_dirty_price(
+        faceunit=faceunit,
+        facevalue=facevalue_value,
+        corpbonds_nkd=corpbonds_nkd,
+        fallback_nkd=fallback_nkd,
+        secid=secid,
+        logger=logger,
+    )
+    dirty_price = _normalize_purchase_price(price, facevalue_value, nkd_value)
+    valuation_date = datetime.now().date()
+    principal = facevalue_value
+    amort_map = {d.date(): p for d, p in (amortization_schedule or []) if p > 0}
+    event_dates = sorted(set(amort_map.keys()) | {target_date.date()})
+    cashflows: list[tuple[float, float]] = []
+    for dt in event_dates:
+        if dt <= valuation_date:
+            continue
+        amount = 0.0
+        if dt in amort_map:
+            principal_payment = min(principal, amort_map[dt])
+            amount += principal_payment
+            principal -= principal_payment
+        if dt == target_date.date() and principal > 0:
+            amount += principal
+        years = (dt - valuation_date).days / 365.25
+        if amount > 0 and years > 0:
+            cashflows.append((years, amount))
+    ytm_decimal = _solve_ytm_bisection(dirty_price=dirty_price, coupon_frequency=coupon_freq, cashflows=cashflows)
+    if ytm_decimal is None:
+        return ""
+    return _format_ytm_percent(ytm_decimal)
 
 
 def _screener_sort_key(row_values: tuple[object, ...]) -> tuple[int, datetime, str, str]:
@@ -3234,7 +3370,6 @@ def _prepare_screener_export_row(headers: list[str], row_values: list[object]) -
         "НКД",
         "Купон, %",
         "YTM",
-        "Премия, индекс",
         "FACEVALUE",
         "Цена Corpbonds",
         "Цена Доход",
@@ -3257,6 +3392,15 @@ def _prepare_screener_export_row(headers: list[str], row_values: list[object]) -
             row_values[index] = int(parsed) if parsed is not None else None
 
     return row_values
+
+
+def _write_ytm_debug_record(payload: dict[str, object]) -> None:
+    if not getattr(config, "ENABLE_YTM_DEBUG_LOG", True):
+        return
+    config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    path = config.LOGS_DIR / getattr(config, "YTM_DEBUG_FILENAME", "ytm_debug.jsonl")
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def _normalize_bond_type(raw_value: str | None) -> str:
@@ -3365,6 +3509,9 @@ def ensure_corpbonds_table(conn: sqlite3.Connection) -> bool:
         conn.execute(f'UPDATE "{config.CORPBONDS_TABLE_NAME}" SET "updated_at_utc" = ? ', ("",))
         set_meta_value(conn, force_refresh_meta_key, "1")
         force_refresh_done = True
+    if getattr(config, "FORCE_CORPBONDS_TTL_RESET", False):
+        conn.execute(f'UPDATE "{config.CORPBONDS_TABLE_NAME}" SET "updated_at_utc" = ?', ("",))
+        force_refresh_done = True
     conn.commit()
     return force_refresh_done
 
@@ -3391,7 +3538,8 @@ def _normalize_label(raw_label: str) -> str:
 
 
 def parse_corpbonds_page_fields(raw_html: str) -> dict[str, str]:
-    soup = BeautifulSoup(raw_html, "lxml")
+    parser = etree.HTMLParser(recover=True)
+    root = etree.HTML(raw_html, parser=parser)
     parsed = {
         "Цена последняя": "",
         "Тип купона": "",
@@ -3403,12 +3551,15 @@ def parse_corpbonds_page_fields(raw_html: str) -> dict[str, str]:
         "Наличие амортизации": "",
         "Купон лесенкой": "",
     }
-    for row in soup.find_all("tr"):
-        tds = row.find_all("td")
+    if root is None:
+        return parsed
+
+    for row in root.xpath("//tr[td]"):
+        tds = row.xpath("./td")
         if len(tds) < 2:
             continue
-        label = " ".join(tds[0].stripped_strings)
-        value = " ".join(tds[-1].stripped_strings)
+        label = " ".join(" ".join(tds[0].itertext()).split())
+        value = " ".join(" ".join(tds[-1].itertext()).split())
         if not label:
             continue
         normalized = _normalize_label(label)
@@ -4188,6 +4339,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
     ytm_fixed_count = 0
     ytm_floater_count = 0
     ytm_linker_count = 0
+    ytm_other_count = 0
     cbr_data = get_cbr_reference_data(conn, logging.getLogger("bonds_main"), datetime.now(timezone.utc))
     for source_table, source_list, score in SCREENER_SOURCE_TABLES:
         rows = conn.execute(
@@ -4197,9 +4349,8 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                 "Субординированная (да/нет)", "Corpbonds_Наличие амортизации", "Corpbonds_Купон лесенкой",
                 "{AMORTIZATION_START_COLUMN}", "MATDATE", "Corpbonds_Дата ближайшей оферты", "Smartlab_Дата оферты",
                 "Corpbonds_Дата ближайшего купона", "Corpbonds_Тип купона", "Smartlab_Длительность купона, дней",
-                COALESCE(NULLIF("Corpbonds_НКД", ''), "НКД") AS "НКД", COALESCE(NULLIF("Corpbonds_Ставка купона", ''), "Текущий купон, %") AS "Текущий купон, %",
-                "Купон (раз/год)", "Базовый индекс (для FRN)",
-                "Премия/Дисконт к базовому индексу (для FRN)", "Corpbonds_Формула купона",
+                "Corpbonds_НКД", "НКД", COALESCE(NULLIF("Corpbonds_Ставка купона", ''), "Текущий купон, %") AS "Текущий купон, %",
+                "Купон (раз/год)", "Corpbonds_Формула купона",
                 "FACEVALUE", "FACEUNIT", "Коэф. Ликвидности (max=100)", "Corpbonds_Цена последняя",
                 "Цена Доход", "Smartlab_Котировка облигации, %", "PRICE"
             FROM "{source_table}"
@@ -4212,7 +4363,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
         secids_with_amort: set[str] = set()
         for row in rows:
             secid = str(row[0] or "").strip()
-            facevalue_value = _parse_decimal_value(row[23])
+            facevalue_value = _parse_decimal_value(row[22])
             if secid and facevalue_value is not None:
                 facevalues_by_secid[secid] = facevalue_value
             if secid and not _is_false_like(row[8]):
@@ -4227,19 +4378,21 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
             coupon_type = row[15]
             if _is_floater_coupon_type(coupon_type):
                 ytm_value = _calculate_floater_ytm(
-                    coupon_formula=row[22],
+                    coupon_formula=row[21],
                     subord_flag=row[7],
-                    coupon_frequency=row[19],
+                    coupon_frequency=row[20],
                     coupon_period_days=row[16],
                     next_coupon_date=row[14],
-                    nkd=row[17],
-                    facevalue=row[23],
+                    faceunit=row[23],
+                    corpbonds_nkd=row[17],
+                    fallback_nkd=row[18],
+                    facevalue=row[22],
                     matdate=row[11],
                     offerdate=offer_date,
-                    corpbonds_price=row[26],
-                    dohod_price=row[27],
-                    smartlab_price=row[28],
-                    moex_price=row[29],
+                    corpbonds_price=row[25],
+                    dohod_price=row[26],
+                    smartlab_price=row[27],
+                    moex_price=row[28],
                     amortization_schedule=amortization_map.get(secid),
                     cbr_data=cbr_data,
                     logger=logging.getLogger("bonds_main"),
@@ -4252,39 +4405,66 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                     secid=secid,
                     bond_type=row[3],
                     bond_subtype=row[4],
-                    coupon_percent=row[18],
-                    coupon_frequency=row[19],
+                    coupon_percent=row[19],
+                    coupon_frequency=row[20],
                     coupon_period_days=row[16],
                     next_coupon_date=row[14],
-                    nkd=row[17],
-                    facevalue=row[23],
+                    faceunit=row[23],
+                    corpbonds_nkd=row[17],
+                    fallback_nkd=row[18],
+                    facevalue=row[22],
                     matdate=row[11],
                     offerdate=offer_date,
-                    corpbonds_price=row[26],
-                    dohod_price=row[27],
-                    smartlab_price=row[28],
-                    moex_price=row[29],
+                    corpbonds_price=row[25],
+                    dohod_price=row[26],
+                    smartlab_price=row[27],
+                    moex_price=row[28],
+                    logger=logging.getLogger("bonds_main"),
                 )
                 if ytm_value:
                     ytm_linker_count += 1
+            elif _is_other_coupon_type(coupon_type):
+                ytm_value = _calculate_other_coupon_ytm(
+                    subord_flag=row[7],
+                    coupon_frequency=row[20],
+                    faceunit=row[23],
+                    corpbonds_nkd=row[17],
+                    fallback_nkd=row[18],
+                    facevalue=row[22],
+                    matdate=row[11],
+                    offerdate=offer_date,
+                    corpbonds_price=row[25],
+                    dohod_price=row[26],
+                    smartlab_price=row[27],
+                    moex_price=row[28],
+                    amortization_schedule=amortization_map.get(secid),
+                    logger=logging.getLogger("bonds_main"),
+                    secid=secid,
+                )
+                if ytm_value:
+                    ytm_other_count += 1
             else:
                 ytm_value = _calculate_fixed_coupon_ytm(
                     subord_flag=row[7],
                     amort_flag=row[8],
                     coupon_type=coupon_type,
-                    coupon_percent=row[18],
-                    coupon_frequency=row[19],
+                    coupon_percent=row[19],
+                    coupon_frequency=row[20],
                     coupon_period_days=row[16],
                     next_coupon_date=row[14],
-                    nkd=row[17],
-                    facevalue=row[23],
+                    faceunit=row[23],
+                    corpbonds_nkd=row[17],
+                    fallback_nkd=row[18],
+                    facevalue=row[22],
                     matdate=row[11],
                     offerdate=offer_date,
-                    corpbonds_price=row[26],
-                    dohod_price=row[27],
-                    smartlab_price=row[28],
-                    moex_price=row[29],
+                    corpbonds_price=row[25],
+                    dohod_price=row[26],
+                    smartlab_price=row[27],
+                    moex_price=row[28],
                     amortization_schedule=amortization_map.get(secid),
+                    logger=logging.getLogger("bonds_main"),
+                    secid=secid,
                 )
                 if ytm_value:
                     ytm_fixed_count += 1
@@ -4302,24 +4482,42 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                     offer_date,
                     _normalize_date_to_iso(row[14]),
                     str(row[15] or "").strip(),
-                    str(row[16] or "").strip(),
-                    str(row[17] or "").strip(),
-                    str(row[18] or "").strip(),
-                    ytm_value,
-                    str(row[20] or "").strip(),
+                    _parse_decimal_value(row[16]),
+                    _parse_decimal_value(row[17]) if _parse_decimal_value(row[17]) is not None else _parse_decimal_value(row[18]),
+                    _parse_decimal_value(row[19]),
+                    _parse_decimal_value(ytm_value),
                     str(row[21] or "").strip(),
-                    str(row[22] or "").strip(),
+                    _parse_decimal_value(row[22]),
                     str(row[23] or "").strip(),
-                    str(row[24] or "").strip(),
-                    str(row[25] or "").strip(),
-                    str(row[26] or "").strip(),
-                    str(row[27] or "").strip(),
-                    str(row[28] or "").strip(),
-                    str(row[29] or "").strip(),
-                    str(score),
+                    _parse_decimal_value(row[24]),
+                    _parse_decimal_value(row[25]),
+                    _parse_decimal_value(row[26]),
+                    _parse_decimal_value(row[27]),
+                    _parse_decimal_value(row[28]),
+                    int(score),
                     source_list,
                 )
             )
+
+            ytm_num = _parse_decimal_value(ytm_value)
+            if (not ytm_value) or (ytm_num is not None and (ytm_num < -5 or ytm_num > 200)):
+                _write_ytm_debug_record(
+                    {
+                        "secid": secid,
+                        "isin": str(row[1] or "").strip(),
+                        "faceunit": str(row[23] or "").strip(),
+                        "facevalue": _parse_decimal_value(row[22]),
+                        "price_used": _pick_price_for_ytm(row[25], row[26], row[27], row[28]),
+                        "nkd_used": str(row[17] or row[18] or "").strip(),
+                        "dirty_price": None,
+                        "coupon_type": str(coupon_type or ""),
+                        "coupon_rate": _parse_decimal_value(row[19]),
+                        "freq": _parse_decimal_value(row[20]),
+                        "target_date": offer_date or _normalize_date_to_iso(row[11]),
+                        "result_yield": ytm_num,
+                        "reason": "empty" if not ytm_value else "anomaly",
+                    }
+                )
 
         if records:
             column_names = ", ".join(f'"{column}"' for column in SCREENER_COLUMNS)
@@ -4338,6 +4536,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
         "ytm_fixed_count": ytm_fixed_count,
         "ytm_floater_count": ytm_floater_count,
         "ytm_linker_count": ytm_linker_count,
+        "ytm_other_count": ytm_other_count,
     }
 
 
@@ -4422,14 +4621,13 @@ def export_screener_excel(conn: sqlite3.Connection) -> dict[str, int]:
             "YTM": "0.00",
             "Купон, %": "0.00",
             "НКД": "0.00",
-            "Премия, индекс": "0.0000",
-            "FACEVALUE": "#,##0",
+            "FACEVALUE": "0.00",
             "Цена Corpbonds": "0.00",
             "Цена Доход": "0.00",
             "Цена Smartlab": "0.00",
             "Цена MOEX": "0.00",
             "КупонПериод": "0",
-            "Ликвидность": "0.0",
+            "Ликвидность": "0.00",
         }
         number_format_indices = {
             headers.index(column_name) + 1: number_format
@@ -4464,6 +4662,8 @@ def export_screener_excel(conn: sqlite3.Connection) -> dict[str, int]:
 
 def main() -> None:
     logger = setup_logging()
+    if getattr(config, "ENABLE_YTM_DEBUG_LOG", True):
+        (config.LOGS_DIR / getattr(config, "YTM_DEBUG_FILENAME", "ytm_debug.jsonl")).write_text("", encoding="utf-8")
     stage_times: dict[str, float] = {}
     presorter_summary: dict[str, dict[str, int]] = {}
     started = perf_counter()

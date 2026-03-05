@@ -364,6 +364,12 @@ CBR_ZCYC_URL = "https://www.cbr.ru/eng/hd_base/zcyc_params/"
 # По умолчанию: 12.
 CBR_CACHE_TTL_HOURS = 12
 
+# Принудительно сбросить TTL кэша индикаторов ЦБ перед обновлением.
+# Если True, updated_at_utc очищается и индикаторы запрашиваются заново.
+# Значения: True/False.
+# По умолчанию: False.
+FORCE_CBR_TTL_RESET = False
+
 # Паттерны для детекта инфляционных линкеров.
 # Сравнение выполняется без учета регистра.
 LINKER_BOND_TYPE_PATTERNS = ("офз-ин", "ин")
@@ -422,6 +428,12 @@ CORPBONDS_TABLE_NAME = "CorpbondsBonds"
 # По умолчанию: 12 часов.
 CORPBONDS_CACHE_TTL_HOURS = 12
 
+# Принудительно сбросить TTL кэша Corpbonds перед этапом обогащения.
+# Если True, updated_at_utc очищается у всех записей CorpbondsBonds.
+# Значения: True/False.
+# По умолчанию: False.
+FORCE_CORPBONDS_TTL_RESET = False
+
 # Количество потоков для параллельной загрузки Corpbonds.
 # Значение: целое число > 0.
 # По умолчанию: 16.
@@ -431,6 +443,22 @@ CORPBONDS_MAX_WORKERS = 16
 # Значение: число (int/float).
 # По умолчанию: 30.
 CORPBONDS_REQUEST_TIMEOUT_SECONDS = 30
+
+# Порог sanity-check для НКД: если НКД > FACEVALUE * порог, значение считается
+# подозрительным (ошибка единиц/валюты) и исключается из расчета dirty price.
+# Значение: число > 0.
+# По умолчанию: 0.2 (20% от номинала).
+NCD_FACEVALUE_SANITY_RATIO = 0.2
+
+# Вести ли отдельный debug-лог расчета YTM (jsonl).
+# В лог пишутся пропуски YTM и аномальные значения.
+# Значения: True/False.
+# По умолчанию: True.
+ENABLE_YTM_DEBUG_LOG = True
+
+# Имя файла debug-лога расчета YTM в каталоге logs.
+# По умолчанию: ytm_debug.jsonl.
+YTM_DEBUG_FILENAME = "ytm_debug.jsonl"
 
 # Имя Excel-файла снапшота по Corpbonds-обогащению (5 случайных SECID).
 # По умолчанию: corpbonds_snapshot.xlsx.
