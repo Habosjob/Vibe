@@ -334,6 +334,19 @@ SCREENER_XLSX_FILENAME = "Screener.xlsx"
 # По умолчанию: True.
 SCREENER_SORT_BY_AMORT_START_DATE = True
 
+# Множитель для нормализации цены в расчете YTM на этапе Screener.
+# Формула нормализации: normalized_price = price * FACEVALUE * YTM_PRICE_FACEVALUE_MULTIPLIER.
+# Далее «грязная цена покупки» считается как normalized_price + НКД.
+# Значение: число > 0.
+# По умолчанию: 1.0 (цена трактуется как доля от номинала; например 0.95 => 95% от номинала).
+# Если источник хранит цену в процентах (например 95.0), обычно используют 0.01.
+YTM_PRICE_FACEVALUE_MULTIPLIER = 1.0
+
+# Сколько знаков после запятой сохранять в колонке YTM в таблице Screener.
+# Значение: целое число >= 0.
+# По умолчанию: 4.
+YTM_OUTPUT_PRECISION = 4
+
 # Режим склейки Merge-таблиц по ISIN между MOEX и Доходъ.
 # Если True, в Merge попадают только бумаги, которые есть в обеих таблицах
 # (INNER JOIN по ISIN). Если False — используются все бумаги из MOEX и

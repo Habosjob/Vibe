@@ -2528,6 +2528,125 @@ def _parse_decimal_value(raw_value: object) -> float | None:
         return None
 
 
+def _is_false_like(raw_value: object) -> bool:
+    value = str(raw_value or "").strip().casefold()
+    return value in {"false", "нет", "0", "❌", "x", "х", "крестик"}
+
+
+def _is_fixed_coupon_type(raw_value: object) -> bool:
+    value = str(raw_value or "").strip().casefold()
+    return value.startswith("фикс")
+
+
+def _pick_price_for_ytm(*prices: object) -> float | None:
+    for raw_price in prices:
+        parsed = _parse_decimal_value(raw_price)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _solve_ytm_bisection(
+    dirty_price: float,
+    period_coupon: float,
+    facevalue: float,
+    periods: int,
+    coupon_frequency: float,
+) -> float | None:
+    def npv(rate: float) -> float:
+        discount = 1.0 + rate / coupon_frequency
+        total = 0.0
+        for period_idx in range(1, periods + 1):
+            cash_flow = period_coupon
+            if period_idx == periods:
+                cash_flow += facevalue
+            total += cash_flow / (discount ** period_idx)
+        return total - dirty_price
+
+    left = -0.95
+    right = 5.0
+    left_val = npv(left)
+    right_val = npv(right)
+
+    if left_val * right_val > 0:
+        return None
+
+    for _ in range(120):
+        mid = (left + right) / 2
+        mid_val = npv(mid)
+        if abs(mid_val) < 1e-8:
+            return mid
+        if left_val * mid_val <= 0:
+            right = mid
+            right_val = mid_val
+        else:
+            left = mid
+            left_val = mid_val
+    return (left + right) / 2
+
+
+def _calculate_fixed_coupon_ytm(
+    *,
+    subord_flag: object,
+    amort_flag: object,
+    ladder_flag: object,
+    coupon_type: object,
+    coupon_percent: object,
+    coupon_frequency: object,
+    nkd: object,
+    facevalue: object,
+    matdate: object,
+    offerdate: object,
+    corpbonds_price: object,
+    dohod_price: object,
+    smartlab_price: object,
+    moex_price: object,
+) -> str:
+    if not (_is_false_like(subord_flag) and _is_false_like(amort_flag) and _is_false_like(ladder_flag)):
+        return ""
+    if not _is_fixed_coupon_type(coupon_type):
+        return ""
+
+    price = _pick_price_for_ytm(corpbonds_price, dohod_price, smartlab_price, moex_price)
+    coupon_rate_percent = _parse_decimal_value(coupon_percent)
+    coupon_freq = _parse_decimal_value(coupon_frequency)
+    facevalue_value = _parse_decimal_value(facevalue)
+    nkd_value = _parse_decimal_value(nkd) or 0.0
+    target_date = _parse_bond_date(str(offerdate or "")) or _parse_bond_date(str(matdate or ""))
+
+    if (
+        price is None
+        or coupon_rate_percent is None
+        or coupon_freq is None
+        or facevalue_value is None
+        or target_date is None
+    ):
+        return ""
+    if coupon_freq <= 0 or facevalue_value <= 0:
+        return ""
+
+    days_to_redemption = (target_date.date() - datetime.now().date()).days
+    if days_to_redemption <= 0:
+        return ""
+
+    normalized_price = price * facevalue_value * float(config.YTM_PRICE_FACEVALUE_MULTIPLIER)
+    dirty_price = normalized_price + nkd_value
+
+    coupon_rate = coupon_rate_percent / 100.0
+    annual_coupon = facevalue_value * coupon_rate
+    period_coupon = annual_coupon / coupon_freq
+
+    years_to_redemption = days_to_redemption / 365.25
+    periods = max(1, int(round(years_to_redemption * coupon_freq)))
+
+    ytm_decimal = _solve_ytm_bisection(dirty_price, period_coupon, facevalue_value, periods, coupon_freq)
+    if ytm_decimal is None:
+        return ""
+
+    precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 4)))
+    return f"{ytm_decimal * 100:.{precision}f}"
+
+
 def _screener_sort_key(row_values: tuple[object, ...]) -> tuple[int, datetime, str, str]:
     amort_raw = row_values[6] if len(row_values) > 6 else None
     amort_dt = _parse_bond_date(None if amort_raw is None else str(amort_raw))
@@ -3444,6 +3563,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
     conn.execute(f'DELETE FROM "{SCREENER_TABLE_NAME}"')
 
     totals: dict[str, int] = {"Green": 0, "Yellow": 0}
+    ytm_fixed_count = 0
     for source_table, source_list, score in SCREENER_SOURCE_TABLES:
         rows = conn.execute(
             f'''
@@ -3452,7 +3572,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                 "Субординированная (да/нет)", "Corpbonds_Наличие амортизации", "Corpbonds_Купон лесенкой",
                 "{AMORTIZATION_START_COLUMN}", "MATDATE", "Corpbonds_Дата ближайшей оферты", "Smartlab_Дата оферты",
                 "Corpbonds_Дата ближайшего купона", "Corpbonds_Тип купона", "Smartlab_Длительность купона, дней",
-                "НКД", "Текущий купон, %", "Базовый индекс (для FRN)",
+                "НКД", "Текущий купон, %", "Купон (раз/год)", "Базовый индекс (для FRN)",
                 "Премия/Дисконт к базовому индексу (для FRN)", "Corpbonds_Формула купона",
                 "FACEVALUE", "FACEUNIT", "Коэф. Ликвидности (max=100)", "Corpbonds_Цена последняя",
                 "Цена Доход", "Smartlab_Котировка облигации, %", "PRICE"
@@ -3464,6 +3584,26 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
 
         records: list[tuple[str, ...]] = []
         for row in rows:
+            offer_date = _pick_offer_date(row[9], row[10])
+            ytm_value = _calculate_fixed_coupon_ytm(
+                subord_flag=row[4],
+                amort_flag=row[5],
+                ladder_flag=row[6],
+                coupon_type=row[12],
+                coupon_percent=row[15],
+                coupon_frequency=row[16],
+                nkd=row[14],
+                facevalue=row[20],
+                matdate=row[8],
+                offerdate=offer_date,
+                corpbonds_price=row[22],
+                dohod_price=row[23],
+                smartlab_price=row[24],
+                moex_price=row[25],
+            )
+            if ytm_value:
+                ytm_fixed_count += 1
+
             records.append(
                 (
                     str(row[0] or "").strip(),
@@ -3474,14 +3614,13 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                     str(row[6] or "").strip(),
                     _normalize_date_to_iso(row[7]),
                     _normalize_date_to_iso(row[8]),
-                    _pick_offer_date(row[9], row[10]),
+                    offer_date,
                     _normalize_date_to_iso(row[11]),
                     str(row[12] or "").strip(),
                     str(row[13] or "").strip(),
                     str(row[14] or "").strip(),
                     str(row[15] or "").strip(),
-                    "",
-                    str(row[16] or "").strip(),
+                    ytm_value,
                     str(row[17] or "").strip(),
                     str(row[18] or "").strip(),
                     str(row[19] or "").strip(),
@@ -3506,7 +3645,12 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
 
     conn.commit()
     total = conn.execute(f'SELECT COUNT(*) FROM "{SCREENER_TABLE_NAME}"').fetchone()[0]
-    return {"green": totals["Green"], "yellow": totals["Yellow"], "total": int(total)}
+    return {
+        "green": totals["Green"],
+        "yellow": totals["Yellow"],
+        "total": int(total),
+        "ytm_fixed_count": ytm_fixed_count,
+    }
 
 
 def _symbolize_boolean(raw_value: str | None) -> str:
@@ -3987,10 +4131,11 @@ def main() -> None:
                 screener_export = export_screener_excel(conn)
                 pbar.update(1)
             logger.info(
-                "Screener: SQL rows green=%s yellow=%s total=%s; Excel rows green=%s yellow=%s total=%s",
+                "Screener: SQL rows green=%s yellow=%s total=%s ytm_fixed=%s; Excel rows green=%s yellow=%s total=%s",
                 screener_stats.get("green", 0),
                 screener_stats.get("yellow", 0),
                 screener_stats.get("total", 0),
+                screener_stats.get("ytm_fixed_count", 0),
                 screener_export.get("Green", 0),
                 screener_export.get("Yellow", 0),
                 screener_export.get("total", 0),
