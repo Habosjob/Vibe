@@ -315,3 +315,15 @@ MERGE_GREEN_SNAPSHOT_FILENAME = "merge_green_bonds_snapshot.xlsx"
 # Имя Excel-файла снапшота merge-таблицы Yellow (5 случайных строк).
 # По умолчанию: merge_yellow_bonds_snapshot.xlsx.
 MERGE_YELLOW_SNAPSHOT_FILENAME = "merge_yellow_bonds_snapshot.xlsx"
+
+# Минимальный остаточный срок до погашения/оферты для этапа Presorter (в днях).
+# Если до даты меньше этого значения, бумага исключается из Merge*.
+# Значение: целое число > 0.
+# По умолчанию: 365.
+PRESORTER_MIN_DAYS_TO_EVENT = 365
+
+# Значение поля BOND_TYPE, которое исключается на этапе Presorter.
+# Сравнение выполняется после trim и без учета регистра.
+# Значение: строка.
+# По умолчанию: "Структурная облигация".
+PRESORTER_EXCLUDED_BOND_TYPE = "Структурная облигация"

@@ -2270,9 +2270,68 @@ def export_merge_snapshot(conn: sqlite3.Connection, table_name: str, snapshot_fi
     return len(rows)
 
 
+def _parse_bond_date(raw_value: str | None) -> datetime | None:
+    if raw_value is None:
+        return None
+    value = str(raw_value).strip()
+    if not value:
+        return None
+
+    date_part = value.split()[0].replace("/", ".")
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%Y.%m.%d"):
+        try:
+            return datetime.strptime(date_part, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, int]:
+    min_days = config.PRESORTER_MIN_DAYS_TO_EVENT
+    excluded_bond_type = config.PRESORTER_EXCLUDED_BOND_TYPE.strip().casefold()
+    today = datetime.now().date()
+
+    rows = conn.execute(
+        f'''
+        SELECT "ISIN", "MATDATE", "Ближайшая дата погашения/оферты (Дата)", "BOND_TYPE"
+        FROM "{table_name}"
+        '''
+    ).fetchall()
+
+    date_rule_isins: set[str] = set()
+    bond_type_rule_isins: set[str] = set()
+
+    for isin, matdate, nearest_date, bond_type in rows:
+        isin_value = str(isin or "").strip()
+        if not isin_value:
+            continue
+
+        mat_dt = _parse_bond_date(matdate)
+        nearest_dt = _parse_bond_date(nearest_date)
+        if any(dt is not None and (dt.date() - today).days < min_days for dt in (mat_dt, nearest_dt)):
+            date_rule_isins.add(isin_value)
+
+        if str(bond_type or "").strip().casefold() == excluded_bond_type:
+            bond_type_rule_isins.add(isin_value)
+
+    isins_to_delete = date_rule_isins | bond_type_rule_isins
+    if isins_to_delete:
+        placeholders = ", ".join(["?"] * len(isins_to_delete))
+        conn.execute("BEGIN")
+        conn.execute(f'DELETE FROM "{table_name}" WHERE "ISIN" IN ({placeholders})', tuple(isins_to_delete))
+        conn.commit()
+
+    return {
+        "excluded_by_days_rules": len(date_rule_isins),
+        "excluded_by_bond_type_rule": len(bond_type_rule_isins),
+        "excluded_total": len(isins_to_delete),
+    }
+
+
 def main() -> None:
     logger = setup_logging()
     stage_times: dict[str, float] = {}
+    presorter_summary: dict[str, dict[str, int]] = {}
     started = perf_counter()
 
     db_path = config.DB_DIR / config.DB_FILENAME
@@ -2466,6 +2525,28 @@ def main() -> None:
             )
         stage_times["Этап 7: Merge Green/Yellow (SQL + snapshot)"] = perf_counter() - s
 
+        print("Этап 8: Presorter для Merge-таблиц")
+        s = perf_counter()
+        with progress(total=2, desc="Presorter", unit="табл") as pbar:
+            with connect_db(db_path) as conn:
+                green_presort = presort_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
+                pbar.update(1)
+                yellow_presort = presort_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
+                pbar.update(1)
+            presorter_summary["MergeGreen"] = green_presort
+            presorter_summary["MergeYellow"] = yellow_presort
+            logger.info(
+                "Presorter: MergeGreen excluded(days_rules=%s, bond_type=%s, total=%s); "
+                "MergeYellow excluded(days_rules=%s, bond_type=%s, total=%s)",
+                green_presort["excluded_by_days_rules"],
+                green_presort["excluded_by_bond_type_rule"],
+                green_presort["excluded_total"],
+                yellow_presort["excluded_by_days_rules"],
+                yellow_presort["excluded_by_bond_type_rule"],
+                yellow_presort["excluded_total"],
+            )
+        stage_times["Этап 8: Presorter для Merge-таблиц"] = perf_counter() - s
+
         print("=====\nГотово")
     except Exception as exc:
         logger.exception("Ошибка выполнения: %s", exc)
@@ -2475,6 +2556,17 @@ def main() -> None:
         print("=====\nSummary")
         for stage_name, duration in stage_times.items():
             print(f"{stage_name}: {duration:.2f} сек")
+        if presorter_summary:
+            print("Этап Presorter")
+            for merge_name in ("MergeGreen", "MergeYellow"):
+                item = presorter_summary.get(merge_name, {})
+                print(merge_name)
+                print(
+                    f"Исключено бумаг по правилам меньше 365 дней: {item.get('excluded_by_days_rules', 0)}"
+                )
+                print(
+                    f"Исключено бумаг по правилу Bond_TYPE: {item.get('excluded_by_bond_type_rule', 0)}"
+                )
         print(f"Всего: {total:.2f} сек")
 
 

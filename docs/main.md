@@ -164,6 +164,8 @@ python main.py
 - `RAEX_TABLE_NAME` / `RAEX_LATEST_TABLE_NAME` — таблицы RAEX в БД рейтинговых агентств.
 - `RAITINGS_DB_FILENAME` — файл общей SQLite-базы рейтинговых агентств.
 - `ACRA_TABLE_NAME` — таблица АКРА в БД рейтинговых агентств.
+- `PRESORTER_MIN_DAYS_TO_EVENT` — порог для исключения облигаций на этапе Presorter по датам погашения/оферты.
+- `PRESORTER_EXCLUDED_BOND_TYPE` — значение `BOND_TYPE`, которое исключается из Merge-таблиц на этапе Presorter.
 
 ## Примечание для Windows
 Проект ориентирован на Windows-сценарий:
@@ -191,6 +193,13 @@ python main.py
   - фильтрация по `emitents.Scoring` (`Green`/`Yellow`) через связь `moex_bonds.INN -> emitents.INN`;
   - объединение с `Dohod_Bonds` по `ISIN` (LEFT JOIN).
 - Таблицы пересобираются каждый запуск этапа merge (очистка + новая вставка).
+- После пересборки выполняется этап **Presorter**: из `MergeGreenBonds` и `MergeYellowBonds` удаляются бумаги, если выполняется хотя бы одно условие:
+  - до `MATDATE` меньше `PRESORTER_MIN_DAYS_TO_EVENT` дней;
+  - до `Ближайшая дата погашения/оферты (Дата)` меньше `PRESORTER_MIN_DAYS_TO_EVENT` дней;
+  - `BOND_TYPE` равен `PRESORTER_EXCLUDED_BOND_TYPE` (по умолчанию `Структурная облигация`).
+- В консольном Summary добавляется блок `Этап Presorter` с отдельной статистикой по `MergeGreen` и `MergeYellow`:
+  - `Исключено бумаг по правилам меньше 365 дней` (объединенный счетчик по `MATDATE` и `Ближайшая дата погашения/оферты (Дата)`);
+  - `Исключено бумаг по правилу Bond_TYPE`.
 - Snapshot-файлы:
   - `BaseSnapshots/merge_green_bonds_snapshot.xlsx`;
   - `BaseSnapshots/merge_yellow_bonds_snapshot.xlsx`.
