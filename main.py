@@ -2370,10 +2370,27 @@ def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
         columns_sql.append(f'"{column}" TEXT')
     columns_sql.append(f'"{AMORTIZATION_START_COLUMN}" TEXT')
     conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({", ".join(columns_sql)})')
+    # Обратная совместимость: в старых БД колонка называлась
+    # "Цена, % от номинала". Новый пайплайн использует "Цена Доход".
+    existing_columns = {
+        str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+    }
+    if "Цена Доход" not in existing_columns and "Цена, % от номинала" in existing_columns:
+        conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "Цена Доход" TEXT')
+        conn.execute(
+            f'''
+            UPDATE "{table_name}"
+            SET "Цена Доход" = COALESCE(NULLIF(TRIM(COALESCE("Цена Доход", '')), ''), "Цена, % от номинала")
+            '''
+        )
     ensure_table_columns(
         conn,
         table_name,
-        list(CORPBONDS_COLUMNS_MAP.keys()) + list(SMARTLAB_COLUMNS_MAP.keys()) + [AMORTIZATION_START_COLUMN],
+        [column for column in MERGE_MOEX_COLUMNS if column != "ISIN"]
+        + MERGE_DOHOD_COLUMNS
+        + list(CORPBONDS_COLUMNS_MAP.keys())
+        + list(SMARTLAB_COLUMNS_MAP.keys())
+        + [AMORTIZATION_START_COLUMN],
     )
     conn.commit()
 
