@@ -188,6 +188,25 @@ python main.py
 - Snapshot: `BaseSnapshots/dohod_bonds_snapshot.xlsx` (5 случайных уникальных ISIN).
 
 
+## Логика обогащения Corpbonds (этап 9)
+- Источник: `https://corpbonds.ru/bond/<SECID>` (используется именно `SECID`).
+- Входные данные: уникальные `SECID` из таблиц `MergeGreenBonds` и `MergeYellowBonds`.
+- Что собирается по каждой бумаге:
+  - `Цена последняя`;
+  - `Тип купона`;
+  - `Формула купона` (если на странице указана как `Формула купона` или `Формула флоатера`);
+  - `Дата ближайшего купона`;
+  - `Дата ближайшей оферты`;
+  - `Наличие амортизации`;
+  - `Купон лесенкой`.
+- Куда сохраняется: `DB/bonds.sqlite3`, таблица `CorpbondsBonds`.
+- Режим обновления: инкрементальный upsert по `SECID` (первичный ключ).
+- TTL: `CORPBONDS_CACHE_TTL_HOURS` (по умолчанию 12 часов). Если запись по `SECID` свежее TTL, повторный HTTP-запрос не выполняется.
+- Производительность:
+  - многопоточная загрузка (`ThreadPoolExecutor`) с числом потоков `CORPBONDS_MAX_WORKERS`;
+  - HTTP-таймаут настраивается `CORPBONDS_REQUEST_TIMEOUT_SECONDS`.
+- Snapshot: `BaseSnapshots/corpbonds_snapshot.xlsx` (5 случайных уникальных `SECID`).
+
 ## Логика MergeGreenBonds / MergeYellowBonds
 - БД: `DB/bonds.sqlite3` (основная база).
 - Источники:

@@ -341,3 +341,31 @@ PRESORTER_EXCLUDED_BOND_TYPE = "Структурная облигация"
 # Значения: True/False.
 # По умолчанию: True (правило по дате из Доходъ включено как отдельный фильтр).
 PRESORTER_USE_DOHOD_NEAREST_DATE = True
+
+# Базовый URL карточки облигации на Corpbonds.
+# Для запроса используется SECID: <CORPBONDS_BOND_URL_PREFIX><SECID>
+# По умолчанию: https://corpbonds.ru/bond/
+CORPBONDS_BOND_URL_PREFIX = "https://corpbonds.ru/bond/"
+
+# Имя таблицы с обогащением Merge* из Corpbonds.
+# По умолчанию: CorpbondsBonds.
+CORPBONDS_TABLE_NAME = "CorpbondsBonds"
+
+# TTL для повторного запроса карточки Corpbonds по SECID.
+# Значение: целое число > 0 (в часах).
+# По умолчанию: 12 часов.
+CORPBONDS_CACHE_TTL_HOURS = 12
+
+# Количество потоков для параллельной загрузки Corpbonds.
+# Значение: целое число > 0.
+# По умолчанию: 16.
+CORPBONDS_MAX_WORKERS = 16
+
+# Таймаут HTTP-запроса к Corpbonds (секунды).
+# Значение: число (int/float).
+# По умолчанию: 30.
+CORPBONDS_REQUEST_TIMEOUT_SECONDS = 30
+
+# Имя Excel-файла снапшота по Corpbonds-обогащению (5 случайных SECID).
+# По умолчанию: corpbonds_snapshot.xlsx.
+CORPBONDS_SNAPSHOT_FILENAME = "corpbonds_snapshot.xlsx"

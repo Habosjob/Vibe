@@ -2383,6 +2383,231 @@ def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, 
     }
 
 
+def ensure_corpbonds_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.CORPBONDS_TABLE_NAME}" (
+            "SECID" TEXT PRIMARY KEY,
+            "Цена последняя" TEXT,
+            "Тип купона" TEXT,
+            "Формула купона" TEXT,
+            "Дата ближайшего купона" TEXT,
+            "Дата ближайшей оферты" TEXT,
+            "Наличие амортизации" TEXT,
+            "Купон лесенкой" TEXT,
+            "source_url" TEXT,
+            "updated_at_utc" TEXT NOT NULL
+        )
+        '''
+    )
+    conn.commit()
+
+
+def collect_merge_secids(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        f'''
+        SELECT DISTINCT TRIM(COALESCE("SECID", ''))
+        FROM "{config.MERGE_GREEN_TABLE_NAME}"
+        WHERE TRIM(COALESCE("SECID", '')) <> ''
+        UNION
+        SELECT DISTINCT TRIM(COALESCE("SECID", ''))
+        FROM "{config.MERGE_YELLOW_TABLE_NAME}"
+        WHERE TRIM(COALESCE("SECID", '')) <> ''
+        ORDER BY 1
+        '''
+    ).fetchall()
+    return [str(row[0]).strip() for row in rows if row and str(row[0]).strip()]
+
+
+def _normalize_label(raw_label: str) -> str:
+    cleaned = str(raw_label or "").replace("\xa0", " ").replace("?", " ")
+    return " ".join(cleaned.split()).casefold()
+
+
+def parse_corpbonds_page_fields(raw_html: str) -> dict[str, str]:
+    soup = BeautifulSoup(raw_html, "lxml")
+    parsed = {
+        "Цена последняя": "",
+        "Тип купона": "",
+        "Формула купона": "",
+        "Дата ближайшего купона": "",
+        "Дата ближайшей оферты": "",
+        "Наличие амортизации": "",
+        "Купон лесенкой": "",
+    }
+    for row in soup.select("tr"):
+        tds = row.find_all("td")
+        if len(tds) < 2:
+            continue
+        label = " ".join(tds[0].stripped_strings)
+        value = " ".join(tds[-1].stripped_strings)
+        if not label:
+            continue
+        normalized = _normalize_label(label)
+        if normalized.startswith("цена последняя"):
+            parsed["Цена последняя"] = value
+        elif normalized.startswith("тип купона"):
+            parsed["Тип купона"] = value
+        elif normalized.startswith("формула купона") or normalized.startswith("формула флоатера"):
+            parsed["Формула купона"] = value
+        elif normalized.startswith("дата ближайшего купона"):
+            parsed["Дата ближайшего купона"] = value
+        elif normalized.startswith("дата ближайшей оферты"):
+            parsed["Дата ближайшей оферты"] = value
+        elif normalized.startswith("наличие амортизации"):
+            parsed["Наличие амортизации"] = value
+        elif normalized.startswith("купон лесенкой"):
+            parsed["Купон лесенкой"] = value
+    return parsed
+
+
+def _is_corpbonds_stale(updated_at_raw: str | None, now_utc: datetime) -> bool:
+    if not updated_at_raw:
+        return True
+    try:
+        updated_at = datetime.fromisoformat(updated_at_raw)
+    except ValueError:
+        return True
+    return now_utc - updated_at >= timedelta(hours=config.CORPBONDS_CACHE_TTL_HOURS)
+
+
+def get_stale_corpbonds_secids(conn: sqlite3.Connection, secids: list[str], now_utc: datetime) -> list[str]:
+    if not secids:
+        return []
+
+    stale: list[str] = []
+    chunk_size = 500
+    for start in range(0, len(secids), chunk_size):
+        chunk = secids[start : start + chunk_size]
+        placeholders = ", ".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f'SELECT "SECID", "updated_at_utc" FROM "{config.CORPBONDS_TABLE_NAME}" WHERE "SECID" IN ({placeholders})',
+            tuple(chunk),
+        ).fetchall()
+        actual = {str(row[0]): str(row[1] or "") for row in rows}
+        for secid in chunk:
+            if _is_corpbonds_stale(actual.get(secid), now_utc):
+                stale.append(secid)
+
+    return stale
+
+
+def fetch_corpbonds_payload(secid: str) -> dict[str, str]:
+    url = f"{config.CORPBONDS_BOND_URL_PREFIX}{secid}"
+    response = requests.get(url, timeout=config.CORPBONDS_REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    data = parse_corpbonds_page_fields(response.text)
+    data["SECID"] = secid
+    data["source_url"] = url
+    return data
+
+
+def refresh_corpbonds_data_if_needed(
+    conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime
+) -> tuple[int, int, int]:
+    ensure_corpbonds_table(conn)
+    secids = collect_merge_secids(conn)
+    if not secids:
+        return 0, 0, 0
+
+    stale_secids = get_stale_corpbonds_secids(conn, secids, now_utc)
+    fetched_rows: list[dict[str, str]] = []
+    errors = 0
+
+    if stale_secids:
+        with ThreadPoolExecutor(max_workers=config.CORPBONDS_MAX_WORKERS) as executor:
+            futures = {executor.submit(fetch_corpbonds_payload, secid): secid for secid in stale_secids}
+            with progress(total=len(stale_secids), desc="Corpbonds fetch", unit="бумаг", position=1) as pbar:
+                for future in as_completed(futures):
+                    secid = futures[future]
+                    try:
+                        fetched_rows.append(future.result())
+                    except Exception as exc:
+                        errors += 1
+                        logger.warning("Corpbonds: ошибка SECID=%s: %s", secid, exc)
+                    pbar.update(1)
+
+    if fetched_rows:
+        now_iso = now_utc.isoformat()
+        payload = [
+            (
+                row.get("SECID", ""),
+                row.get("Цена последняя", ""),
+                row.get("Тип купона", ""),
+                row.get("Формула купона", ""),
+                row.get("Дата ближайшего купона", ""),
+                row.get("Дата ближайшей оферты", ""),
+                row.get("Наличие амортизации", ""),
+                row.get("Купон лесенкой", ""),
+                row.get("source_url", ""),
+                now_iso,
+            )
+            for row in fetched_rows
+            if row.get("SECID", "")
+        ]
+        conn.execute("BEGIN")
+        conn.executemany(
+            f'''
+            INSERT INTO "{config.CORPBONDS_TABLE_NAME}" (
+                "SECID", "Цена последняя", "Тип купона", "Формула купона",
+                "Дата ближайшего купона", "Дата ближайшей оферты", "Наличие амортизации",
+                "Купон лесенкой", "source_url", "updated_at_utc"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT("SECID") DO UPDATE SET
+                "Цена последняя"=excluded."Цена последняя",
+                "Тип купона"=excluded."Тип купона",
+                "Формула купона"=excluded."Формула купона",
+                "Дата ближайшего купона"=excluded."Дата ближайшего купона",
+                "Дата ближайшей оферты"=excluded."Дата ближайшей оферты",
+                "Наличие амортизации"=excluded."Наличие амортизации",
+                "Купон лесенкой"=excluded."Купон лесенкой",
+                "source_url"=excluded."source_url",
+                "updated_at_utc"=excluded."updated_at_utc"
+            ''',
+            payload,
+        )
+        conn.commit()
+
+    logger.info(
+        "Corpbonds: SECID в Merge=%s, запрошено=%s, сохранено=%s, ошибок=%s, TTL=%s ч",
+        len(secids),
+        len(stale_secids),
+        len(fetched_rows),
+        errors,
+        config.CORPBONDS_CACHE_TTL_HOURS,
+    )
+    return len(secids), len(stale_secids), len(fetched_rows)
+
+
+def export_corpbonds_snapshot(conn: sqlite3.Connection) -> int:
+    cursor = conn.execute(
+        f'''
+        SELECT *
+        FROM "{config.CORPBONDS_TABLE_NAME}"
+        WHERE rowid IN (
+            SELECT MIN(rowid)
+            FROM "{config.CORPBONDS_TABLE_NAME}"
+            GROUP BY "SECID"
+            ORDER BY RANDOM()
+            LIMIT 5
+        )
+        '''
+    )
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "corpbonds_snapshot"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / config.CORPBONDS_SNAPSHOT_FILENAME
+    wb.save(snapshot_path)
+    return len(rows)
+
+
 def main() -> None:
     logger = setup_logging()
     stage_times: dict[str, float] = {}
@@ -2609,6 +2834,25 @@ def main() -> None:
                 yellow_snapshot,
             )
         stage_times["Этап 8: Presorter для Merge-таблиц"] = perf_counter() - s
+
+        print("Этап 9: Обогащение Merge* из Corpbonds")
+        s = perf_counter()
+        with progress(total=2, desc="Corpbonds enrich", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                secids_total, secids_requested, secids_saved = refresh_corpbonds_data_if_needed(
+                    conn, logger, datetime.now(timezone.utc)
+                )
+                pbar.update(1)
+                corpbonds_snapshot = export_corpbonds_snapshot(conn)
+                pbar.update(1)
+            logger.info(
+                "Corpbonds: SECID в Merge=%s, к запросу по TTL=%s, успешно сохранено=%s, snapshot=%s",
+                secids_total,
+                secids_requested,
+                secids_saved,
+                corpbonds_snapshot,
+            )
+        stage_times["Этап 9: Обогащение Merge* из Corpbonds"] = perf_counter() - s
 
         print("=====\nГотово")
     except Exception as exc:
