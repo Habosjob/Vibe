@@ -2533,6 +2533,11 @@ def _is_false_like(raw_value: object) -> bool:
     return value in {"false", "нет", "0", "❌", "x", "х", "крестик"}
 
 
+def _is_true_like(raw_value: object) -> bool:
+    value = str(raw_value or "").strip().casefold()
+    return value in {"true", "да", "1", "✅", "галочка", "yes"}
+
+
 def _is_fixed_coupon_type(raw_value: object) -> bool:
     value = str(raw_value or "").strip().casefold()
     return value.startswith("фикс")
@@ -2541,16 +2546,13 @@ def _is_fixed_coupon_type(raw_value: object) -> bool:
 def _pick_price_for_ytm(*prices: object) -> float | None:
     for raw_price in prices:
         parsed = _parse_decimal_value(raw_price)
-        if parsed is not None:
+        if parsed is not None and parsed > 0:
             return parsed
     return None
 
 
-def _normalize_price_share_from_nominal(price_value: float) -> float:
-    normalized_price = price_value * float(config.YTM_PRICE_FACEVALUE_MULTIPLIER)
-    if normalized_price > 2:
-        normalized_price /= 100.0
-    return normalized_price
+def _normalize_purchase_price(price_percent: float, facevalue: float, nkd: float) -> float:
+    return (facevalue * (price_percent / 100.0)) + nkd
 
 
 def _resolve_coupon_frequency_per_year(raw_coupon_period: object) -> float | None:
@@ -2563,6 +2565,47 @@ def _resolve_coupon_frequency_per_year(raw_coupon_period: object) -> float | Non
     if parsed_value > 12:
         return 365.25 / parsed_value
     return parsed_value
+
+
+def _load_amortization_schedule(
+    conn: sqlite3.Connection,
+    secids: set[str],
+    facevalues: dict[str, float],
+) -> dict[str, list[tuple[datetime, float]]]:
+    schedule: dict[str, list[tuple[datetime, float]]] = {secid: [] for secid in secids}
+    if not secids:
+        return schedule
+
+    placeholders = ", ".join(["?"] * len(secids))
+    rows = conn.execute(
+        f'''
+        SELECT "secid", "amortdate", "value", "valueprc"
+        FROM "{config.MOEX_AMORTIZATION_TABLE_NAME}"
+        WHERE TRIM(COALESCE("secid", '')) IN ({placeholders})
+        ORDER BY "secid", "amortdate"
+        ''',
+        tuple(secids),
+    ).fetchall()
+
+    for secid_raw, amortdate_raw, value_raw, valueprc_raw in rows:
+        secid = str(secid_raw or "").strip()
+        amortdate = _parse_bond_date(str(amortdate_raw or ""))
+        if not secid or amortdate is None:
+            continue
+
+        payment = _parse_decimal_value(value_raw)
+        if payment is None or payment <= 0:
+            valueprc = _parse_decimal_value(valueprc_raw)
+            facevalue = facevalues.get(secid)
+            if valueprc is not None and valueprc > 0 and facevalue is not None and facevalue > 0:
+                payment = facevalue * (valueprc / 100.0)
+
+        if payment is None or payment <= 0:
+            continue
+
+        schedule.setdefault(secid, []).append((amortdate, float(payment)))
+
+    return schedule
 
 
 def _build_cashflow_times_years(
@@ -2649,7 +2692,6 @@ def _calculate_fixed_coupon_ytm(
     *,
     subord_flag: object,
     amort_flag: object,
-    ladder_flag: object,
     coupon_type: object,
     coupon_percent: object,
     coupon_frequency: object,
@@ -2663,9 +2705,8 @@ def _calculate_fixed_coupon_ytm(
     dohod_price: object,
     smartlab_price: object,
     moex_price: object,
+    amortization_schedule: list[tuple[datetime, float]] | None,
 ) -> str:
-    if not (_is_false_like(subord_flag) and _is_false_like(amort_flag) and _is_false_like(ladder_flag)):
-        return ""
     if not _is_fixed_coupon_type(coupon_type):
         return ""
 
@@ -2693,11 +2734,82 @@ def _calculate_fixed_coupon_ytm(
     if days_to_redemption <= 0:
         return ""
 
-    price_share_from_nominal = _normalize_price_share_from_nominal(price)
-    dirty_price = price_share_from_nominal * facevalue_value + nkd_value
+    dirty_price = _normalize_purchase_price(price, facevalue_value, nkd_value)
 
     coupon_rate = coupon_rate_percent / 100.0
     annual_coupon = facevalue_value * coupon_rate
+
+    is_subord = _is_true_like(subord_flag)
+    is_amort = _is_true_like(amort_flag)
+    if is_subord:
+        current_coupon_yield = annual_coupon / dirty_price
+        effective_yield = (1.0 + current_coupon_yield / coupon_freq) ** coupon_freq - 1.0
+        precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 4)))
+        return f"{effective_yield * 100:.{precision}f}"
+
+    if is_amort:
+        today = datetime.now().date()
+        schedule = amortization_schedule or []
+        relevant_amort = [
+            (dt, amount)
+            for dt, amount in schedule
+            if today < dt.date() <= target_date.date() and amount > 0
+        ]
+
+        if not relevant_amort:
+            return ""
+
+        remaining_principal = facevalue_value
+        cashflows: list[tuple[float, float]] = []
+        for amort_dt, principal_payment in relevant_amort:
+            if remaining_principal <= 0:
+                break
+            pay_principal = min(remaining_principal, principal_payment)
+            days_fraction = max(0.0, (amort_dt.date() - today).days / 365.25)
+            coupon_payment = remaining_principal * coupon_rate * days_fraction
+            cashflows.append((days_fraction, coupon_payment + pay_principal))
+            remaining_principal -= pay_principal
+
+        if remaining_principal > 1e-6 and cashflows:
+            last_dt = max(dt for dt, _ in relevant_amort)
+            tail_years = max(0.0, (target_date.date() - last_dt.date()).days / 365.25)
+            coupon_tail = remaining_principal * coupon_rate * tail_years
+            time_to_target = max(0.0, (target_date.date() - today).days / 365.25)
+            cashflows.append((time_to_target, coupon_tail + remaining_principal))
+
+        if not cashflows:
+            return ""
+
+        def npv(rate: float) -> float:
+            total = 0.0
+            for years, flow in cashflows:
+                total += flow / ((1.0 + rate) ** years)
+            return total - dirty_price
+
+        left = -0.95
+        right = 5.0
+        left_val = npv(left)
+        right_val = npv(right)
+        if left_val * right_val > 0:
+            return ""
+
+        for _ in range(120):
+            mid = (left + right) / 2
+            mid_val = npv(mid)
+            if abs(mid_val) < 1e-8:
+                ytm_decimal = mid
+                break
+            if left_val * mid_val <= 0:
+                right = mid
+            else:
+                left = mid
+                left_val = mid_val
+        else:
+            ytm_decimal = (left + right) / 2
+
+        precision = max(0, int(getattr(config, "YTM_OUTPUT_PRECISION", 4)))
+        return f"{ytm_decimal * 100:.{precision}f}"
+
     period_coupon = annual_coupon / coupon_freq
 
     cashflow_times_years = _build_cashflow_times_years(
@@ -3644,7 +3756,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
         rows = conn.execute(
             f'''
             SELECT
-                "ISIN", "Название", "IS_QUALIFIED_INVESTORS", "Smartlab_Только для квалов?",
+                "SECID", "ISIN", "Название", "IS_QUALIFIED_INVESTORS", "Smartlab_Только для квалов?",
                 "Субординированная (да/нет)", "Corpbonds_Наличие амортизации", "Corpbonds_Купон лесенкой",
                 "{AMORTIZATION_START_COLUMN}", "MATDATE", "Corpbonds_Дата ближайшей оферты", "Smartlab_Дата оферты",
                 "Corpbonds_Дата ближайшего купона", "Corpbonds_Тип купона", "Smartlab_Длительность купона, дней",
@@ -3658,48 +3770,60 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
         ).fetchall()
         totals[source_list] = len(rows)
 
+        facevalues_by_secid: dict[str, float] = {}
+        secids_with_amort: set[str] = set()
+        for row in rows:
+            secid = str(row[0] or "").strip()
+            facevalue_value = _parse_decimal_value(row[21])
+            if secid and facevalue_value is not None:
+                facevalues_by_secid[secid] = facevalue_value
+            if secid and not _is_false_like(row[6]):
+                secids_with_amort.add(secid)
+
+        amortization_map = _load_amortization_schedule(conn, secids_with_amort, facevalues_by_secid)
+
         records: list[tuple[str, ...]] = []
         for row in rows:
-            offer_date = _pick_offer_date(row[9], row[10])
+            offer_date = _pick_offer_date(row[10], row[11])
+            secid = str(row[0] or "").strip()
             ytm_value = _calculate_fixed_coupon_ytm(
-                subord_flag=row[4],
-                amort_flag=row[5],
-                ladder_flag=row[6],
-                coupon_type=row[12],
-                coupon_percent=row[15],
-                coupon_frequency=row[16],
-                coupon_period_days=row[13],
-                next_coupon_date=row[11],
-                nkd=row[14],
-                facevalue=row[20],
-                matdate=row[8],
+                subord_flag=row[5],
+                amort_flag=row[6],
+                coupon_type=row[13],
+                coupon_percent=row[16],
+                coupon_frequency=row[17],
+                coupon_period_days=row[14],
+                next_coupon_date=row[12],
+                nkd=row[15],
+                facevalue=row[21],
+                matdate=row[9],
                 offerdate=offer_date,
-                corpbonds_price=row[22],
-                dohod_price=row[23],
-                smartlab_price=row[24],
-                moex_price=row[25],
+                corpbonds_price=row[24],
+                dohod_price=row[25],
+                smartlab_price=row[26],
+                moex_price=row[27],
+                amortization_schedule=amortization_map.get(secid),
             )
             if ytm_value:
                 ytm_fixed_count += 1
 
             records.append(
                 (
-                    str(row[0] or "").strip(),
                     str(row[1] or "").strip(),
-                    str(_merge_qualified(row[2], row[3])),
-                    str(row[4] or "").strip(),
+                    str(row[2] or "").strip(),
+                    str(_merge_qualified(row[3], row[4])),
                     str(row[5] or "").strip(),
                     str(row[6] or "").strip(),
-                    _normalize_date_to_iso(row[7]),
+                    str(row[7] or "").strip(),
                     _normalize_date_to_iso(row[8]),
+                    _normalize_date_to_iso(row[9]),
                     offer_date,
-                    _normalize_date_to_iso(row[11]),
-                    str(row[12] or "").strip(),
+                    _normalize_date_to_iso(row[12]),
                     str(row[13] or "").strip(),
                     str(row[14] or "").strip(),
                     str(row[15] or "").strip(),
+                    str(row[16] or "").strip(),
                     ytm_value,
-                    str(row[17] or "").strip(),
                     str(row[18] or "").strip(),
                     str(row[19] or "").strip(),
                     str(row[20] or "").strip(),
@@ -3709,6 +3833,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                     str(row[24] or "").strip(),
                     str(row[25] or "").strip(),
                     str(row[26] or "").strip(),
+                    str(row[27] or "").strip(),
                     str(score),
                     source_list,
                 )
