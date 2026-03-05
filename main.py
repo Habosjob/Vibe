@@ -2247,6 +2247,8 @@ def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
 def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, scoring: str) -> int:
     ensure_merge_table(conn, table_name)
 
+    dohod_join_type = "INNER" if getattr(config, "MERGE_REQUIRE_DOHOD_ISIN_MATCH", True) else "LEFT"
+
     insert_columns = [f'"{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"]
     insert_columns = ['"ISIN"'] + insert_columns + [f'"{column}"' for column in MERGE_DOHOD_COLUMNS]
 
@@ -2263,9 +2265,9 @@ def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, sc
         FROM "{config.RATES_TABLE_NAME}" m
         INNER JOIN "{config.EMITENTS_TABLE_NAME}" e
             ON TRIM(COALESCE(m."INN", '')) = TRIM(COALESCE(e."INN", ''))
-        LEFT JOIN "{config.DOHOD_TABLE_NAME}" d
+        {dohod_join_type} JOIN "{config.DOHOD_TABLE_NAME}" d
             ON TRIM(COALESCE(m."ISIN", '')) = TRIM(COALESCE(d."ISIN", ''))
-        WHERE TRIM(COALESCE(e."Scoring", '')) = ?
+        WHERE LOWER(TRIM(COALESCE(e."Scoring", ''))) = LOWER(TRIM(?))
           AND TRIM(COALESCE(m."ISIN", '')) <> ''
         ''',
         (scoring,),
