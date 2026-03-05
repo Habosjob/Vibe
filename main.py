@@ -2247,11 +2247,14 @@ def ensure_merge_table(conn: sqlite3.Connection, table_name: str) -> None:
 def rebuild_merge_table_by_scoring(conn: sqlite3.Connection, table_name: str, scoring: str) -> int:
     ensure_merge_table(conn, table_name)
 
-    moex_select = [f'm."{column}"' for column in MERGE_MOEX_COLUMNS]
-    dohod_select = [f'd."{column}"' for column in MERGE_DOHOD_COLUMNS]
-    selected_columns = moex_select + dohod_select
     insert_columns = [f'"{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"]
     insert_columns = ['"ISIN"'] + insert_columns + [f'"{column}"' for column in MERGE_DOHOD_COLUMNS]
+
+    selected_columns = [f'm."ISIN"']
+    selected_columns.extend(
+        f'm."{column}"' for column in MERGE_MOEX_COLUMNS if column != "ISIN"
+    )
+    selected_columns.extend(f'd."{column}"' for column in MERGE_DOHOD_COLUMNS)
     placeholders = ", ".join(["?"] * len(insert_columns))
 
     rows = conn.execute(
@@ -2331,16 +2334,16 @@ def _normalize_bond_type(raw_value: str | None) -> str:
 def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, int]:
     min_days = config.PRESORTER_MIN_DAYS_TO_EVENT
     excluded_bond_type = _normalize_bond_type(config.PRESORTER_EXCLUDED_BOND_TYPE)
+    use_dohod_nearest_date = bool(getattr(config, "PRESORTER_USE_DOHOD_NEAREST_DATE", True))
     today = datetime.now().date()
 
+    rows_before = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
     rows = conn.execute(
-        f'''
-        SELECT "ISIN", "MATDATE", "Ближайшая дата погашения/оферты (Дата)", "BOND_TYPE"
-        FROM "{table_name}"
-        '''
+        f'SELECT "ISIN", "MATDATE", "Ближайшая дата погашения/оферты (Дата)", "BOND_TYPE" FROM "{table_name}"'
     ).fetchall()
 
-    date_rule_isins: set[str] = set()
+    matdate_rule_isins: set[str] = set()
+    dohod_nearest_rule_isins: set[str] = set()
     bond_type_rule_isins: set[str] = set()
 
     for isin, matdate, nearest_date, bond_type in rows:
@@ -2349,22 +2352,30 @@ def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, 
             continue
 
         mat_dt = _parse_bond_date(matdate)
-        nearest_dt = _parse_bond_date(nearest_date)
-        if any(dt is not None and (dt.date() - today).days < min_days for dt in (mat_dt, nearest_dt)):
-            date_rule_isins.add(isin_value)
+        if mat_dt is not None and (mat_dt.date() - today).days < min_days:
+            matdate_rule_isins.add(isin_value)
+
+        if use_dohod_nearest_date:
+            nearest_dt = _parse_bond_date(nearest_date)
+            if nearest_dt is not None and (nearest_dt.date() - today).days < min_days:
+                dohod_nearest_rule_isins.add(isin_value)
 
         if excluded_bond_type and _normalize_bond_type(bond_type) == excluded_bond_type:
             bond_type_rule_isins.add(isin_value)
 
-    isins_to_delete = date_rule_isins | bond_type_rule_isins
+    isins_to_delete = matdate_rule_isins | dohod_nearest_rule_isins | bond_type_rule_isins
     if isins_to_delete:
         placeholders = ", ".join(["?"] * len(isins_to_delete))
         conn.execute("BEGIN")
         conn.execute(f'DELETE FROM "{table_name}" WHERE "ISIN" IN ({placeholders})', tuple(isins_to_delete))
         conn.commit()
 
+    rows_after = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
     return {
-        "excluded_by_days_rules": len(date_rule_isins),
+        "rows_before": rows_before,
+        "rows_after": rows_after,
+        "excluded_by_matdate_rule": len(matdate_rule_isins),
+        "excluded_by_dohod_nearest_rule": len(dohod_nearest_rule_isins),
         "excluded_by_bond_type_rule": len(bond_type_rule_isins),
         "excluded_total": len(isins_to_delete),
     }
@@ -2576,15 +2587,22 @@ def main() -> None:
             presorter_summary["MergeGreen"] = green_presort
             presorter_summary["MergeYellow"] = yellow_presort
             logger.info(
-                "Presorter: MergeGreen excluded(days_rules=%s, bond_type=%s, total=%s); "
-                "MergeYellow excluded(days_rules=%s, bond_type=%s, total=%s); "
-                "post-presort snapshots: green=%s, yellow=%s",
-                green_presort["excluded_by_days_rules"],
+                "Presorter: MergeGreen rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, total=%s); "
+                "MergeYellow rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, total=%s); "
+                "dohod_nearest_rule_enabled=%s; post-presort snapshots: green=%s, yellow=%s",
+                green_presort["rows_before"],
+                green_presort["rows_after"],
+                green_presort["excluded_by_matdate_rule"],
+                green_presort["excluded_by_dohod_nearest_rule"],
                 green_presort["excluded_by_bond_type_rule"],
                 green_presort["excluded_total"],
-                yellow_presort["excluded_by_days_rules"],
+                yellow_presort["rows_before"],
+                yellow_presort["rows_after"],
+                yellow_presort["excluded_by_matdate_rule"],
+                yellow_presort["excluded_by_dohod_nearest_rule"],
                 yellow_presort["excluded_by_bond_type_rule"],
                 yellow_presort["excluded_total"],
+                config.PRESORTER_USE_DOHOD_NEAREST_DATE,
                 green_snapshot,
                 yellow_snapshot,
             )
@@ -2604,8 +2622,12 @@ def main() -> None:
             for merge_name in ("MergeGreen", "MergeYellow"):
                 item = presorter_summary.get(merge_name, {})
                 print(merge_name)
+                print(f"Строк до/после Presorter: {item.get('rows_before', 0)} -> {item.get('rows_after', 0)}")
                 print(
-                    f"Исключено бумаг по правилам меньше 365 дней: {item.get('excluded_by_days_rules', 0)}"
+                    f"Исключено бумаг по правилу MATDATE < {config.PRESORTER_MIN_DAYS_TO_EVENT} дней: {item.get('excluded_by_matdate_rule', 0)}"
+                )
+                print(
+                    f"Исключено бумаг по правилу Доходъ (ближайшая дата) < {config.PRESORTER_MIN_DAYS_TO_EVENT} дней: {item.get('excluded_by_dohod_nearest_rule', 0)}"
                 )
                 print(
                     f"Исключено бумаг по правилу Bond_TYPE: {item.get('excluded_by_bond_type_rule', 0)}"
