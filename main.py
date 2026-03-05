@@ -2683,19 +2683,28 @@ def _build_cashflow_times_years(
     if target <= today:
         return []
 
-    coupon_dates = _build_coupon_dates(
-        target_date=target_date,
-        coupon_frequency=coupon_frequency,
-        coupon_period_days=coupon_period_days,
-        next_coupon_date=next_coupon_date,
-    )
+    period_days = _resolve_coupon_period_days(coupon_period_days, coupon_frequency)
+    first_coupon_dt = _parse_bond_date(str(next_coupon_date or ""))
+    first_coupon = first_coupon_dt.date() if first_coupon_dt is not None else None
+
+    coupon_dates: list[datetime.date] = []
+    if first_coupon is not None and first_coupon > today:
+        current = first_coupon
+    else:
+        current = today + timedelta(days=period_days)
+
+    safety_limit = 2000
+    while current <= (target + timedelta(days=1)) and len(coupon_dates) < safety_limit:
+        coupon_dates.append(current)
+        current = current + timedelta(days=period_days)
+
     target_has_coupon = any(_dates_match_with_tolerance(coupon_date, target) for coupon_date in coupon_dates)
 
     cashflows: list[tuple[float, float]] = []
     for coupon_date in coupon_dates:
-        if _dates_match_with_tolerance(coupon_date, target):
-            continue
         if coupon_date > target:
+            continue
+        if _dates_match_with_tolerance(coupon_date, target):
             continue
         years = (coupon_date - today).days / 365.25
         if years > 0:
