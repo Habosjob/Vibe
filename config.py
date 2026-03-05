@@ -131,6 +131,29 @@ ACRA_SNAPSHOT_FILENAME = "acra_snapshot.xlsx"
 # Имя Excel-файла снапшота по рейтингам НКР (5 самых свежих строк по дате).
 NKR_SNAPSHOT_FILENAME = "nkr_snapshot.xlsx"
 
+# URL страницы поиска RAEX (Эксперт РА).
+RAEX_SEARCH_URL = "https://raexpert.ru/search/"
+
+# Имя таблицы RAEX с инкрементальной историей рейтингов.
+# Ключ уникальности: (inn, rating_date, rating, forecast).
+RAEX_TABLE_NAME = "raex_ratings"
+
+# Имя таблицы последних актуальных рейтингов RAEX по ИНН.
+RAEX_LATEST_TABLE_NAME = "raex_latest_by_inn"
+
+# Имя Excel-файла снапшота по рейтингам RAEX (5 самых свежих строк по дате).
+RAEX_SNAPSHOT_FILENAME = "raex_snapshot.xlsx"
+
+# TTL для повторного обновления RAEX.
+# Значение: целое число > 0 (в часах).
+# По умолчанию: 12 часов.
+RAEX_CACHE_TTL_HOURS = 12
+
+# Количество потоков для параллельного парсинга RAEX.
+# Значение: целое число > 0.
+# По умолчанию: 8.
+RAEX_MAX_WORKERS = 8
+
 # TTL для повторной загрузки Excel НРА.
 # Значение: целое число > 0 (в часах).
 # По умолчанию: 12 часов.

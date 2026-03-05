@@ -10,6 +10,7 @@ import random
 import re
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -224,7 +225,8 @@ def ensure_emitents_table(conn: sqlite3.Connection) -> None:
             "DateScoring" TEXT,
             "NRA_Rate" TEXT,
             "Acra_Rate" TEXT,
-            "NKR_Rate" TEXT
+            "NKR_Rate" TEXT,
+            "RAEX_Rate" TEXT
         )
         '''
     )
@@ -237,6 +239,9 @@ def ensure_emitents_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         f'ALTER TABLE "{config.EMITENTS_TABLE_NAME}" ADD COLUMN "NKR_Rate" TEXT'
     ) if _column_absent(conn, config.EMITENTS_TABLE_NAME, "NKR_Rate") else None
+    conn.execute(
+        f'ALTER TABLE "{config.EMITENTS_TABLE_NAME}" ADD COLUMN "RAEX_Rate" TEXT'
+    ) if _column_absent(conn, config.EMITENTS_TABLE_NAME, "RAEX_Rate") else None
     conn.commit()
 
 
@@ -308,6 +313,37 @@ def ensure_nkr_tables(conn: sqlite3.Connection) -> None:
             "rating_date" TEXT,
             "rating" TEXT,
             "outlook" TEXT
+        )
+        '''
+    )
+    conn.commit()
+
+
+def ensure_raex_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.RAEX_TABLE_NAME}" (
+            "inn" TEXT,
+            "company_name" TEXT,
+            "rating" TEXT,
+            "forecast" TEXT,
+            "rating_date" TEXT,
+            "company_url" TEXT,
+            "loaded_at_utc" TEXT,
+            UNIQUE("inn", "rating_date", "rating", "forecast")
+        )
+        '''
+    )
+    conn.execute(
+        f'''
+        CREATE TABLE IF NOT EXISTS "{config.RAEX_LATEST_TABLE_NAME}" (
+            "inn" TEXT PRIMARY KEY,
+            "company_name" TEXT,
+            "rating" TEXT,
+            "forecast" TEXT,
+            "rating_date" TEXT,
+            "company_url" TEXT,
+            "loaded_at_utc" TEXT
         )
         '''
     )
@@ -620,6 +656,223 @@ def should_refresh_nra(conn: sqlite3.Connection, now_utc: datetime) -> bool:
     if rows_count <= 0:
         return True
     return now_utc - last_refresh >= timedelta(hours=config.NRA_CACHE_TTL_HOURS)
+
+
+def should_refresh_raex(conn: sqlite3.Connection, now_utc: datetime) -> bool:
+    last_refresh_raw = get_meta_value(conn, "raex_last_refresh_utc")
+    rows_count_raw = get_meta_value(conn, "raex_last_rows_count")
+    if not last_refresh_raw or not rows_count_raw:
+        return True
+    try:
+        last_refresh = datetime.fromisoformat(last_refresh_raw)
+        rows_count = int(rows_count_raw)
+    except ValueError:
+        return True
+    if rows_count <= 0:
+        return True
+    return now_utc - last_refresh >= timedelta(hours=config.RAEX_CACHE_TTL_HOURS)
+
+
+def get_emitents_inns_for_raex(main_db_path: Path) -> list[str]:
+    with connect_db(main_db_path) as main_conn:
+        rows = main_conn.execute(
+            f'''SELECT DISTINCT TRIM("INN") FROM "{config.EMITENTS_TABLE_NAME}" WHERE TRIM(COALESCE("INN", '')) <> '' '''
+        ).fetchall()
+    return [row[0] for row in rows if row and row[0]]
+
+
+def _extract_raex_csrf_token(html_text: str) -> str:
+    soup = BeautifulSoup(html_text, "lxml")
+    token_input = soup.select_one('input[name="CSRFToken"]')
+    return (token_input.get("value") or "").strip() if token_input else ""
+
+
+def _extract_raex_company_url(html_text: str) -> str:
+    match = re.search(r"href=[\"'](?P<url>/database/companies/[^\"']+/)[\"']", html_text, flags=re.IGNORECASE)
+    return match.group("url").strip() if match else ""
+
+
+def _looks_like_raex_revoked(value: str) -> bool:
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        return True
+    return "отозван" in normalized or normalized in {"-", "—", "n/a"}
+
+
+def parse_raex_company_page(html_text: str) -> dict[str, str] | None:
+    soup = BeautifulSoup(html_text, "lxml")
+    heading = soup.find(lambda tag: tag.get_text(" ", strip=True) == "Рейтинги компании")
+    if heading is None:
+        return None
+
+    required_headers = {"национальная шкала", "прогноз", "дата"}
+    for node in heading.find_all_next():
+        node_text = node.get_text(" ", strip=True)
+        if node is not heading and "Архив рейтингов" in node_text:
+            break
+        if getattr(node, "name", "") != "table":
+            continue
+
+        headers = [th.get_text(" ", strip=True).lower() for th in node.select("thead th")]
+        if not headers:
+            first_row = node.select_one("tr")
+            headers = [cell.get_text(" ", strip=True).lower() for cell in first_row.select("th, td")] if first_row else []
+        if not required_headers.issubset(set(headers)):
+            continue
+
+        indexes = {name: headers.index(name) for name in required_headers}
+        for tr in node.select("tbody tr") or node.select("tr")[1:]:
+            cells = [td.get_text(" ", strip=True) for td in tr.select("td")]
+            if not cells:
+                continue
+            rating_raw = cells[indexes["национальная шкала"]] if indexes["национальная шкала"] < len(cells) else ""
+            forecast_raw = cells[indexes["прогноз"]] if indexes["прогноз"] < len(cells) else ""
+            date_raw = cells[indexes["дата"]] if indexes["дата"] < len(cells) else ""
+            if _looks_like_raex_revoked(rating_raw):
+                return None
+            rating = re.sub(r"^ru", "", rating_raw.strip(), flags=re.IGNORECASE)
+            if _looks_like_raex_revoked(rating):
+                return None
+            return {
+                "rating": rating,
+                "forecast": forecast_raw.strip(),
+                "rating_date": date_raw.strip(),
+            }
+    return None
+
+
+def fetch_raex_rating_by_inn(inn: str, timeout_seconds: int | float) -> dict[str, str] | None:
+    session = requests.Session()
+    session.headers.update({"User-Agent": config.NRA_REQUEST_USER_AGENT})
+
+    search_page = session.get(config.RAEX_SEARCH_URL, timeout=timeout_seconds)
+    search_page.raise_for_status()
+    csrf_token = _extract_raex_csrf_token(search_page.text)
+
+    payload = {"search": inn}
+    if csrf_token:
+        payload["CSRFToken"] = csrf_token
+
+    search_response = session.post(config.RAEX_SEARCH_URL, data=payload, timeout=timeout_seconds)
+    search_response.raise_for_status()
+    company_relative_url = _extract_raex_company_url(search_response.text)
+    if not company_relative_url:
+        return None
+
+    company_url = urljoin(config.RAEX_SEARCH_URL, company_relative_url)
+    company_response = session.get(company_url, timeout=timeout_seconds)
+    company_response.raise_for_status()
+    parsed = parse_raex_company_page(company_response.text)
+    if not parsed:
+        return None
+
+    return {
+        "inn": inn,
+        "company_name": "",
+        "rating": parsed["rating"],
+        "forecast": parsed["forecast"],
+        "rating_date": parsed["rating_date"],
+        "company_url": company_url,
+    }
+
+
+def refresh_raex_data_if_needed(
+    ratings_conn: sqlite3.Connection,
+    main_db_path: Path,
+    logger: logging.Logger,
+    now_utc: datetime,
+) -> tuple[bool, int, int, int]:
+    ensure_raex_tables(ratings_conn)
+    if not should_refresh_raex(ratings_conn, now_utc):
+        logger.info("RAEX: кэш актуален, загрузка из сети пропущена.")
+        row = ratings_conn.execute(f'SELECT COUNT(*) FROM "{config.RAEX_LATEST_TABLE_NAME}"').fetchone()
+        return False, int(row[0]) if row else 0, 0, 0
+
+    inns = get_emitents_inns_for_raex(main_db_path)
+    if not inns:
+        set_meta_value(ratings_conn, "raex_last_refresh_utc", now_utc.isoformat())
+        set_meta_value(ratings_conn, "raex_last_rows_count", "0")
+        logger.info("RAEX: в emitents нет ИНН для обработки.")
+        return True, 0, 0, 0
+
+    loaded_at = now_utc.isoformat()
+    parsed_rows: list[dict[str, str]] = []
+    errors_count = 0
+    with ThreadPoolExecutor(max_workers=max(1, int(config.RAEX_MAX_WORKERS))) as executor:
+        futures = {
+            executor.submit(fetch_raex_rating_by_inn, inn, config.REQUEST_TIMEOUT_SECONDS): inn
+            for inn in inns
+        }
+        for future in as_completed(futures):
+            inn = futures[future]
+            try:
+                parsed = future.result()
+                if parsed:
+                    parsed_rows.append(parsed)
+            except Exception as exc:
+                errors_count += 1
+                logger.warning("RAEX: ошибка для INN=%s: %s", inn, exc)
+
+    payload = [
+        (
+            row["inn"],
+            row.get("company_name", ""),
+            row["rating"],
+            row.get("forecast", ""),
+            row.get("rating_date", ""),
+            row.get("company_url", ""),
+            loaded_at,
+        )
+        for row in parsed_rows
+        if row.get("inn", "").strip() and row.get("rating", "").strip()
+    ]
+
+    if payload:
+        ratings_conn.executemany(
+            f'''
+            INSERT INTO "{config.RAEX_TABLE_NAME}" (
+                "inn", "company_name", "rating", "forecast", "rating_date", "company_url", "loaded_at_utc"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT("inn", "rating_date", "rating", "forecast") DO UPDATE SET
+                "company_name"=excluded."company_name",
+                "company_url"=excluded."company_url",
+                "loaded_at_utc"=excluded."loaded_at_utc"
+            ''',
+            payload,
+        )
+
+    ratings_conn.execute(f'DELETE FROM "{config.RAEX_LATEST_TABLE_NAME}"')
+    ratings_conn.execute(
+        f'''
+        INSERT INTO "{config.RAEX_LATEST_TABLE_NAME}" (
+            "inn", "company_name", "rating", "forecast", "rating_date", "company_url", "loaded_at_utc"
+        )
+        SELECT src."inn", src."company_name", src."rating", src."forecast", src."rating_date", src."company_url", src."loaded_at_utc"
+        FROM "{config.RAEX_TABLE_NAME}" src
+        JOIN (
+            SELECT "inn", MAX(
+                (CASE
+                    WHEN instr("rating_date", '.') > 0 THEN substr("rating_date", 7, 4) || '-' || substr("rating_date", 4, 2) || '-' || substr("rating_date", 1, 2)
+                    ELSE "rating_date"
+                END) || '|' || COALESCE("loaded_at_utc", '')
+            ) AS max_key
+            FROM "{config.RAEX_TABLE_NAME}"
+            WHERE TRIM(COALESCE("inn", '')) <> ''
+            GROUP BY "inn"
+        ) latest ON latest."inn" = src."inn"
+        WHERE
+            (CASE
+                WHEN instr(src."rating_date", '.') > 0 THEN substr(src."rating_date", 7, 4) || '-' || substr(src."rating_date", 4, 2) || '-' || substr(src."rating_date", 1, 2)
+                ELSE src."rating_date"
+            END) || '|' || COALESCE(src."loaded_at_utc", '') = latest.max_key
+        '''
+    )
+    ratings_conn.commit()
+
+    set_meta_value(ratings_conn, "raex_last_refresh_utc", loaded_at)
+    set_meta_value(ratings_conn, "raex_last_rows_count", str(len(payload)))
+    logger.info("RAEX обновление завершено. INN=%s, актуальных=%s, ошибок=%s", len(inns), len(payload), errors_count)
+    return True, len(payload), len(inns), errors_count
 
 
 def ensure_acra_tables(conn: sqlite3.Connection) -> None:
@@ -1391,6 +1644,32 @@ def sync_nkr_rate_to_emitents(main_conn: sqlite3.Connection, ratings_conn: sqlit
     return len(updates)
 
 
+def sync_raex_rate_to_emitents(main_conn: sqlite3.Connection, ratings_conn: sqlite3.Connection, logger: logging.Logger) -> int:
+    rows = ratings_conn.execute(
+        f''' 
+        SELECT "inn", "rating", "forecast"
+        FROM "{config.RAEX_LATEST_TABLE_NAME}"
+        WHERE TRIM(COALESCE("inn", '')) <> ''
+        '''
+    ).fetchall()
+
+    updates: list[tuple[str, str]] = []
+    for inn, rating, forecast in rows:
+        rating_text = (rating or "").strip()
+        forecast_text = (forecast or "").strip().lower()
+        if not rating_text:
+            continue
+        updates.append((f"{rating_text}({forecast_text})" if forecast_text else rating_text, inn.strip()))
+
+    main_conn.executemany(
+        f'UPDATE "{config.EMITENTS_TABLE_NAME}" SET "RAEX_Rate" = ? WHERE "INN" = ?',
+        updates,
+    )
+    main_conn.commit()
+    logger.info("RAEX_Rate синхронизирован для INN: %s", len(updates))
+    return len(updates)
+
+
 def sync_emitents_from_rates(conn: sqlite3.Connection, logger: logging.Logger) -> int:
     cursor = conn.execute(
         f'''
@@ -1492,7 +1771,7 @@ def ensure_scoring_dates(conn: sqlite3.Connection, logger: logging.Logger, today
 def export_emitents_excel(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate", "NKR_Rate"
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate", "NKR_Rate", "RAEX_Rate"
         FROM "{config.EMITENTS_TABLE_NAME}"
         ORDER BY "EMITENTNAME", "INN"
         '''
@@ -1549,7 +1828,7 @@ def export_emitents_excel(conn: sqlite3.Connection) -> int:
 def export_emitents_snapshot(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         f'''
-        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate", "NKR_Rate"
+        SELECT "EMITENTNAME", "INN", "Scoring", "DateScoring", "NRA_Rate", "Acra_Rate", "NKR_Rate", "RAEX_Rate"
         FROM "{config.EMITENTS_TABLE_NAME}"
         ORDER BY RANDOM()
         LIMIT 5
@@ -1652,6 +1931,35 @@ def export_nkr_snapshot(conn: sqlite3.Connection) -> int:
         ws.append(list(row))
 
     snapshot_path = config.BASE_SNAPSHOTS_DIR / config.NKR_SNAPSHOT_FILENAME
+    wb.save(snapshot_path)
+    return len(rows)
+
+
+def export_raex_snapshot(conn: sqlite3.Connection) -> int:
+    cursor = conn.execute(
+        f'''
+        SELECT "inn", "company_name", "rating_date", "rating", "forecast", "company_url"
+        FROM "{config.RAEX_LATEST_TABLE_NAME}"
+        ORDER BY
+            CASE
+                WHEN instr("rating_date", '.') > 0 THEN substr("rating_date", 7, 4) || '-' || substr("rating_date", 4, 2) || '-' || substr("rating_date", 1, 2)
+                ELSE "rating_date"
+            END DESC,
+            "inn" ASC
+        LIMIT 5
+        '''
+    )
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "raex_snapshot"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+
+    snapshot_path = config.BASE_SNAPSHOTS_DIR / config.RAEX_SNAPSHOT_FILENAME
     wb.save(snapshot_path)
     return len(rows)
 
@@ -1963,15 +2271,16 @@ def main() -> None:
             pbar.update(1)
         stage_times["Этап 4: Формирование Excel-среза MOEX"] = perf_counter() - s
 
-        print("Этап 5: Рейтинги агентств (НРА + АКРА + НКР, отдельная SQLite)")
+        print("Этап 5: Рейтинги агентств (НРА + АКРА + НКР + RAEX, отдельная SQLite)")
         s = perf_counter()
-        with progress(total=9, desc="NRA/ACRA/NKR", unit="шаг") as pbar:
+        with progress(total=10, desc="NRA/ACRA/NKR/RAEX", unit="шаг") as pbar:
             now_utc = datetime.now(timezone.utc)
             with connect_db(ratings_db_path) as nra_conn:
                 init_meta_table(nra_conn)
                 ensure_nra_tables(nra_conn)
                 ensure_acra_tables(nra_conn)
                 ensure_nkr_tables(nra_conn)
+                ensure_raex_tables(nra_conn)
                 nra_refreshed, nra_rows = refresh_nra_data_if_needed(nra_conn, logger, now_utc)
                 nra_snapshot_rows = export_nra_snapshot(nra_conn)
                 pbar.update(1)
@@ -1980,6 +2289,9 @@ def main() -> None:
                 pbar.update(1)
                 nkr_refreshed, nkr_rows = refresh_nkr_data_if_needed(nra_conn, logger, now_utc)
                 nkr_snapshot_rows = export_nkr_snapshot(nra_conn)
+                pbar.update(1)
+                raex_refreshed, raex_rows, raex_inns, raex_errors = refresh_raex_data_if_needed(nra_conn, db_path, logger, now_utc)
+                raex_snapshot_rows = export_raex_snapshot(nra_conn)
             pbar.update(1)
             pbar.set_description("Фиксация результата")
             logger.info(
@@ -2001,17 +2313,25 @@ def main() -> None:
                 nkr_rows,
                 nkr_snapshot_rows,
             )
+            logger.info(
+                "RAEX: режим=%s, обработано INN=%s, актуальных=%s, ошибок=%s, строк в snapshot=%s",
+                "обновлено из сети" if raex_refreshed else "использован локальный кэш",
+                raex_inns,
+                raex_rows,
+                raex_errors,
+                raex_snapshot_rows,
+            )
             pbar.update(1)
             pbar.update(1)
             pbar.update(1)
             pbar.update(1)
             pbar.update(1)
             pbar.update(1)
-        stage_times["Этап 5: Рейтинги агентств (НРА + АКРА + НКР, отдельная SQLite)"] = perf_counter() - s
+        stage_times["Этап 5: Рейтинги агентств (НРА + АКРА + НКР + RAEX, отдельная SQLite)"] = perf_counter() - s
 
         print("Этап 6: Витрина эмитентов (SQL + Excel)")
         s = perf_counter()
-        with progress(total=7, desc="Emitents", unit="шаг") as pbar:
+        with progress(total=8, desc="Emitents", unit="шаг") as pbar:
             today_str = datetime.now().strftime(config.DATE_SCORING_FORMAT)
             with connect_db(db_path) as conn:
                 ensure_emitents_table(conn)
@@ -2023,6 +2343,7 @@ def main() -> None:
                     nra_synced = sync_nra_rate_to_emitents(conn, nra_conn, logger)
                     acra_synced = sync_acra_rate_to_emitents(conn, nra_conn, logger)
                     nkr_synced = sync_nkr_rate_to_emitents(conn, nra_conn, logger)
+                    raex_synced = sync_raex_rate_to_emitents(conn, nra_conn, logger)
                 pbar.update(1)
                 dates_fixed = ensure_scoring_dates(conn, logger, today_str)
                 pbar.update(1)
@@ -2032,13 +2353,14 @@ def main() -> None:
                 pbar.update(1)
 
             logger.info(
-                "Витрина эмитентов: перенос из Excel=%s, upsert из %s=%s, NRA_Rate=%s, Acra_Rate=%s, NKR_Rate=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
+                "Витрина эмитентов: перенос из Excel=%s, upsert из %s=%s, NRA_Rate=%s, Acra_Rate=%s, NKR_Rate=%s, RAEX_Rate=%s, авто-дат=%s, строк в Emitents.xlsx=%s, строк в snapshot=%s",
                 pulled,
                 config.RATES_TABLE_NAME,
                 synced,
                 nra_synced,
                 acra_synced,
                 nkr_synced,
+                raex_synced,
                 dates_fixed,
                 emitents_count,
                 emitents_snapshot,
