@@ -160,7 +160,7 @@ python main.py
 - `RAEX_SEARCH_URL` — URL поиска RAEX.
 - `RAEX_CACHE_TTL_HOURS` — TTL обновления RAEX в часах.
 - `RAEX_MAX_WORKERS` — число потоков параллельного парсинга RAEX (дефолт увеличен до 12).
-- `EMITENTS_RATINGS_COLUMN_WIDTH` — фиксированная ширина колонок рейтингов в `Emitents.xlsx` (`NRA_Rate`, `Acra_Rate`, `NKR_Rate`, `RAEX_Rate`).
+- `EMITENTS_RATINGS_COLUMN_WIDTH` — фиксированная ширина колонок рейтингов в `Emitents.xlsx` (`NRA_Rate`, `Acra_Rate`, `NKR_Rate`, `RAEX_Rate`), по умолчанию `22.09` (примерно `250 px`).
 - `RAEX_TABLE_NAME` / `RAEX_LATEST_TABLE_NAME` — таблицы RAEX в БД рейтинговых агентств.
 - `RAITINGS_DB_FILENAME` — файл общей SQLite-базы рейтинговых агентств.
 - `ACRA_TABLE_NAME` — таблица АКРА в БД рейтинговых агентств.
