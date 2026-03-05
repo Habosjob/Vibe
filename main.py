@@ -2286,9 +2286,14 @@ def _parse_bond_date(raw_value: str | None) -> datetime | None:
     return None
 
 
+def _normalize_bond_type(raw_value: str | None) -> str:
+    value = str(raw_value or "").replace("\xa0", " ")
+    return " ".join(value.split()).casefold()
+
+
 def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, int]:
     min_days = config.PRESORTER_MIN_DAYS_TO_EVENT
-    excluded_bond_type = config.PRESORTER_EXCLUDED_BOND_TYPE.strip().casefold()
+    excluded_bond_type = _normalize_bond_type(config.PRESORTER_EXCLUDED_BOND_TYPE)
     today = datetime.now().date()
 
     rows = conn.execute(
@@ -2311,7 +2316,7 @@ def presort_merge_table(conn: sqlite3.Connection, table_name: str) -> dict[str, 
         if any(dt is not None and (dt.date() - today).days < min_days for dt in (mat_dt, nearest_dt)):
             date_rule_isins.add(isin_value)
 
-        if str(bond_type or "").strip().casefold() == excluded_bond_type:
+        if excluded_bond_type and _normalize_bond_type(bond_type) == excluded_bond_type:
             bond_type_rule_isins.add(isin_value)
 
     isins_to_delete = date_rule_isins | bond_type_rule_isins
@@ -2493,13 +2498,29 @@ def main() -> None:
             pbar.update(1)
         stage_times["Этап 6: Витрина эмитентов (SQL + Excel)"] = perf_counter() - s
 
-        print("Этап 7: Merge Green/Yellow (SQL + snapshot)")
+        print("Этап 7: Merge Green/Yellow (SQL)")
         s = perf_counter()
-        with progress(total=4, desc="Merge bonds", unit="шаг") as pbar:
+        with progress(total=2, desc="Merge bonds", unit="шаг") as pbar:
             with connect_db(db_path) as conn:
                 green_rows = rebuild_merge_table_by_scoring(conn, config.MERGE_GREEN_TABLE_NAME, "Green")
                 pbar.update(1)
                 yellow_rows = rebuild_merge_table_by_scoring(conn, config.MERGE_YELLOW_TABLE_NAME, "Yellow")
+                pbar.update(1)
+
+            logger.info(
+                "Merge Green: строк=%s; Merge Yellow: строк=%s",
+                green_rows,
+                yellow_rows,
+            )
+        stage_times["Этап 7: Merge Green/Yellow (SQL)"] = perf_counter() - s
+
+        print("Этап 8: Presorter для Merge-таблиц")
+        s = perf_counter()
+        with progress(total=4, desc="Presorter", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                green_presort = presort_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
+                pbar.update(1)
+                yellow_presort = presort_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
                 pbar.update(1)
                 green_snapshot = export_merge_snapshot(
                     conn,
@@ -2515,35 +2536,20 @@ def main() -> None:
                     "merge_yellow_snapshot",
                 )
                 pbar.update(1)
-
-            logger.info(
-                "Merge Green: строк=%s, snapshot=%s; Merge Yellow: строк=%s, snapshot=%s",
-                green_rows,
-                green_snapshot,
-                yellow_rows,
-                yellow_snapshot,
-            )
-        stage_times["Этап 7: Merge Green/Yellow (SQL + snapshot)"] = perf_counter() - s
-
-        print("Этап 8: Presorter для Merge-таблиц")
-        s = perf_counter()
-        with progress(total=2, desc="Presorter", unit="табл") as pbar:
-            with connect_db(db_path) as conn:
-                green_presort = presort_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
-                pbar.update(1)
-                yellow_presort = presort_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
-                pbar.update(1)
             presorter_summary["MergeGreen"] = green_presort
             presorter_summary["MergeYellow"] = yellow_presort
             logger.info(
                 "Presorter: MergeGreen excluded(days_rules=%s, bond_type=%s, total=%s); "
-                "MergeYellow excluded(days_rules=%s, bond_type=%s, total=%s)",
+                "MergeYellow excluded(days_rules=%s, bond_type=%s, total=%s); "
+                "post-presort snapshots: green=%s, yellow=%s",
                 green_presort["excluded_by_days_rules"],
                 green_presort["excluded_by_bond_type_rule"],
                 green_presort["excluded_total"],
                 yellow_presort["excluded_by_days_rules"],
                 yellow_presort["excluded_by_bond_type_rule"],
                 yellow_presort["excluded_total"],
+                green_snapshot,
+                yellow_snapshot,
             )
         stage_times["Этап 8: Presorter для Merge-таблиц"] = perf_counter() - s
 

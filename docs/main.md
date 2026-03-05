@@ -196,10 +196,10 @@ python main.py
 - После пересборки выполняется этап **Presorter**: из `MergeGreenBonds` и `MergeYellowBonds` удаляются бумаги, если выполняется хотя бы одно условие:
   - до `MATDATE` меньше `PRESORTER_MIN_DAYS_TO_EVENT` дней;
   - до `Ближайшая дата погашения/оферты (Дата)` меньше `PRESORTER_MIN_DAYS_TO_EVENT` дней;
-  - `BOND_TYPE` равен `PRESORTER_EXCLUDED_BOND_TYPE` (по умолчанию `Структурная облигация`).
+  - `BOND_TYPE` равен `PRESORTER_EXCLUDED_BOND_TYPE` (по умолчанию `Структурная облигация`); сравнение выполняется после нормализации пробелов (включая неразрывные) и без учета регистра.
 - В консольном Summary добавляется блок `Этап Presorter` с отдельной статистикой по `MergeGreen` и `MergeYellow`:
   - `Исключено бумаг по правилам меньше 365 дней` (объединенный счетчик по `MATDATE` и `Ближайшая дата погашения/оферты (Дата)`);
   - `Исключено бумаг по правилу Bond_TYPE`.
-- Snapshot-файлы:
+- Snapshot-файлы (формируются **после** Presorter, поэтому содержат только прошедшие фильтр бумаги):
   - `BaseSnapshots/merge_green_bonds_snapshot.xlsx`;
   - `BaseSnapshots/merge_yellow_bonds_snapshot.xlsx`.
