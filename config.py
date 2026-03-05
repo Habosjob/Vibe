@@ -350,7 +350,7 @@ YTM_SELFCHECK_ENABLED = True
 # Если False — ошибки self-check попадут в лог как warning.
 # Значения: True/False.
 # По умолчанию: False.
-YTM_SELFCHECK_STRICT = False
+YTM_SELFCHECK_STRICT = True
 
 # Режим склейки Merge-таблиц по ISIN между MOEX и Доходъ.
 # Если True, в Merge попадают только бумаги, которые есть в обеих таблицах
