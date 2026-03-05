@@ -316,6 +316,14 @@ MERGE_GREEN_SNAPSHOT_FILENAME = "merge_green_bonds_snapshot.xlsx"
 # По умолчанию: merge_yellow_bonds_snapshot.xlsx.
 MERGE_YELLOW_SNAPSHOT_FILENAME = "merge_yellow_bonds_snapshot.xlsx"
 
+# Режим склейки Merge-таблиц по ISIN между MOEX и Доходъ.
+# Если True, в Merge попадают только бумаги, которые есть в обеих таблицах
+# (INNER JOIN по ISIN). Если False — используются все бумаги из MOEX и
+# колонки Доходъ добавляются при наличии совпадения (LEFT JOIN).
+# Значения: True/False.
+# По умолчанию: True.
+MERGE_REQUIRE_DOHOD_ISIN_MATCH = True
+
 # Минимальный остаточный срок до погашения/оферты для этапа Presorter (в днях).
 # Если до даты меньше этого значения, бумага исключается из Merge*.
 # Значение: целое число > 0.
