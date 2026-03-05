@@ -316,6 +316,15 @@ MERGE_GREEN_SNAPSHOT_FILENAME = "merge_green_bonds_snapshot.xlsx"
 # По умолчанию: merge_yellow_bonds_snapshot.xlsx.
 MERGE_YELLOW_SNAPSHOT_FILENAME = "merge_yellow_bonds_snapshot.xlsx"
 
+# Имя таблицы единого скринера (объединение MergeGreenBonds + MergeYellowBonds).
+# По умолчанию: Screener.
+SCREENER_TABLE_NAME = "Screener"
+
+# Имя Excel-витрины скринера (перезаписывается на каждом запуске).
+# Внутри два листа: Green и Yellow.
+# По умолчанию: Screener.xlsx.
+SCREENER_XLSX_FILENAME = "Screener.xlsx"
+
 # Режим склейки Merge-таблиц по ISIN между MOEX и Доходъ.
 # Если True, в Merge попадают только бумаги, которые есть в обеих таблицах
 # (INNER JOIN по ISIN). Если False — используются все бумаги из MOEX и
@@ -450,4 +459,3 @@ MOEX_AMORTIZATION_SNAPSHOT_FILENAME = "moex_amortizations_snapshot.xlsx"
 # Сравнение выполняется без учета регистра и лишних пробелов.
 # По умолчанию: "Да".
 MOEX_AMORTIZATION_REQUIRED_FLAG = "Да"
-
