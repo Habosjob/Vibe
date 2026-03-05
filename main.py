@@ -30,8 +30,8 @@ from tqdm import tqdm
 import config
 
 
-def progress(total: int, desc: str, unit: str):
-    return tqdm(total=total, desc=desc, unit=unit, position=0, leave=False, dynamic_ncols=True)
+def progress(total: int, desc: str, unit: str, position: int = 0):
+    return tqdm(total=total, desc=desc, unit=unit, position=position, leave=False, dynamic_ncols=True)
 
 
 def setup_logging() -> logging.Logger:
@@ -798,20 +798,23 @@ def refresh_raex_data_if_needed(
     loaded_at = now_utc.isoformat()
     parsed_rows: list[dict[str, str]] = []
     errors_count = 0
-    with ThreadPoolExecutor(max_workers=max(1, int(config.RAEX_MAX_WORKERS))) as executor:
-        futures = {
-            executor.submit(fetch_raex_rating_by_inn, inn, config.REQUEST_TIMEOUT_SECONDS): inn
-            for inn in inns
-        }
-        for future in as_completed(futures):
-            inn = futures[future]
-            try:
-                parsed = future.result()
-                if parsed:
-                    parsed_rows.append(parsed)
-            except Exception as exc:
-                errors_count += 1
-                logger.warning("RAEX: ошибка для INN=%s: %s", inn, exc)
+    with progress(total=len(inns), desc="RAEX INN", unit="inn") as raex_pbar:
+        with ThreadPoolExecutor(max_workers=max(1, int(config.RAEX_MAX_WORKERS))) as executor:
+            futures = {
+                executor.submit(fetch_raex_rating_by_inn, inn, config.REQUEST_TIMEOUT_SECONDS): inn
+                for inn in inns
+            }
+            for future in as_completed(futures):
+                inn = futures[future]
+                try:
+                    parsed = future.result()
+                    if parsed:
+                        parsed_rows.append(parsed)
+                except Exception as exc:
+                    errors_count += 1
+                    logger.warning("RAEX: ошибка для INN=%s: %s", inn, exc)
+                finally:
+                    raex_pbar.update(1)
 
     payload = [
         (
@@ -2273,7 +2276,7 @@ def main() -> None:
 
         print("Этап 5: Рейтинги агентств (НРА + АКРА + НКР + RAEX, отдельная SQLite)")
         s = perf_counter()
-        with progress(total=10, desc="NRA/ACRA/NKR/RAEX", unit="шаг") as pbar:
+        with progress(total=10, desc="NRA/ACRA/NKR/RAEX", unit="шаг", position=1) as pbar:
             now_utc = datetime.now(timezone.utc)
             with connect_db(ratings_db_path) as nra_conn:
                 init_meta_table(nra_conn)
