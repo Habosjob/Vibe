@@ -2546,21 +2546,82 @@ def _pick_price_for_ytm(*prices: object) -> float | None:
     return None
 
 
+def _normalize_price_share_from_nominal(price_value: float) -> float:
+    normalized_price = price_value * float(config.YTM_PRICE_FACEVALUE_MULTIPLIER)
+    if normalized_price > 2:
+        normalized_price /= 100.0
+    return normalized_price
+
+
+def _resolve_coupon_frequency_per_year(raw_coupon_period: object) -> float | None:
+    parsed_value = _parse_decimal_value(raw_coupon_period)
+    if parsed_value is None or parsed_value <= 0:
+        return None
+
+    # В колонке «КупонПериод» обычно приходят дни (например 182, 91, 30).
+    # Для редких источников, где уже указано «раз в год», оставляем как есть.
+    if parsed_value > 12:
+        return 365.25 / parsed_value
+    return parsed_value
+
+
+def _build_cashflow_times_years(
+    *,
+    target_date: datetime,
+    coupon_frequency: float,
+    coupon_period_days: object,
+    next_coupon_date: object,
+) -> list[float]:
+    today = datetime.now().date()
+    years_to_redemption = (target_date.date() - today).days / 365.25
+    periods = max(1, int(round(years_to_redemption * coupon_frequency)))
+
+    nearest_coupon_dt = _parse_bond_date(str(next_coupon_date or ""))
+    if nearest_coupon_dt is None:
+        return [period_idx / coupon_frequency for period_idx in range(1, periods + 1)]
+
+    first_payment_days = (nearest_coupon_dt.date() - today).days
+    if first_payment_days <= 0:
+        return [period_idx / coupon_frequency for period_idx in range(1, periods + 1)]
+
+    coupon_period_days_value = _parse_decimal_value(coupon_period_days)
+    if coupon_period_days_value is None or coupon_period_days_value <= 0:
+        coupon_period_days_value = 365.25 / coupon_frequency
+
+    times_years: list[float] = []
+    payment_days = float(first_payment_days)
+    safety_limit = max(4, periods + 4)
+    while payment_days <= (target_date.date() - today).days + 1 and len(times_years) < safety_limit:
+        times_years.append(payment_days / 365.25)
+        payment_days += coupon_period_days_value
+
+    if not times_years:
+        return [period_idx / coupon_frequency for period_idx in range(1, periods + 1)]
+
+    final_time = (target_date.date() - today).days / 365.25
+    if final_time > times_years[-1] + 1e-9:
+        times_years.append(final_time)
+    else:
+        times_years[-1] = final_time
+
+    return [t for t in times_years if t > 0]
+
+
 def _solve_ytm_bisection(
     dirty_price: float,
     period_coupon: float,
     facevalue: float,
-    periods: int,
     coupon_frequency: float,
+    cashflow_times_years: list[float],
 ) -> float | None:
     def npv(rate: float) -> float:
         discount = 1.0 + rate / coupon_frequency
         total = 0.0
-        for period_idx in range(1, periods + 1):
+        for period_idx, cashflow_time_years in enumerate(cashflow_times_years, start=1):
             cash_flow = period_coupon
-            if period_idx == periods:
+            if period_idx == len(cashflow_times_years):
                 cash_flow += facevalue
-            total += cash_flow / (discount ** period_idx)
+            total += cash_flow / (discount ** (cashflow_time_years * coupon_frequency))
         return total - dirty_price
 
     left = -0.95
@@ -2578,7 +2639,6 @@ def _solve_ytm_bisection(
             return mid
         if left_val * mid_val <= 0:
             right = mid
-            right_val = mid_val
         else:
             left = mid
             left_val = mid_val
@@ -2593,6 +2653,8 @@ def _calculate_fixed_coupon_ytm(
     coupon_type: object,
     coupon_percent: object,
     coupon_frequency: object,
+    coupon_period_days: object,
+    next_coupon_date: object,
     nkd: object,
     facevalue: object,
     matdate: object,
@@ -2609,7 +2671,9 @@ def _calculate_fixed_coupon_ytm(
 
     price = _pick_price_for_ytm(corpbonds_price, dohod_price, smartlab_price, moex_price)
     coupon_rate_percent = _parse_decimal_value(coupon_percent)
-    coupon_freq = _parse_decimal_value(coupon_frequency)
+    coupon_freq = _resolve_coupon_frequency_per_year(coupon_frequency)
+    if coupon_freq is None:
+        coupon_freq = _resolve_coupon_frequency_per_year(coupon_period_days)
     facevalue_value = _parse_decimal_value(facevalue)
     nkd_value = _parse_decimal_value(nkd) or 0.0
     target_date = _parse_bond_date(str(offerdate or "")) or _parse_bond_date(str(matdate or ""))
@@ -2629,17 +2693,29 @@ def _calculate_fixed_coupon_ytm(
     if days_to_redemption <= 0:
         return ""
 
-    normalized_price = price * facevalue_value * float(config.YTM_PRICE_FACEVALUE_MULTIPLIER)
-    dirty_price = normalized_price + nkd_value
+    price_share_from_nominal = _normalize_price_share_from_nominal(price)
+    dirty_price = price_share_from_nominal * facevalue_value + nkd_value
 
     coupon_rate = coupon_rate_percent / 100.0
     annual_coupon = facevalue_value * coupon_rate
     period_coupon = annual_coupon / coupon_freq
 
-    years_to_redemption = days_to_redemption / 365.25
-    periods = max(1, int(round(years_to_redemption * coupon_freq)))
+    cashflow_times_years = _build_cashflow_times_years(
+        target_date=target_date,
+        coupon_frequency=coupon_freq,
+        coupon_period_days=coupon_period_days,
+        next_coupon_date=next_coupon_date,
+    )
+    if not cashflow_times_years:
+        return ""
 
-    ytm_decimal = _solve_ytm_bisection(dirty_price, period_coupon, facevalue_value, periods, coupon_freq)
+    ytm_decimal = _solve_ytm_bisection(
+        dirty_price,
+        period_coupon,
+        facevalue_value,
+        coupon_freq,
+        cashflow_times_years,
+    )
     if ytm_decimal is None:
         return ""
 
@@ -3592,6 +3668,8 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                 coupon_type=row[12],
                 coupon_percent=row[15],
                 coupon_frequency=row[16],
+                coupon_period_days=row[13],
+                next_coupon_date=row[11],
                 nkd=row[14],
                 facevalue=row[20],
                 matdate=row[8],
