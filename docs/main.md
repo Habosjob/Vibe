@@ -170,7 +170,7 @@ python main.py
 - `RAEX_TABLE_NAME` / `RAEX_LATEST_TABLE_NAME` — таблицы RAEX в БД рейтинговых агентств.
 - `RAITINGS_DB_FILENAME` — файл общей SQLite-базы рейтинговых агентств.
 - `ACRA_TABLE_NAME` — таблица АКРА в БД рейтинговых агентств.
-- `PRESORTER_MIN_DAYS_TO_EVENT` — порог для исключения облигаций на этапе Presorter по дате `MATDATE` (в днях).
+- `PRESORTER_MIN_DAYS_TO_EVENT` — порог для исключения облигаций на этапе Presorter по датам `MATDATE` / `Offerdate` / `AmortStarrtDate` (в днях).
 - `PRESORTER_EXCLUDED_BOND_TYPE` — значение `BOND_TYPE`, которое исключается из Merge-таблиц на этапе Presorter.
 - `PRESORTER_USE_DOHOD_NEAREST_DATE` — включать отдельное правило Presorter по полю `Ближайшая дата погашения/оферты (Дата)` из Доходъ (`True` по умолчанию).
 - `MERGE_REQUIRE_DOHOD_ISIN_MATCH` — требовать наличие бумаги одновременно в MOEX и Доходъ при сборке Merge (`True` по умолчанию).
@@ -179,6 +179,8 @@ python main.py
 - `MOEX_AMORTIZATION_CACHE_TTL_HOURS` / `MOEX_AMORTIZATION_MAX_WORKERS` / `MOEX_AMORTIZATION_REQUEST_TIMEOUT_SECONDS` — TTL, параллелизм и таймаут этапа MOEX Amortizations.
 - `SMARTLAB_CACHE_TTL_HOURS` / `SMARTLAB_MAX_WORKERS` / `SMARTLAB_REQUEST_TIMEOUT_SECONDS` — TTL, параллелизм и таймаут этапа Smartlab.
 - `MERGE_REQUIRE_SMARTLAB_SECID_MATCH` — режим JOIN Merge* c Smartlab (`INNER` при `True`, `LEFT` при `False`).
+- `SCREENER_TABLE_NAME` — имя SQL-таблицы единого скринера (объединение MergeGreenBonds + MergeYellowBonds).
+- `SCREENER_XLSX_FILENAME` — имя Excel-витрины скринера (листы `Green` и `Yellow`).
 
 ## Примечание для Windows
 Проект ориентирован на Windows-сценарий:
@@ -267,6 +269,7 @@ python main.py
 - Источники:
   - `moex_bonds` — поля: `SECID`, `ISIN`, `FACEVALUE`, `FACEUNIT`, `MATDATE`, `IS_QUALIFIED_INVESTORS`, `BOND_TYPE`, `BOND_SUBTYPE`, `YIELDATWAP`, `PRICE`;
   - `Dohod_Bonds` — поля: `Название`, `Ближайшая дата погашения/оферты (Дата)`, `Событие в дату`, `Коэф. Ликвидности (max=100)`, `Медиана дневного оборота (млн в валюте торгов)`, `Цена, % от номинала`, `НКД`, `Размер купона`, `Текущий купон, %`, `Тип купона`, `Купон (раз/год)`, `Субординированная (да/нет)`, `Базовый индекс (для FRN)`, `Премия/Дисконт к базовому индексу (для FRN)`.
+  - в Merge-таблицах поле `Цена, % от номинала` сохраняется под новым именем `Цена Доход`.
 - Матчинг:
   - фильтрация по `emitents.Scoring` (`Green`/`Yellow`) через связь `moex_bonds.INN -> emitents.INN`;
   - объединение с `Dohod_Bonds` по `ISIN` в режиме из `MERGE_REQUIRE_DOHOD_ISIN_MATCH`:
@@ -276,12 +279,56 @@ python main.py
 - После пересборки выполняется этап **Presorter**: из `MergeGreenBonds` и `MergeYellowBonds` удаляются **строки бумаг**, если выполняется хотя бы одно условие:
   - до `MATDATE` меньше `PRESORTER_MIN_DAYS_TO_EVENT` дней;
   - до `Ближайшая дата погашения/оферты (Дата)` меньше `PRESORTER_MIN_DAYS_TO_EVENT` дней (отдельное правило; применяется при `PRESORTER_USE_DOHOD_NEAREST_DATE = True`);
+  - до `Offerdate` меньше `PRESORTER_MIN_DAYS_TO_EVENT` дней (дата берется из `Corpbonds_Дата ближайшей оферты`, при пустом значении — из `Smartlab_Дата оферты`);
+  - до `AmortStarrtDate` меньше `PRESORTER_MIN_DAYS_TO_EVENT` дней (включая даты, которые уже в прошлом);
   - `BOND_TYPE` равен `PRESORTER_EXCLUDED_BOND_TYPE` (по умолчанию `Структурная облигация`); сравнение выполняется после нормализации пробелов (включая неразрывные) и без учета регистра.
 - В консольном Summary добавляется блок `Этап Presorter` с отдельной статистикой по `MergeGreen` и `MergeYellow`:
   - `Строк до/после Presorter`;
   - `Исключено бумаг по правилу MATDATE < N дней`;
   - `Исключено бумаг по правилу Доходъ (ближайшая дата) < N дней`;
-  - `Исключено бумаг по правилу Bond_TYPE`.
+  - `Исключено бумаг по правилу Bond_TYPE`;
+  - `Исключено бумаг по правилу Offerdate < N дней`;
+  - `Исключено бумаг по правилу AmortStarrtDate < N дней`.
 - Snapshot-файлы (пересохраняются на этапе Corpbonds, то есть отражают финальное состояние Merge после Presorter **и** после обогащения `Corpbonds_*`; это выборка только из 5 случайных ISIN, а не полный состав таблиц):
   - `BaseSnapshots/merge_green_bonds_snapshot.xlsx`;
   - `BaseSnapshots/merge_yellow_bonds_snapshot.xlsx`.
+
+## Логика Screener (единая таблица + Excel витрина)
+- SQL-таблица: `Screener` (имя управляется `SCREENER_TABLE_NAME`).
+- Источники: `MergeGreenBonds` и `MergeYellowBonds` после всех этапов обогащения и Presorter.
+- Правила построения:
+  - все строки из `MergeGreenBonds` получают `Score=1`, `SourceList=Green`;
+  - все строки из `MergeYellowBonds` получают `Score=0`, `SourceList=Yellow`;
+  - `QUALIFIED` =
+    - `1`, если `IS_QUALIFIED_INVESTORS=1` (значение Smartlab игнорируется);
+    - иначе `1`, если `Smartlab_Только для квалов?` = `Да`/`1`;
+    - иначе `0`;
+  - `Offerdate` = дата из `Corpbonds_Дата ближайшей оферты`, а если она пустая/невалидная — дата из `Smartlab_Дата оферты`;
+  - все даты нормализуются к формату `YYYY-MM-DD`; если значение не дата, в поле пишется пусто;
+  - `YTM` создается как новый пустой столбец (заполнение позже).
+- Excel-витрина: `Screener.xlsx` (имя управляется `SCREENER_XLSX_FILENAME`) с листами `Green` и `Yellow`.
+- Оформление листов аналогично `Emitents.xlsx`:
+  - жирный заголовок + цвет шапки;
+  - автофильтр;
+  - freeze panes на первой строке данных;
+  - автоширина колонок.
+- В колонках `Квал`, `Суборд`, `Аморт`, `Лесенка` используются символы `✅/❌` вместо `1/0` и `Да/Нет`.
+- В колонке `Ликвидность` включен градиент DataBar (чем выше число, тем длиннее заливка).
+
+### Карта переименований полей для Screener-витрины
+- `QUALIFIED` → `Квал`
+- `Субординированная (да/нет)` → `Суборд`
+- `Corpbonds_Наличие амортизации` → `Аморт`
+- `Corpbonds_Купон лесенкой` → `Лесенка`
+- `Corpbonds_Дата ближайшего купона` → `Ближайший купон`
+- `Corpbonds_Тип купона` → `Тип купона`
+- `Smartlab_Длительность купона, дней` → `КупонПериод`
+- `Текущий купон, %` → `Купон, %`
+- `Базовый индекс (для FRN)` → `Базовый индекс`
+- `Премия/Дисконт к базовому индексу (для FRN)` → `Премия, индекс`
+- `Corpbonds_Формула купона` → `Формула купона`
+- `Коэф. Ликвидности (max=100)` → `Ликвидность`
+- `Corpbonds_Цена последняя` → `Цена Corpbonds`
+- `Цена, % от номинала` (в источнике Доходъ) → `Цена Доход` (в Merge/SQL и в витрине)
+- `Smartlab_Котировка облигации, %` → `Цена Smartlab`
+- `PRICE` → `Цена MOEX`
