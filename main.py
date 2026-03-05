@@ -2867,11 +2867,47 @@ def main() -> None:
 
         print("Этап 8: Presorter для Merge-таблиц")
         s = perf_counter()
-        with progress(total=4, desc="Presorter", unit="шаг") as pbar:
+        with progress(total=2, desc="Presorter", unit="шаг") as pbar:
             with connect_db(db_path) as conn:
                 green_presort = presort_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
                 pbar.update(1)
                 yellow_presort = presort_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
+                pbar.update(1)
+            presorter_summary["MergeGreen"] = green_presort
+            presorter_summary["MergeYellow"] = yellow_presort
+            logger.info(
+                "Presorter: MergeGreen rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, total=%s); "
+                "MergeYellow rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, total=%s); "
+                "dohod_nearest_rule_enabled=%s",
+                green_presort["rows_before"],
+                green_presort["rows_after"],
+                green_presort["excluded_by_matdate_rule"],
+                green_presort["excluded_by_dohod_nearest_rule"],
+                green_presort["excluded_by_bond_type_rule"],
+                green_presort["excluded_total"],
+                yellow_presort["rows_before"],
+                yellow_presort["rows_after"],
+                yellow_presort["excluded_by_matdate_rule"],
+                yellow_presort["excluded_by_dohod_nearest_rule"],
+                yellow_presort["excluded_by_bond_type_rule"],
+                yellow_presort["excluded_total"],
+                config.PRESORTER_USE_DOHOD_NEAREST_DATE,
+            )
+        stage_times["Этап 8: Presorter для Merge-таблиц"] = perf_counter() - s
+
+        print("Этап 9: Обогащение Merge* из Corpbonds")
+        s = perf_counter()
+        with progress(total=6, desc="Corpbonds enrich", unit="шаг") as pbar:
+            with connect_db(db_path) as conn:
+                secids_total, secids_requested, secids_saved = refresh_corpbonds_data_if_needed(
+                    conn, logger, datetime.now(timezone.utc)
+                )
+                pbar.update(1)
+                green_rows_after_corpbonds = apply_corpbonds_inner_join_to_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
+                pbar.update(1)
+                yellow_rows_after_corpbonds = apply_corpbonds_inner_join_to_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
+                pbar.update(1)
+                corpbonds_snapshot = export_corpbonds_snapshot(conn)
                 pbar.update(1)
                 green_snapshot = export_merge_snapshot(
                     conn,
@@ -2887,53 +2923,18 @@ def main() -> None:
                     "merge_yellow_snapshot",
                 )
                 pbar.update(1)
-            presorter_summary["MergeGreen"] = green_presort
-            presorter_summary["MergeYellow"] = yellow_presort
-            logger.info(
-                "Presorter: MergeGreen rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, total=%s); "
-                "MergeYellow rows=%s->%s excluded(matdate=%s, dohod_nearest=%s, bond_type=%s, total=%s); "
-                "dohod_nearest_rule_enabled=%s; post-presort snapshots: green=%s, yellow=%s",
-                green_presort["rows_before"],
-                green_presort["rows_after"],
-                green_presort["excluded_by_matdate_rule"],
-                green_presort["excluded_by_dohod_nearest_rule"],
-                green_presort["excluded_by_bond_type_rule"],
-                green_presort["excluded_total"],
-                yellow_presort["rows_before"],
-                yellow_presort["rows_after"],
-                yellow_presort["excluded_by_matdate_rule"],
-                yellow_presort["excluded_by_dohod_nearest_rule"],
-                yellow_presort["excluded_by_bond_type_rule"],
-                yellow_presort["excluded_total"],
-                config.PRESORTER_USE_DOHOD_NEAREST_DATE,
-                green_snapshot,
-                yellow_snapshot,
-            )
-        stage_times["Этап 8: Presorter для Merge-таблиц"] = perf_counter() - s
-
-        print("Этап 9: Обогащение Merge* из Corpbonds")
-        s = perf_counter()
-        with progress(total=4, desc="Corpbonds enrich", unit="шаг") as pbar:
-            with connect_db(db_path) as conn:
-                secids_total, secids_requested, secids_saved = refresh_corpbonds_data_if_needed(
-                    conn, logger, datetime.now(timezone.utc)
-                )
-                pbar.update(1)
-                green_rows_after_corpbonds = apply_corpbonds_inner_join_to_merge_table(conn, config.MERGE_GREEN_TABLE_NAME)
-                pbar.update(1)
-                yellow_rows_after_corpbonds = apply_corpbonds_inner_join_to_merge_table(conn, config.MERGE_YELLOW_TABLE_NAME)
-                pbar.update(1)
-                corpbonds_snapshot = export_corpbonds_snapshot(conn)
-                pbar.update(1)
             logger.info(
                 "Corpbonds: SECID в Merge=%s, к запросу по TTL=%s, успешно сохранено=%s, "
-                "INNER JOIN обновил MergeGreen=%s, MergeYellow=%s, snapshot=%s",
+                "INNER JOIN обновил MergeGreen=%s, MergeYellow=%s, corpbonds_snapshot=%s, "
+                "merge_snapshots_after_corpbonds: green=%s, yellow=%s",
                 secids_total,
                 secids_requested,
                 secids_saved,
                 green_rows_after_corpbonds,
                 yellow_rows_after_corpbonds,
                 corpbonds_snapshot,
+                green_snapshot,
+                yellow_snapshot,
             )
         stage_times["Этап 9: Обогащение Merge* из Corpbonds"] = perf_counter() - s
 
