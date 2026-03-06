@@ -3890,7 +3890,6 @@ def refresh_corpbonds_data_if_needed(
             for row in fetched_rows
             if row.get("SECID", "")
         ]
-        conn.execute("BEGIN")
         conn.executemany(
             f'''
             INSERT INTO "{config.CORPBONDS_TABLE_NAME}" (
@@ -4087,7 +4086,6 @@ def refresh_smartlab_data_if_needed(
             for row in fetched_rows
             if row.get("SECID", "")
         ]
-        conn.execute("BEGIN")
         conn.executemany(
             f'''
             INSERT INTO "{config.SMARTLAB_TABLE_NAME}" (
