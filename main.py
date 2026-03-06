@@ -4446,6 +4446,45 @@ def ensure_screener_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _normalize_isin(raw_value: object) -> str | None:
+    cleaned = re.sub(r"[^A-Z0-9]", "", str(raw_value or "").strip().upper().replace(" ", ""))
+    return cleaned or None
+
+
+def ensure_dropped_bonds_excel() -> Path:
+    dropped_path = config.BASE_DIR / getattr(config, "DROPPED_BONDS_XLSX_FILENAME", "DroppedBonds.xlsx")
+    if dropped_path.exists():
+        return dropped_path
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "DroppedBonds"
+    ws.append(["ISIN", "Комментарий"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = "A1:B1"
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 60
+    wb.save(dropped_path)
+    return dropped_path
+
+
+def load_dropped_bonds_isins(logger: logging.Logger) -> set[str]:
+    dropped_path = ensure_dropped_bonds_excel()
+    wb = load_workbook(dropped_path, data_only=True)
+    try:
+        ws = wb["DroppedBonds"] if "DroppedBonds" in wb.sheetnames else wb.active
+        dropped_isins: set[str] = set()
+        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+            normalized = _normalize_isin(row[0])
+            if normalized:
+                dropped_isins.add(normalized)
+    finally:
+        wb.close()
+    return dropped_isins
+
+
 def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
     ensure_screener_table(conn)
     conn.execute(f'DELETE FROM "{SCREENER_TABLE_NAME}"')
@@ -4455,21 +4494,48 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
     ytm_floater_count = 0
     ytm_linker_count = 0
     ytm_other_count = 0
-    cbr_data = get_cbr_reference_data(conn, logging.getLogger("bonds_main"), datetime.now(timezone.utc))
+    logger = logging.getLogger("bonds_main")
+    dropped_isins = load_dropped_bonds_isins(logger)
+    excluded_from_screener = 0
+
+    conn.execute('DROP TABLE IF EXISTS "tmp_dropped_bonds"')
+    conn.execute('CREATE TEMP TABLE "tmp_dropped_bonds" ("isin" TEXT PRIMARY KEY)')
+    if dropped_isins:
+        conn.executemany(
+            'INSERT OR IGNORE INTO "tmp_dropped_bonds" ("isin") VALUES (?)',
+            [(isin,) for isin in sorted(dropped_isins)],
+        )
+        for source_table, _, _ in SCREENER_SOURCE_TABLES:
+            excluded_from_screener += int(
+                conn.execute(
+                    f'''
+                    SELECT COUNT(*)
+                    FROM "{source_table}" src
+                    INNER JOIN "tmp_dropped_bonds" tmp
+                        ON REPLACE(UPPER(TRIM(COALESCE(src."ISIN", ''))), ' ', '') = tmp."isin"
+                    WHERE TRIM(COALESCE(src."ISIN", '')) <> ''
+                    '''
+                ).fetchone()[0]
+            )
+
+    cbr_data = get_cbr_reference_data(conn, logger, datetime.now(timezone.utc))
     for source_table, source_list, score in SCREENER_SOURCE_TABLES:
         rows = conn.execute(
             f'''
             SELECT
-                "SECID", "ISIN", "Название", "BOND_TYPE", "BOND_SUBTYPE", "IS_QUALIFIED_INVESTORS", "Smartlab_Только для квалов?",
-                "Субординированная (да/нет)", "Corpbonds_Наличие амортизации", "Corpbonds_Купон лесенкой",
-                "{AMORTIZATION_START_COLUMN}", "MATDATE", "Corpbonds_Дата ближайшей оферты", "Smartlab_Дата оферты",
-                "Corpbonds_Дата ближайшего купона", "Corpbonds_Тип купона", "Smartlab_Длительность купона, дней",
-                "Corpbonds_НКД", "НКД", COALESCE(NULLIF("Corpbonds_Ставка купона", ''), "Текущий купон, %") AS "Текущий купон, %",
-                "Купон (раз/год)", "Corpbonds_Формула купона",
-                "FACEVALUE", "FACEUNIT", "Коэф. Ликвидности (max=100)", "Corpbonds_Цена последняя",
-                "Цена Доход", "Smartlab_Котировка облигации, %", "PRICE"
-            FROM "{source_table}"
-            WHERE TRIM(COALESCE("ISIN", '')) <> ''
+                src."SECID", src."ISIN", src."Название", src."BOND_TYPE", src."BOND_SUBTYPE", src."IS_QUALIFIED_INVESTORS", src."Smartlab_Только для квалов?",
+                src."Субординированная (да/нет)", src."Corpbonds_Наличие амортизации", src."Corpbonds_Купон лесенкой",
+                src."{AMORTIZATION_START_COLUMN}", src."MATDATE", src."Corpbonds_Дата ближайшей оферты", src."Smartlab_Дата оферты",
+                src."Corpbonds_Дата ближайшего купона", src."Corpbonds_Тип купона", src."Smartlab_Длительность купона, дней",
+                src."Corpbonds_НКД", src."НКД", COALESCE(NULLIF(src."Corpbonds_Ставка купона", ''), src."Текущий купон, %") AS "Текущий купон, %",
+                src."Купон (раз/год)", src."Corpbonds_Формула купона",
+                src."FACEVALUE", src."FACEUNIT", src."Коэф. Ликвидности (max=100)", src."Corpbonds_Цена последняя",
+                src."Цена Доход", src."Smartlab_Котировка облигации, %", src."PRICE"
+            FROM "{source_table}" src
+            LEFT JOIN "tmp_dropped_bonds" tmp
+                ON REPLACE(UPPER(TRIM(COALESCE(src."ISIN", ''))), ' ', '') = tmp."isin"
+            WHERE TRIM(COALESCE(src."ISIN", '')) <> ''
+              AND tmp."isin" IS NULL
             '''
         ).fetchall()
         totals[source_list] = len(rows)
@@ -4662,6 +4728,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
             )
 
     conn.commit()
+    logger.info("DroppedBonds: loaded=%s, excluded_from_screener=%s", len(dropped_isins), excluded_from_screener)
     total = conn.execute(f'SELECT COUNT(*) FROM "{SCREENER_TABLE_NAME}"').fetchone()[0]
     return {
         "green": totals["Green"],
