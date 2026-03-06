@@ -826,13 +826,59 @@ def parse_raex_company_page(html_text: str) -> dict[str, str] | None:
     return None
 
 
+def _get_raex_thread_local_session() -> requests.Session:
+    if not hasattr(fetch_raex_rating_by_inn, "_thread_local"):
+        fetch_raex_rating_by_inn._thread_local = threading.local()  # type: ignore[attr-defined]
+    thread_local = fetch_raex_rating_by_inn._thread_local  # type: ignore[attr-defined]
+    if not hasattr(thread_local, "session"):
+        pool_size = max(16, int(config.RAEX_MAX_WORKERS) * 2)
+        retry = Retry(
+            total=2,
+            connect=2,
+            read=2,
+            backoff_factor=0.2,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET", "POST"}),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=retry)
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": config.NRA_REQUEST_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+        })
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        thread_local.session = session
+        thread_local.csrf_token = ""
+        thread_local.csrf_fetched_at = 0.0
+    return thread_local.session
+
+
+def _get_raex_cached_csrf_token(session: requests.Session, timeout_seconds: int | float, force_refresh: bool = False) -> str:
+    thread_local = fetch_raex_rating_by_inn._thread_local  # type: ignore[attr-defined]
+    now_ts = time.monotonic()
+    cached_token = str(getattr(thread_local, "csrf_token", "") or "").strip()
+    fetched_at = float(getattr(thread_local, "csrf_fetched_at", 0.0) or 0.0)
+    if (not force_refresh) and cached_token and (now_ts - fetched_at) < 1800:
+        return cached_token
+
+    search_page = session.get(config.RAEX_SEARCH_URL, timeout=timeout_seconds)
+    search_page.raise_for_status()
+    csrf_token = _extract_raex_csrf_token(search_page.text)
+    thread_local.csrf_token = csrf_token
+    thread_local.csrf_fetched_at = now_ts
+    return csrf_token
+
+
 def fetch_raex_rating_by_inn(
     inn: str,
     timeout_seconds: int | float,
     known_company_url: str = "",
 ) -> dict[str, str] | None:
-    session = requests.Session()
-    session.headers.update({"User-Agent": config.NRA_REQUEST_USER_AGENT})
+    session = _get_raex_thread_local_session()
 
     company_url = (known_company_url or "").strip()
     if company_url:
@@ -847,21 +893,30 @@ def fetch_raex_rating_by_inn(
                 "forecast": parsed["forecast"],
                 "rating_date": parsed["rating_date"],
                 "company_url": company_url,
+                "used_known_url": "1",
+                "used_search": "0",
             }
 
-    search_page = session.get(config.RAEX_SEARCH_URL, timeout=timeout_seconds)
-    search_page.raise_for_status()
-    csrf_token = _extract_raex_csrf_token(search_page.text)
-
+    csrf_token = _get_raex_cached_csrf_token(session, timeout_seconds)
     payload = {"search": inn}
     if csrf_token:
         payload["CSRFToken"] = csrf_token
 
     search_response = session.post(config.RAEX_SEARCH_URL, data=payload, timeout=timeout_seconds)
-    search_response.raise_for_status()
+    if search_response.status_code >= 400:
+        search_response.raise_for_status()
+
     company_relative_url = _extract_raex_company_url(search_response.text)
     if not company_relative_url:
-        return None
+        csrf_token = _get_raex_cached_csrf_token(session, timeout_seconds, force_refresh=True)
+        payload = {"search": inn}
+        if csrf_token:
+            payload["CSRFToken"] = csrf_token
+        search_response = session.post(config.RAEX_SEARCH_URL, data=payload, timeout=timeout_seconds)
+        search_response.raise_for_status()
+        company_relative_url = _extract_raex_company_url(search_response.text)
+        if not company_relative_url:
+            return None
 
     company_url = urljoin(config.RAEX_SEARCH_URL, company_relative_url)
     company_response = session.get(company_url, timeout=timeout_seconds)
@@ -877,6 +932,8 @@ def fetch_raex_rating_by_inn(
         "forecast": parsed["forecast"],
         "rating_date": parsed["rating_date"],
         "company_url": company_url,
+        "used_known_url": "0",
+        "used_search": "1",
     }
 
 
@@ -903,6 +960,8 @@ def refresh_raex_data_if_needed(
     parsed_rows: list[dict[str, str]] = []
     errors_count = 0
     known_company_urls = get_raex_company_urls_by_inn(ratings_conn)
+    known_url_hits = 0
+    search_requests = 0
     with progress(total=len(inns), desc="RAEX INN", unit="inn") as raex_pbar:
         with ThreadPoolExecutor(max_workers=max(1, int(config.RAEX_MAX_WORKERS))) as executor:
             futures = {
@@ -920,6 +979,10 @@ def refresh_raex_data_if_needed(
                     parsed = future.result()
                     if parsed:
                         parsed_rows.append(parsed)
+                        if parsed.get("used_known_url") == "1":
+                            known_url_hits += 1
+                        if parsed.get("used_search") == "1":
+                            search_requests += 1
                 except Exception as exc:
                     errors_count += 1
                     logger.warning("RAEX: ошибка для INN=%s: %s", inn, exc)
@@ -984,7 +1047,14 @@ def refresh_raex_data_if_needed(
 
     set_meta_value(ratings_conn, "raex_last_refresh_utc", loaded_at)
     set_meta_value(ratings_conn, "raex_last_rows_count", str(len(payload)))
-    logger.info("RAEX обновление завершено. INN=%s, актуальных=%s, ошибок=%s", len(inns), len(payload), errors_count)
+    logger.info(
+        "RAEX обновление завершено. INN=%s, актуальных=%s, hits_known_url=%s, search_requests=%s, ошибок=%s",
+        len(inns),
+        len(payload),
+        known_url_hits,
+        search_requests,
+        errors_count,
+    )
     return True, len(payload), len(inns), errors_count
 
 
@@ -1224,10 +1294,15 @@ def acra_goto_with_retries(page, url: str, logger: logging.Logger, wait_selector
     return False
 
 
-def collect_acra_rows_via_playwright(logger: logging.Logger, inn_cache_by_url: dict[str, str]) -> tuple[dict[str, dict[str, str]], int]:
+def collect_acra_rows_via_playwright(
+    logger: logging.Logger,
+    known_urls: set[str],
+    inn_cache_by_url: dict[str, str],
+) -> tuple[dict[str, dict[str, str]], int, int]:
     acra_ensure_dirs()
     unique_rows: dict[str, dict[str, str]] = {}
     card_fetch_count = 0
+    known_url_skip_count = 0
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=str(config.ACRA_PROFILE_DIR),
@@ -1248,7 +1323,7 @@ def collect_acra_rows_via_playwright(logger: logging.Logger, inn_cache_by_url: d
                 attempts=config.ACRA_LIST_GOTO_ATTEMPTS,
             )
             if not list_ok:
-                return unique_rows, card_fetch_count
+                return unique_rows, card_fetch_count, known_url_skip_count
 
             acra_human_sleep(1.0, 2.0)
             page.mouse.wheel(0, random.randint(500, 1400))
@@ -1270,9 +1345,12 @@ def collect_acra_rows_via_playwright(logger: logging.Logger, inn_cache_by_url: d
                 tqdm(list(unique_rows.values()), desc="АКРА карточки", unit="эмитент", leave=False, dynamic_ncols=True),
                 start=1,
             ):
-                cached_inn = (inn_cache_by_url.get(row_data["issuer_url"]) or "").strip()
+                issuer_url = row_data["issuer_url"]
+                cached_inn = (inn_cache_by_url.get(issuer_url) or "").strip()
                 if cached_inn:
                     row_data["inn"] = cached_inn
+                if issuer_url in known_urls:
+                    known_url_skip_count += 1
                     continue
                 card_ok = acra_goto_with_retries(
                     page,
@@ -1313,7 +1391,7 @@ def collect_acra_rows_via_playwright(logger: logging.Logger, inn_cache_by_url: d
                 acra_human_sleep(0.6, 1.6)
         finally:
             context.close()
-    return unique_rows, card_fetch_count
+    return unique_rows, card_fetch_count, known_url_skip_count
 
 
 def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger, now_utc: datetime) -> tuple[bool, int, int]:
@@ -1323,6 +1401,18 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
     if not should_refresh_acra(conn, now_utc):
         backfill_acra_forecast_from_local_dump(conn, logger)
         return False, current_total, 0
+
+    known_urls = {
+        str(row[0] or "").strip()
+        for row in conn.execute(
+            f'''
+            SELECT DISTINCT "issuer_url"
+            FROM "{config.ACRA_TABLE_NAME}"
+            WHERE TRIM(COALESCE("issuer_url", '')) <> ''
+            '''
+        ).fetchall()
+        if str(row[0] or "").strip()
+    }
 
     inn_cache_by_url = {
         row[0]: row[1]
@@ -1336,7 +1426,7 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
     }
 
     try:
-        unique_rows, card_requests = collect_acra_rows_via_playwright(logger, inn_cache_by_url)
+        unique_rows, card_requests, known_skipped = collect_acra_rows_via_playwright(logger, known_urls, inn_cache_by_url)
 
         loaded_at = now_utc.isoformat()
         changed_rows = 0
@@ -1376,11 +1466,15 @@ def refresh_acra_data_if_needed(conn: sqlite3.Connection, logger: logging.Logger
     backfill_acra_forecast_from_local_dump(conn, logger)
     set_meta_value(conn, "acra_last_refresh_utc", now_utc.isoformat())
     set_meta_value(conn, "acra_last_rows_count", str(len(unique_rows)))
+    new_urls_count = len([url for url in unique_rows if url not in known_urls])
     logger.info(
-        "АКРА обновление завершено. В списке=%s, вставлено/обновлено=%s, карточек запрошено=%s",
+        "АКРА обновление завершено. issuer_url в списке=%s, known_urls=%s, новых=%s, вставлено/обновлено=%s, карточек запрошено=%s, карточек пропущено_known=%s",
         len(unique_rows),
+        len(known_urls),
+        new_urls_count,
         changed_rows,
         card_requests,
+        known_skipped,
     )
 
     total = conn.execute(f'SELECT COUNT(*) FROM "{config.ACRA_TABLE_NAME}"').fetchone()
@@ -3856,7 +3950,6 @@ def ensure_smartlab_table(conn: sqlite3.Connection) -> None:
 
 
 def parse_smartlab_page_fields(raw_html: str) -> dict[str, str]:
-    soup = BeautifulSoup(raw_html, "lxml")
     parsed = {
         "Котировка облигации, %": "",
         "Изм за день, %": "",
@@ -3867,12 +3960,19 @@ def parse_smartlab_page_fields(raw_html: str) -> dict[str, str]:
         "Длительность купона, дней": "",
     }
 
-    for row in soup.select("div.quotes-simple-table__row"):
-        items = row.select("div.quotes-simple-table__item")
+    try:
+        root = etree.HTML(raw_html)
+    except Exception:
+        return parsed
+    if root is None:
+        return parsed
+
+    for row in root.xpath('//div[contains(@class, "quotes-simple-table__row")]'):
+        items = row.xpath('./div[contains(@class, "quotes-simple-table__item")]')
         if len(items) < 2:
             continue
-        label = " ".join(items[0].stripped_strings)
-        value = " ".join(items[1].stripped_strings)
+        label = " ".join(part.strip() for part in items[0].itertext() if str(part).strip())
+        value = " ".join(part.strip() for part in items[1].itertext() if str(part).strip())
         normalized = _normalize_label(label)
         if normalized.startswith("котировка облигации"):
             parsed["Котировка облигации, %"] = value
@@ -3906,21 +4006,26 @@ def get_stale_smartlab_secids(conn: sqlite3.Connection, secids: list[str], now_u
     if not secids:
         return []
 
-    stale: list[str] = []
-    chunk_size = 500
-    for start in range(0, len(secids), chunk_size):
-        chunk = secids[start : start + chunk_size]
-        placeholders = ", ".join(["?"] * len(chunk))
-        rows = conn.execute(
-            f'SELECT "SECID", "updated_at_utc" FROM "{config.SMARTLAB_TABLE_NAME}" WHERE "SECID" IN ({placeholders})',
-            tuple(chunk),
-        ).fetchall()
-        actual = {str(row[0]): str(row[1] or "") for row in rows}
-        for secid in chunk:
-            if _is_smartlab_stale(actual.get(secid), now_utc):
-                stale.append(secid)
-
-    return stale
+    threshold_iso = (now_utc - timedelta(hours=config.SMARTLAB_CACHE_TTL_HOURS)).isoformat()
+    conn.execute('DROP TABLE IF EXISTS "tmp_smartlab_secids"')
+    conn.execute('CREATE TEMP TABLE "tmp_smartlab_secids" ("secid" TEXT PRIMARY KEY)')
+    conn.executemany(
+        'INSERT OR IGNORE INTO "tmp_smartlab_secids" ("secid") VALUES (?)',
+        [(secid,) for secid in secids if secid],
+    )
+    rows = conn.execute(
+        f"""
+        SELECT t."secid"
+        FROM "tmp_smartlab_secids" t
+        LEFT JOIN "{config.SMARTLAB_TABLE_NAME}" s
+            ON s."SECID" = t."secid"
+        WHERE s."SECID" IS NULL
+           OR TRIM(COALESCE(s."updated_at_utc", '')) = ''
+           OR s."updated_at_utc" < ?
+        """,
+        (threshold_iso,),
+    ).fetchall()
+    return [str(row[0]) for row in rows if row and row[0]]
 
 
 def fetch_smartlab_payload(secid: str) -> dict[str, str]:
@@ -4451,38 +4556,78 @@ def _normalize_isin(raw_value: object) -> str | None:
     return cleaned or None
 
 
-def ensure_dropped_bonds_excel() -> Path:
-    dropped_path = config.BASE_DIR / getattr(config, "DROPPED_BONDS_XLSX_FILENAME", "DroppedBonds.xlsx")
-    if dropped_path.exists():
-        return dropped_path
+def ensure_bond_overrides_excel() -> Path:
+    overrides_path = config.BASE_DIR / getattr(config, "BOND_OVERRIDES_XLSX_FILENAME", "BondOverrides.xlsx")
+    if overrides_path.exists():
+        return overrides_path
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "DroppedBonds"
-    ws.append(["ISIN", "Комментарий"])
+    ws.title = "BondOverrides"
+    headers = ["ISIN", "Enabled", "Drop", "Квал", "Суборд", "CouponFormulaOverride"]
+    ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = "A1:B1"
-    ws.column_dimensions["A"].width = 18
-    ws.column_dimensions["B"].width = 60
-    wb.save(dropped_path)
-    return dropped_path
+    ws.auto_filter.ref = "A1:F1"
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 12
+    ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["F"].width = 54
+
+    bool_validation = DataValidation(type="list", formula1='"✅,❌"', allow_blank=True)
+    ws.add_data_validation(bool_validation)
+    for col in ("B", "C", "D", "E"):
+        bool_validation.add(f"{col}2:{col}5000")
+
+    wb.save(overrides_path)
+    return overrides_path
 
 
-def load_dropped_bonds_isins(logger: logging.Logger) -> set[str]:
-    dropped_path = ensure_dropped_bonds_excel()
-    wb = load_workbook(dropped_path, data_only=True)
+def _parse_override_bool(raw_value: object) -> bool | None:
+    if raw_value is None:
+        return None
+    value = str(raw_value).strip().casefold()
+    if not value:
+        return None
+    if value in {"✅", "1", "true", "да", "yes", "y"}:
+        return True
+    if value in {"❌", "0", "false", "нет", "no", "n"}:
+        return False
+    return None
+
+
+def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, object]], int, int]:
+    overrides_path = ensure_bond_overrides_excel()
+    wb = load_workbook(overrides_path, read_only=True, data_only=True)
     try:
-        ws = wb["DroppedBonds"] if "DroppedBonds" in wb.sheetnames else wb.active
-        dropped_isins: set[str] = set()
-        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
-            normalized = _normalize_isin(row[0])
-            if normalized:
-                dropped_isins.add(normalized)
+        ws = wb["BondOverrides"] if "BondOverrides" in wb.sheetnames else wb.active
+        overrides: dict[str, dict[str, object]] = {}
+        total_rows = 0
+        enabled_rows = 0
+        for row in ws.iter_rows(min_row=2, max_col=6, values_only=True):
+            isin_norm = _normalize_isin(row[0])
+            if not isin_norm:
+                continue
+            total_rows += 1
+            enabled = _parse_override_bool(row[1])
+            if enabled is not True:
+                continue
+            enabled_rows += 1
+            coupon_formula_override = str(row[5] or "").strip()
+            overrides[isin_norm] = {
+                "enabled": True,
+                "drop": _parse_override_bool(row[2]),
+                "kval": _parse_override_bool(row[3]),
+                "subord": _parse_override_bool(row[4]),
+                "coupon_formula_override": coupon_formula_override or None,
+            }
     finally:
         wb.close()
-    return dropped_isins
+
+    return overrides, total_rows, enabled_rows
 
 
 def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
@@ -4495,28 +4640,11 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
     ytm_linker_count = 0
     ytm_other_count = 0
     logger = logging.getLogger("bonds_main")
-    dropped_isins = load_dropped_bonds_isins(logger)
-    excluded_from_screener = 0
-
-    conn.execute('DROP TABLE IF EXISTS "tmp_dropped_bonds"')
-    conn.execute('CREATE TEMP TABLE "tmp_dropped_bonds" ("isin" TEXT PRIMARY KEY)')
-    if dropped_isins:
-        conn.executemany(
-            'INSERT OR IGNORE INTO "tmp_dropped_bonds" ("isin") VALUES (?)',
-            [(isin,) for isin in sorted(dropped_isins)],
-        )
-        for source_table, _, _ in SCREENER_SOURCE_TABLES:
-            excluded_from_screener += int(
-                conn.execute(
-                    f'''
-                    SELECT COUNT(*)
-                    FROM "{source_table}" src
-                    INNER JOIN "tmp_dropped_bonds" tmp
-                        ON REPLACE(UPPER(TRIM(COALESCE(src."ISIN", ''))), ' ', '') = tmp."isin"
-                    WHERE TRIM(COALESCE(src."ISIN", '')) <> ''
-                    '''
-                ).fetchone()[0]
-            )
+    overrides_by_isin, overrides_total_rows, overrides_enabled_rows = load_bond_overrides(logger)
+    overrides_drop_applied_count = 0
+    overrides_kval_applied_count = 0
+    overrides_subord_applied_count = 0
+    overrides_formula_applied_count = 0
 
     cbr_data = get_cbr_reference_data(conn, logger, datetime.now(timezone.utc))
     for source_table, source_list, score in SCREENER_SOURCE_TABLES:
@@ -4532,16 +4660,36 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                 src."FACEVALUE", src."FACEUNIT", src."Коэф. Ликвидности (max=100)", src."Corpbonds_Цена последняя",
                 src."Цена Доход", src."Smartlab_Котировка облигации, %", src."PRICE"
             FROM "{source_table}" src
-            LEFT JOIN "tmp_dropped_bonds" tmp
-                ON REPLACE(UPPER(TRIM(COALESCE(src."ISIN", ''))), ' ', '') = tmp."isin"
             WHERE TRIM(COALESCE(src."ISIN", '')) <> ''
-              AND tmp."isin" IS NULL
             '''
         ).fetchall()
-        totals[source_list] = len(rows)
 
         facevalues_by_secid: dict[str, float] = {}
         secids_with_amort: set[str] = set()
+        filtered_rows: list[tuple[object, ...]] = []
+        for row in rows:
+            row_values = list(row)
+            isin_norm = _normalize_isin(row_values[1])
+            override = overrides_by_isin.get(isin_norm or "") if isin_norm else None
+            if override and override.get("enabled") is True:
+                if override.get("drop") is True:
+                    overrides_drop_applied_count += 1
+                    continue
+                if override.get("kval") is not None:
+                    row_values[5] = 1 if bool(override.get("kval")) else 0
+                    row_values[6] = ""
+                    overrides_kval_applied_count += 1
+                if override.get("subord") is not None:
+                    row_values[7] = "Да" if bool(override.get("subord")) else "Нет"
+                    overrides_subord_applied_count += 1
+                if override.get("coupon_formula_override"):
+                    row_values[21] = str(override.get("coupon_formula_override") or "").strip()
+                    overrides_formula_applied_count += 1
+            filtered_rows.append(tuple(row_values))
+
+        rows = filtered_rows
+        totals[source_list] = len(rows)
+
         for row in rows:
             secid = str(row[0] or "").strip()
             facevalue_value = _parse_decimal_value(row[22])
@@ -4728,7 +4876,15 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
             )
 
     conn.commit()
-    logger.info("DroppedBonds: loaded=%s, excluded_from_screener=%s", len(dropped_isins), excluded_from_screener)
+    logger.info(
+        "BondOverrides: total_rows=%s, enabled_rows=%s, drop_applied=%s, kval_applied=%s, subord_applied=%s, formula_applied=%s",
+        overrides_total_rows,
+        overrides_enabled_rows,
+        overrides_drop_applied_count,
+        overrides_kval_applied_count,
+        overrides_subord_applied_count,
+        overrides_formula_applied_count,
+    )
     total = conn.execute(f'SELECT COUNT(*) FROM "{SCREENER_TABLE_NAME}"').fetchone()[0]
     return {
         "green": totals["Green"],
