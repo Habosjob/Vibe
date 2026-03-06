@@ -325,10 +325,11 @@ SCREENER_TABLE_NAME = "Screener"
 # По умолчанию: Screener.xlsx.
 SCREENER_XLSX_FILENAME = "Screener.xlsx"
 
-# Имя Excel-витрины ручного blacklist ISIN для исключения из Screener.
-# Внутри лист DroppedBonds с колонками: ISIN, Комментарий.
-# По умолчанию: DroppedBonds.xlsx.
-DROPPED_BONDS_XLSX_FILENAME = "DroppedBonds.xlsx"
+# Имя Excel-файла ручных переопределений по облигациям для Screener.
+# Внутри лист BondOverrides с колонками:
+# ISIN, Enabled, Drop, Квал, Суборд, CouponFormulaOverride.
+# По умолчанию: BondOverrides.xlsx.
+BOND_OVERRIDES_XLSX_FILENAME = "BondOverrides.xlsx"
 
 # Сортировать ли строки в Excel-витрине Screener по AmortStarrtDate.
 # Если True — в листах Green/Yellow сначала идут бумаги с ближайшей датой
