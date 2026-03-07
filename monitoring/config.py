@@ -97,14 +97,13 @@ EDISCLOSURE_FULL_SCAN_EVERY_N_RUNS = 20
 # Если последний full scan старше N дней, делаем полный обход.
 EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS = 7
 
-# Максимальное число worker-потоков для сбора e-disclosure.
-EDISCLOSURE_MAX_WORKERS = 12
+# Фиксированное число worker-потоков для stage_reports_fetch_parallel.
+# Значения: int >= 1. По умолчанию: 4.
+EDISCLOSURE_FETCH_WORKERS = 4
 
-# Минимальное число worker-потоков при деградации/троттлинге.
-EDISCLOSURE_MIN_WORKERS = 4
-
-# Включить авто-регулирование уровня параллелизма.
-EDISCLOSURE_ADAPTIVE_CONCURRENCY = True
+# Фиксированный лимит только для тяжелого endpoint files.aspx.
+# Значения: int >= 1. По умолчанию: 2.
+EDISCLOSURE_FILES_SEMAPHORE = 2
 
 # Максимум кандидатов компании, для которых проверяется карточка при неоднозначном поиске.
 EDISCLOSURE_MAX_CARD_CHECKS = 2
@@ -117,12 +116,11 @@ EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE = 3
 
 # Символический fast-path jitter в миллисекундах (обычный успешный запрос).
 EDISCLOSURE_FAST_JITTER_MIN_MS = 0
-EDISCLOSURE_FAST_JITTER_MAX_MS = 10
+EDISCLOSURE_FAST_JITTER_MAX_MS = 0
 
-# Случайная задержка при инициализации thread-local клиента (мс).
-# Нужна для сглаживания всплеска параллельных warmup-запросов к e-disclosure.
-# Значения: int >= 0. По умолчанию: 250.
-EDISCLOSURE_INIT_STAGGER_MAX_MS = 250
+# Deprecated: историческая настройка stagger при инициализации клиента.
+# Не участвует в runtime execution path.
+EDISCLOSURE_INIT_STAGGER_MAX_MS = 0
 
 # Выполнять warmup-запросы к e-disclosure при создании thread-local клиента.
 # Значения: bool. По умолчанию: False.
@@ -130,8 +128,8 @@ EDISCLOSURE_INIT_STAGGER_MAX_MS = 250
 EDISCLOSURE_WARMUP_ENABLED = False
 
 # Делать один global warmup в начале stage_reports, а не warmup на каждый поток.
-# Значения: bool. По умолчанию: True.
-EDISCLOSURE_GLOBAL_WARMUP_ONCE = True
+# Значения: bool. По умолчанию: False.
+EDISCLOSURE_GLOBAL_WARMUP_ONCE = False
 
 # Считать warmup обязательным.
 # Значения: bool. По умолчанию: False.
@@ -140,40 +138,25 @@ EDISCLOSURE_GLOBAL_WARMUP_ONCE = True
 EDISCLOSURE_WARMUP_STRICT = False
 
 # Jitter только для retry-path (429/403/5xx/timeout).
-EDISCLOSURE_RETRY_JITTER_MIN_MS = 150
-EDISCLOSURE_RETRY_JITTER_MAX_MS = 500
+EDISCLOSURE_RETRY_JITTER_MIN_MS = 100
+EDISCLOSURE_RETRY_JITTER_MAX_MS = 300
 
-# Лимит параллельных HTTP-запросов к домену e-disclosure (не зависит от max_workers).
-# Значения: int >= 1. По умолчанию: 4.
-EDISCLOSURE_MAX_INFLIGHT_REQUESTS = 4
-
-# Отдельный более строгий лимит параллельных запросов к files.aspx.
-# Значения: int >= 1. По умолчанию: 2.
-EDISCLOSURE_MAX_INFLIGHT_FILES_REQUESTS = 2
-
-# Минимальный интервал между запросами к e-disclosure (мс).
-# Значения: int >= 0. По умолчанию: 120.
-EDISCLOSURE_MIN_REQUEST_INTERVAL_MS = 120
-
-# Размер burst для token bucket лимитера e-disclosure.
-# Значения: int >= 1. По умолчанию: 4.
-EDISCLOSURE_BURST_SIZE = 4
-
-# Размер скользящего окна adaptive-control (по завершенным эмитентам).
-# Значения: int >= 5. По умолчанию: 20.
-EDISCLOSURE_ADAPTIVE_WINDOW = 20
-
-# На сколько шагов уменьшать inflight после 429/throttling окна.
-# Значения: int >= 1. По умолчанию: 2.
-EDISCLOSURE_DECAY_ON_429 = 2
-
-# На сколько повышать inflight при стабильной работе.
-# Значения: int >= 1. По умолчанию: 1.
-EDISCLOSURE_GROWTH_STEP = 1
-
-# Сколько стабильных окон подряд нужно для роста inflight.
-# Значения: int >= 1. По умолчанию: 2.
-EDISCLOSURE_STABLE_WINDOWS_TO_GROW = 2
+# -----------------------------
+# Deprecated runtime-throttling knobs
+# -----------------------------
+# Сохраняем для обратной совместимости конфиг-файла,
+# но эти параметры больше не участвуют в stage_reports execution path.
+EDISCLOSURE_MAX_INFLIGHT_REQUESTS = 0
+EDISCLOSURE_MAX_INFLIGHT_FILES_REQUESTS = 0
+EDISCLOSURE_MIN_REQUEST_INTERVAL_MS = 0
+EDISCLOSURE_BURST_SIZE = 0
+EDISCLOSURE_ADAPTIVE_WINDOW = 0
+EDISCLOSURE_DECAY_ON_429 = 0
+EDISCLOSURE_GROWTH_STEP = 0
+EDISCLOSURE_STABLE_WINDOWS_TO_GROW = 0
+EDISCLOSURE_MIN_WORKERS = 0
+EDISCLOSURE_MAX_WORKERS = 0
+EDISCLOSURE_ADAPTIVE_CONCURRENCY = False
 
 # TTL кэша событий компании (часы).
 EDISCLOSURE_EVENTS_TTL_HOURS = 6
