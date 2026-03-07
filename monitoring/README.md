@@ -26,7 +26,7 @@ python monitoring/main.py
 Монолит содержит в одном файле:
 1. bootstrap директорий и логгера;
 2. bootstrap SQLite и операции идемпотентной записи;
-3. web-flow клиент e-disclosure (cookies init, company search, card, reports + ttl cache);
+3. ускоренный web-flow клиент e-disclosure (ThreadPool workers, connection pooling, incremental report_state, batch DB flush, ttl cache + safe fallback);
 4. сравнение snapshot рейтингов (`Изменен рейтинг/прогноз/отозван`);
 5. загрузчик портфеля (поиск по маскам + устойчивый парсинг листов);
 6. сбор новостей Smartlab в 2 стратегии (ticker → fallback tag);
@@ -37,6 +37,7 @@ python monitoring/main.py
 - пути,
 - timeout/retry/backoff,
 - ttl кэшей,
+- параметры параллельности e-disclosure (workers, preview rows, card checks, jitter),
 - порог stale alert,
 - оформление Excel.
 
