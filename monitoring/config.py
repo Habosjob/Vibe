@@ -108,22 +108,44 @@ EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS = 14
 
 # Пределы и дефолты для worker pool e-disclosure.
 # На старте используется DEFAULT, затем AUTOTUNE может выбрать значение в [MIN, MAX].
-EDISCLOSURE_FETCH_WORKERS_MIN = 8
-EDISCLOSURE_FETCH_WORKERS_DEFAULT = 12
-EDISCLOSURE_FETCH_WORKERS_MAX = 24
+EDISCLOSURE_FETCH_WORKERS_MIN = 16
+EDISCLOSURE_FETCH_WORKERS_DEFAULT = 32
+EDISCLOSURE_FETCH_WORKERS_MAX = 64
 
 # Пределы и дефолты semaphore для тяжелого endpoint files.aspx.
 # На старте используется DEFAULT, затем AUTOTUNE может выбрать значение в [MIN, MAX].
-EDISCLOSURE_FILES_SEMAPHORE_MIN = 4
-EDISCLOSURE_FILES_SEMAPHORE_DEFAULT = 6
-EDISCLOSURE_FILES_SEMAPHORE_MAX = 10
+EDISCLOSURE_FILES_SEMAPHORE_MIN = 8
+EDISCLOSURE_FILES_SEMAPHORE_DEFAULT = 14
+EDISCLOSURE_FILES_SEMAPHORE_MAX = 24
 
 # Автотюнинг параллельности e-disclosure.
 # True: подбираем стабильные workers/files_semaphore по телеметрии и сохраняем в БД meta.
 EDISCLOSURE_AUTOTUNE_ENABLED = True
 
+# Агрессивный старт (cold run) для stage_reports.
+# True: если в БД еще нет autotune-мета, запускать сразу с MAX-значений,
+# чтобы не тратить несколько прогонов на постепенный разгон.
+# False: использовать DEFAULT.
+EDISCLOSURE_AUTOTUNE_COLD_START_MAX = True
+
 # Порог «массовых» 429/timeout (доля от общего числа запросов), выше которого autotune снижает параллельность.
 EDISCLOSURE_AUTOTUNE_ERROR_RATE_THRESHOLD = 0.06
+
+# Нижний порог ошибок для ускоренного scale-up.
+# Если фактическая доля 429/timeout <= threshold, autotune увеличивает workers/files быстрее.
+EDISCLOSURE_AUTOTUNE_FAST_GROW_ERROR_RATE_THRESHOLD = 0.015
+
+# Шаг уменьшения workers/files при перегрузе (ошибки выше ERROR_RATE_THRESHOLD).
+# Значения: int >= 1. По умолчанию: 6.
+EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STEP = 6
+
+# Шаг ускоренного увеличения workers/files при стабильном канале.
+# Значения: int >= 1. По умолчанию: 4.
+EDISCLOSURE_AUTOTUNE_FAST_GROW_STEP = 4
+
+# Базовый шаг увеличения workers/files при умеренной стабильности.
+# Значения: int >= 1. По умолчанию: 2.
+EDISCLOSURE_AUTOTUNE_GROW_STEP = 2
 
 # Максимум кандидатов компании, для которых проверяется карточка при неоднозначном поиске.
 EDISCLOSURE_MAX_CARD_CHECKS = 2

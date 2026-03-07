@@ -1434,10 +1434,24 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
 def _read_autotune_meta(conn: sqlite3.Connection) -> tuple[int, int]:
     workers_raw = conn.execute("SELECT value FROM meta WHERE key='edisclosure_autotune_workers'").fetchone()
     files_raw = conn.execute("SELECT value FROM meta WHERE key='edisclosure_autotune_files_semaphore'").fetchone()
-    workers = int((workers_raw or [str(config.EDISCLOSURE_FETCH_WORKERS_DEFAULT)])[0])
-    files = int((files_raw or [str(config.EDISCLOSURE_FILES_SEMAPHORE_DEFAULT)])[0])
+
+    has_meta = bool(workers_raw and files_raw)
+    if has_meta:
+        workers = int((workers_raw or [str(config.EDISCLOSURE_FETCH_WORKERS_DEFAULT)])[0])
+        files = int((files_raw or [str(config.EDISCLOSURE_FILES_SEMAPHORE_DEFAULT)])[0])
+    elif config.EDISCLOSURE_AUTOTUNE_COLD_START_MAX:
+        workers = int(config.EDISCLOSURE_FETCH_WORKERS_MAX)
+        files = int(config.EDISCLOSURE_FILES_SEMAPHORE_MAX)
+    else:
+        workers = int(config.EDISCLOSURE_FETCH_WORKERS_DEFAULT)
+        files = int(config.EDISCLOSURE_FILES_SEMAPHORE_DEFAULT)
+
     workers = max(config.EDISCLOSURE_FETCH_WORKERS_MIN, min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers))
     files = max(config.EDISCLOSURE_FILES_SEMAPHORE_MIN, min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files))
+
+    if not has_meta:
+        _save_autotune_meta(conn, workers, files)
+
     return workers, files
 
 
@@ -1453,13 +1467,25 @@ def _autotune_concurrency(conn: sqlite3.Connection, logger: logging.Logger, work
     with runtime_state.lock:
         total_requests = max(1, runtime_state.total_requests)
         err_rate = (runtime_state.status_429 + runtime_state.timeout_count) / total_requests
+
     if err_rate > config.EDISCLOSURE_AUTOTUNE_ERROR_RATE_THRESHOLD:
-        workers = max(config.EDISCLOSURE_FETCH_WORKERS_MIN, workers - 2)
-        files = max(config.EDISCLOSURE_FILES_SEMAPHORE_MIN, files - 1)
+        workers = max(config.EDISCLOSURE_FETCH_WORKERS_MIN, workers - max(1, int(config.EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STEP)))
+        files = max(config.EDISCLOSURE_FILES_SEMAPHORE_MIN, files - max(1, int(config.EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STEP // 2 or 1)))
+    elif err_rate <= config.EDISCLOSURE_AUTOTUNE_FAST_GROW_ERROR_RATE_THRESHOLD:
+        workers = min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers + max(1, int(config.EDISCLOSURE_AUTOTUNE_FAST_GROW_STEP)))
+        files = min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files + max(1, int(config.EDISCLOSURE_AUTOTUNE_FAST_GROW_STEP // 2 or 1)))
     else:
-        workers = min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers + 1)
-        files = min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files + (1 if workers >= 14 else 0))
-    logger.info("autotune chosen workers=%s files_semaphore=%s err_rate=%.4f", workers, files, err_rate)
+        workers = min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers + max(1, int(config.EDISCLOSURE_AUTOTUNE_GROW_STEP)))
+        files = min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files + max(1, int(config.EDISCLOSURE_AUTOTUNE_GROW_STEP // 2 or 1)))
+
+    logger.info(
+        "autotune chosen workers=%s files_semaphore=%s err_rate=%.4f thresholds=(fast<=%.4f, down>%.4f)",
+        workers,
+        files,
+        err_rate,
+        config.EDISCLOSURE_AUTOTUNE_FAST_GROW_ERROR_RATE_THRESHOLD,
+        config.EDISCLOSURE_AUTOTUNE_ERROR_RATE_THRESHOLD,
+    )
     _save_autotune_meta(conn, workers, files)
     return workers, files
 
