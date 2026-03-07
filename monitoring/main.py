@@ -280,6 +280,14 @@ CREATE TABLE IF NOT EXISTS emitents_snapshot (
     raex_rate TEXT,
     snapshot_at TEXT
 );
+CREATE TABLE IF NOT EXISTS ratings_monitoring_snapshot (
+    inn TEXT,
+    source TEXT,
+    rating TEXT,
+    assigned_date TEXT,
+    loaded_at TEXT,
+    PRIMARY KEY (inn, source)
+);
 CREATE TABLE IF NOT EXISTS news_events (
     event_hash TEXT PRIMARY KEY,
     instrument_type TEXT,
@@ -771,6 +779,82 @@ def classify_rating_change(old: str, new: str) -> str | None:
     return "Изменен рейтинг"
 
 
+def _normalize_rating_row_inn(row: sqlite3.Row, source: str) -> str:
+    if source == "NKR":
+        return sanitize_str(row["tin"]) if "tin" in row.keys() else ""
+    return sanitize_str(row["inn"]) if "inn" in row.keys() else ""
+
+
+def _pick_rating_value(row: sqlite3.Row) -> str:
+    keys = ("rating", "value", "rate", "rating_value", "assigned_rating")
+    for key in keys:
+        if key in row.keys():
+            value = sanitize_str(row[key])
+            if value:
+                return value
+    return ""
+
+
+def _pick_rating_date(row: sqlite3.Row) -> str:
+    keys = (
+        "rating_date",
+        "assigned_date",
+        "date_assigned",
+        "date",
+        "published_at",
+        "pub_date",
+        "created_at",
+    )
+    for key in keys:
+        if key in row.keys():
+            iso = to_iso_date_str(row[key])
+            if iso:
+                return iso
+    return ""
+
+
+def load_ratings_snapshot_from_db(logger: logging.Logger) -> dict[tuple[str, str], dict[str, str]]:
+    db_path = Path(config.RATINGS_DB_FILE)
+    if not db_path.exists():
+        logger.warning("Ratings DB not found: %s", db_path)
+        return {}
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    result: dict[tuple[str, str], dict[str, str]] = {}
+    try:
+        for source, table in config.RATINGS_SOURCE_TABLES.items():
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not exists:
+                logger.warning("Ratings table not found in DB: %s", table)
+                continue
+
+            rows = conn.execute(f'SELECT * FROM "{table}"').fetchall()
+            for row in rows:
+                inn = _normalize_rating_row_inn(row, source)
+                if not inn:
+                    continue
+                rating = _pick_rating_value(row)
+                if not rating:
+                    continue
+                assigned_date = _pick_rating_date(row)
+                key = (inn, source)
+                prev = result.get(key)
+                if not prev or assigned_date >= prev.get("assigned_date", ""):
+                    result[key] = {
+                        "inn": inn,
+                        "source": source,
+                        "rating": rating,
+                        "assigned_date": assigned_date,
+                    }
+    finally:
+        conn.close()
+    return result
+
+
 # -----------------------------
 # Portfolio loader
 # -----------------------------
@@ -1030,6 +1114,7 @@ def export_portfolio(
     latest_event_by_inn: dict[str, dict[str, str]],
     latest_news_by_key: dict[tuple[str, str], dict[str, str]],
     news_rows: list[dict[str, str]],
+    report_rows: list[dict[str, str]],
 ) -> None:
     ensure_portfolio_workbook(config.PORTFOLIO_XLSX, logging.getLogger("monitoring"))
     wb = load_workbook(config.PORTFOLIO_XLSX)
@@ -1098,7 +1183,50 @@ def export_portfolio(
 
     ws_news = wb.create_sheet("News")
     ws_news.append(["Тип", "ISIN / Тикер", "ИНН", "Наименование", "Дата новости", "Заголовок", "Ссылка", "Источник", "Новое", "_is_new"])
-    for row in sorted(news_rows, key=lambda x: x.get("news_date", ""), reverse=True):
+
+    instruments_by_inn: dict[str, list[dict[str, str]]] = {}
+    for item in portfolio_items:
+        inn = sanitize_str(item.get("inn", ""))
+        if not inn:
+            continue
+        instruments_by_inn.setdefault(inn, []).append(item)
+
+    merged_rows: list[dict[str, str]] = []
+    for row in news_rows:
+        merged_rows.append(
+            {
+                "instrument_type": sanitize_str(row.get("instrument_type", "")),
+                "instrument_code": sanitize_str(row.get("instrument_code", "")),
+                "inn": sanitize_str(row.get("inn", "")),
+                "company_name": sanitize_str(row.get("company_name", "")),
+                "news_date": sanitize_str(row.get("news_date", "")),
+                "title": sanitize_str(row.get("title", "")),
+                "url": sanitize_str(row.get("url", "")),
+                "source": sanitize_str(row.get("source", "Smartlab")) or "Smartlab",
+                "is_new": "1" if row.get("is_new") else "",
+            }
+        )
+
+    for row in report_rows:
+        inn = sanitize_str(row.get("inn", ""))
+        linked_items = instruments_by_inn.get(inn) or [{"instrument_type": "", "instrument_code": ""}]
+        for linked_item in linked_items:
+            merged_rows.append(
+                {
+                    "instrument_type": sanitize_str(linked_item.get("instrument_type", "")),
+                    "instrument_code": sanitize_str(linked_item.get("instrument_code", "")),
+                    "inn": inn,
+                    "company_name": sanitize_str(row.get("company_name", "")),
+                    "news_date": sanitize_str(row.get("event_date", "")),
+                    "title": sanitize_str(row.get("event_type", "")),
+                    "url": sanitize_str(row.get("event_url", "")),
+                    "source": sanitize_str(row.get("source", "")),
+                    "is_new": "1" if row.get("is_new") else "",
+                }
+            )
+
+    merged_rows.sort(key=lambda x: x.get("news_date", ""), reverse=True)
+    for row in merged_rows:
         ws_news.append([
             row.get("instrument_type", ""),
             row.get("instrument_code", ""),
@@ -1107,7 +1235,7 @@ def export_portfolio(
             row.get("news_date", ""),
             row.get("title", ""),
             row.get("url", ""),
-            row.get("source", "Smartlab"),
+            row.get("source", ""),
             "✓ НОВОЕ" if row.get("is_new") else "",
             "1" if row.get("is_new") else "",
         ])
@@ -1761,8 +1889,29 @@ def run_monitoring() -> None:
     print("Этап 3: События по рейтингам")
 
     def stage_ratings() -> None:
-        prev_rows = conn.execute("SELECT * FROM emitents_snapshot").fetchall()
-        prev = {r["inn"]: dict(r) for r in prev_rows if r["inn"]}
+        now = now_iso()
+
+        conn.execute("DELETE FROM emitents_snapshot")
+        conn.executemany(
+            """
+            INSERT INTO emitents_snapshot (inn, company_name, scoring, scoring_date, nra_rate, acra_rate, nkr_rate, raex_rate, snapshot_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (row.inn, row.company_name, row.scoring, row.scoring_date, row.nra_rate, row.acra_rate, row.nkr_rate, row.raex_rate, now)
+                for row in emitents
+            ],
+        )
+        save_emitents_snapshot_excel(emitents)
+
+        if not bool(config.RATINGS_MONITORING_ENABLED):
+            conn.commit()
+            return
+
+        ratings_snapshot = load_ratings_snapshot_from_db(logger)
+        prev_rows = conn.execute("SELECT inn, source, rating, assigned_date FROM ratings_monitoring_snapshot").fetchall()
+        prev = {(sanitize_str(r["inn"]), sanitize_str(r["source"])): dict(r) for r in prev_rows if sanitize_str(r["inn"]) and sanitize_str(r["source"])}
+
         existing_hashes = {
             r[0]
             for r in conn.execute(
@@ -1772,38 +1921,43 @@ def run_monitoring() -> None:
 
         update_rows: list[tuple[str, str]] = []
         insert_rows: list[tuple[str, str, str, str, str, str, str, str, str, str, str]] = []
-        now = now_iso()
+        emitent_by_inn = {sanitize_str(e.inn): e for e in emitents if sanitize_str(e.inn)}
 
-        for row in tqdm(emitents, desc="Рейтинговые изменения", position=0):
-            old = prev.get(row.inn)
-            if not old:
+        for (inn, source), current in tqdm(ratings_snapshot.items(), desc="Рейтинговые изменения", position=0):
+            old = prev.get((inn, source), {})
+            old_rating = sanitize_str(old.get("rating", ""))
+            new_rating = sanitize_str(current.get("rating", ""))
+            event_type = classify_rating_change(old_rating, new_rating)
+            if not event_type:
                 continue
-            for field, source in [("nra_rate", "NRA"), ("acra_rate", "ACRA"), ("nkr_rate", "NKR"), ("raex_rate", "RAEX")]:
-                event_type = classify_rating_change(old.get(field, ""), getattr(row, field))
-                if not event_type:
-                    continue
-                event_date = row.scoring_date or today_iso()
-                event_hash = md5_short(f"rate_{row.inn}_{field}_{old.get(field,'')}_{getattr(row, field)}_{event_date}", 16)
-                if event_hash in existing_hashes:
-                    update_rows.append((now, event_hash))
-                else:
-                    insert_rows.append(
-                        (
-                            event_hash,
-                            row.inn,
-                            row.company_name,
-                            row.scoring_date,
-                            to_iso_date_str(event_date) or today_iso(),
-                            event_type,
-                            "",
-                            source,
-                            json.dumps({"field": field, "old": old.get(field, ""), "new": getattr(row, field)}, ensure_ascii=False),
-                            now,
-                            now,
-                        )
-                    )
-                    existing_hashes.add(event_hash)
-                    all_new_event_hashes.add(event_hash)
+
+            emitent = emitent_by_inn.get(inn)
+            company_name = emitent.company_name if emitent else ""
+            scoring_date = emitent.scoring_date if emitent else ""
+            event_date = current.get("assigned_date") or scoring_date or today_iso()
+            event_hash = md5_short(f"rate_db_{inn}_{source}_{old_rating}_{new_rating}_{event_date}", 16)
+
+            if event_hash in existing_hashes:
+                update_rows.append((now, event_hash))
+                continue
+
+            insert_rows.append(
+                (
+                    event_hash,
+                    inn,
+                    company_name,
+                    scoring_date,
+                    to_iso_date_str(event_date) or today_iso(),
+                    event_type,
+                    "",
+                    source,
+                    json.dumps({"old": old_rating, "new": new_rating, "assigned_date": current.get("assigned_date", "")}, ensure_ascii=False),
+                    now,
+                    now,
+                )
+            )
+            existing_hashes.add(event_hash)
+            all_new_event_hashes.add(event_hash)
 
         if update_rows:
             conn.executemany("UPDATE report_events SET last_seen_at = ? WHERE event_hash = ?", update_rows)
@@ -1817,19 +1971,19 @@ def run_monitoring() -> None:
                 insert_rows,
             )
 
-        conn.execute("DELETE FROM emitents_snapshot")
-        conn.executemany(
-            """
-            INSERT INTO emitents_snapshot (inn, company_name, scoring, scoring_date, nra_rate, acra_rate, nkr_rate, raex_rate, snapshot_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (row.inn, row.company_name, row.scoring, row.scoring_date, row.nra_rate, row.acra_rate, row.nkr_rate, row.raex_rate, now)
-                for row in emitents
-            ],
-        )
+        conn.execute("DELETE FROM ratings_monitoring_snapshot")
+        if ratings_snapshot:
+            conn.executemany(
+                """
+                INSERT INTO ratings_monitoring_snapshot (inn, source, rating, assigned_date, loaded_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (inn, source, data.get("rating", ""), data.get("assigned_date", ""), now)
+                    for (inn, source), data in ratings_snapshot.items()
+                ],
+            )
         conn.commit()
-        save_emitents_snapshot_excel(emitents)
 
     _, elapsed = timed(stage_ratings)
     stage_times["Этап 3: События по рейтингам"] = elapsed
@@ -1958,7 +2112,7 @@ def run_monitoring() -> None:
         for row in sorted(news_rows, key=lambda x: x.get("news_date", ""), reverse=True):
             latest_news_by_key.setdefault((row.get("instrument_type", ""), row.get("instrument_code", "")), row)
 
-        export_portfolio(portfolio_items, latest_event_by_inn, latest_news_by_key, news_rows)
+        export_portfolio(portfolio_items, latest_event_by_inn, latest_news_by_key, news_rows, report_events)
 
     _, elapsed = timed(stage_export)
     stage_times["Этап 6: Экспорт витрин"] = elapsed
