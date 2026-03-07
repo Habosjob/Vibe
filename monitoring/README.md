@@ -1,40 +1,45 @@
-# Monitoring (автономный контур)
+# Monitoring (автономный монолит)
 
-## Назначение
-Автономный контур мониторинга работает независимо от корневого `main.py`:
-- ведет собственную SQLite БД `monitoring/DB/monitoring.sqlite3`;
-- пишет собственный лог `monitoring/logs/monitoring.log`;
-- хранит собственный cache/raw/snapshots;
-- формирует витрины `monitoring/Reports_monitoring.xlsx` и `monitoring/Portfolio.xlsx`.
+## Что это
+`monitoring/main.py` — единый автономный скрипт мониторинга (монолит), который не импортирует и не меняет корневой `main.py`.
+
+Контур использует только read-only входы из корня проекта:
+- `Emitents.xlsx`
+- пользовательский файл портфеля (если найден)
+
+И создает свои артефакты внутри `monitoring/`:
+- `DB/monitoring.sqlite3`
+- `logs/monitoring.log`
+- `Reports_monitoring.xlsx`
+- `Portfolio.xlsx`
+- `BaseSnapshots/emitents_snapshot.xlsx`
+- `BaseSnapshots/portfolio_snapshot.xlsx`
+- `cache/` и `raw/`
 
 ## Запуск
-```bash
-python -m monitoring.main
-```
-или
+Windows / Linux одинаково:
 ```bash
 python monitoring/main.py
 ```
 
-## Этапы выполнения
-1. Загрузка `Emitents.xlsx` (read-only).
-2. Поиск e-disclosure по ИНН и сбор отчетности.
-3. Сравнение snapshot рейтингов (без парсинга агентств).
-4. Обновление snapshot эмитентов.
-5. Загрузка пользовательского портфеля.
-6. Сбор новостей Smartlab по 2 стратегиям (ticker -> fallback tag).
-7. Экспорт Excel-витрин.
+## Как реализовано
+Монолит содержит в одном файле:
+1. bootstrap директорий и логгера;
+2. bootstrap SQLite и операции идемпотентной записи;
+3. web-flow клиент e-disclosure (cookies init, company search, card, reports + ttl cache);
+4. сравнение snapshot рейтингов (`Изменен рейтинг/прогноз/отозван`);
+5. загрузчик портфеля (поиск по маскам + устойчивый парсинг листов);
+6. сбор новостей Smartlab в 2 стратегии (ticker → fallback tag);
+7. экспорт `Reports_monitoring.xlsx` и `Portfolio.xlsx`.
 
-## Основные настройки
-Все флаги находятся в `monitoring/config.py` с комментариями:
-- таймауты/retry/backoff;
-- TTL кэшей;
-- порог stale-alert;
-- путь к портфелю;
-- маски поиска портфеля;
+## Настройка
+Все настройки находятся в `monitoring/config.py` и подробно прокомментированы:
+- пути,
+- timeout/retry/backoff,
+- ttl кэшей,
+- порог stale alert,
 - оформление Excel.
 
-## Идемпотентность
-- события отчетности и рейтингов dedup по `event_hash` в `report_events`;
-- повторный запуск обновляет `last_seen_at`, но не плодит дубликаты;
-- новости dedup через CSV-кэш и таблицу `news_events`.
+## Вывод в консоль
+Скрипт выводит только этапы, прогресс-бары `tqdm` и финальный Summary по времени этапов.
+Техническая диагностика пишется в `monitoring/logs/monitoring.log` (перезаписываемый файл).
