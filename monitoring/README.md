@@ -39,7 +39,6 @@ python monitoring/main.py
 - параметры параллельности e-disclosure с autotune (`EDISCLOSURE_FETCH_WORKERS_MIN/DEFAULT/MAX`, `EDISCLOSURE_FILES_SEMAPHORE_MIN/DEFAULT/MAX`),
 - retry-политика e-disclosure (retry только на 429/5xx/timeout/connection reset; fast/retry jitter),
 - scheduler и full-scan параметры e-disclosure (`EDISCLOSURE_FORCE_FULL_SCAN`, интервалы recheck),
-- порог stale alert,
 - оформление Excel.
 
 ## Вывод в консоль
@@ -56,7 +55,12 @@ python monitoring/main.py
 - Для эмитентов с валидным state сначала делается events gate (`/api/events/page`), и только при признаке изменений запускается deep scan `files.aspx`.
 - `files.aspx` парсится как HTML-индекс; `FileLoad.ashx` НЕ скачивается, URL просто сохраняется в событие.
 - На тип отчета выполняется один парс страницы: извлекаются новые строки и одновременно сохраняется fingerprint (`top_row_hash`) для быстрых повторных прогонов без двойного parse-pass.
+- Проверка новизны событий отчетности выполняется batch-запросом только по хэшам текущего прогона вместо полного чтения historical hash-set из БД, что ускоряет flush на больших объемах.
 - Повторные прогоны активно переиспользуют `company_map` и кэши страниц/событий.
+
+## Изменения в Portfolio.xlsx
+- В листы `Portfolio_All` и `Portfolio_UniqueEmitents` добавлена колонка `Источник события`.
+- Теперь в портфеле сохраняется источник последнего события отчетности (`e-disclosure`, `NRA`, `ACRA`, `NKR`, `RAEX`), а не только детали новости Smartlab.
 
 
 ## Portfolio.xlsx (один файл)

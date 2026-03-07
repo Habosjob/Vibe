@@ -174,9 +174,6 @@ NEWS_DAYS_BACK = 30
 # Пауза между запросами к Smartlab (секунды).
 NEWS_REQUEST_PAUSE_SECONDS = 1.0
 
-# Порог stale-alert по отчетности (дней).
-REPORT_STALE_DAYS = 220
-
 # Максимальная ширина колонки в Excel.
 MAX_EXCEL_COL_WIDTH = 60
 
