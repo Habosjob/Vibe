@@ -42,6 +42,25 @@ BASE_SNAPSHOTS_DIR = BASE_DIR / "BaseSnapshots"
 # Основная SQLite БД monitoring.
 DB_FILE = DB_DIR / "monitoring.sqlite3"
 
+# Путь к внешней БД рейтинговых агентств (read-only источник для stage рейтингов).
+# Значение: pathlib.Path.
+# По умолчанию: <root>/DB/raitings.sqlite3.
+RATINGS_DB_FILE = ROOT_DIR / "DB" / "raitings.sqlite3"
+
+# Включить stage рейтингов на базе отдельной БД рейтинговых агентств.
+# True: stage строит monitoring-снимок и формирует события только из RATINGS_DB_FILE.
+# False: stage рейтингов пропускается.
+RATINGS_MONITORING_ENABLED = True
+
+# Источники/таблицы рейтинговых агентств в БД рейтингов.
+# Ключ: источник в events.source; значение: таблица в RATINGS_DB_FILE.
+RATINGS_SOURCE_TABLES = {
+    "NRA": "nra_ratings",
+    "ACRA": "acra_ratings",
+    "NKR": "nkr_ratings",
+    "RAEX": "raex_ratings",
+}
+
 # Лог-файл monitoring (перезаписывается при каждом запуске).
 LOG_FILE = LOGS_DIR / "monitoring.log"
 

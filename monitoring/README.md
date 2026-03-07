@@ -26,7 +26,7 @@ python monitoring/main.py
 1. bootstrap директорий и логгера;
 2. bootstrap SQLite и операции идемпотентной записи;
 3. ускоренный web-flow клиент e-disclosure (full-universe run без cap по эмитентам, event-gate перед `files.aspx`, fixed worker pool + autotune workers/files semaphore, простой semaphore только на `files.aspx`, без загрузки `FileLoad.ashx`, fingerprint верхней строки, batch DB flush, ttl cache + safe fallback);
-4. сравнение snapshot рейтингов (`Изменен рейтинг/прогноз/отозван`);
+4. сравнение snapshot рейтингов из отдельной БД рейтинговых агентств `DB/raitings.sqlite3` (`Изменен рейтинг/прогноз/отозван`);
 5. загрузчик портфеля только из `monitoring/Portfolio.xlsx` (ручные листы `Акции`/`Облигации` не перезаписываются);
 6. сбор новостей Smartlab в 2 стратегии (ticker → fallback tag);
 7. экспорт `Reports_monitoring.xlsx` и `Portfolio.xlsx`.
@@ -40,6 +40,8 @@ python monitoring/main.py
 - retry-политика e-disclosure (retry только на 429/5xx/timeout/connection reset; fast/retry jitter),
 - scheduler и full-scan параметры e-disclosure (`EDISCLOSURE_FORCE_FULL_SCAN`, интервалы recheck),
 - оформление Excel.
+- источник stage рейтингов: внешняя БД `RATINGS_DB_FILE` (по умолчанию `../DB/raitings.sqlite3`) и таблицы из `RATINGS_SOURCE_TABLES`;
+- флаг `RATINGS_MONITORING_ENABLED` для включения/отключения формирования рейтинговых событий в monitoring;
 
 
 ## Оптимизация скорости (этап 2: Сбор отчетности)
@@ -77,3 +79,9 @@ python monitoring/main.py
 - Если файла нет, он создается с ручными листами `Акции` и `Облигации` и заголовками.
 - Ручные листы никогда не очищаются и не перезаписываются кодом.
 - Автоматически пересобираются только листы `Portfolio_All`, `Portfolio_UniqueEmitents`, `News`.
+
+## Stage «События по рейтингам»
+- Stage формирует monitoring-снимок по рейтингам из отдельной БД рейтинговых агентств (`RATINGS_DB_FILE`).
+- Для каждого агентства берется последняя запись по ИНН и дате присвоения (`assigned_date/rating_date`).
+- В `Reports_monitoring.xlsx` попадают события `Изменен рейтинг`, `Изменен прогноз`, `Рейтинг отозван / снят` по источникам `NRA/ACRA/NKR/RAEX`.
+- Для сравнения между прогонами используется таблица `ratings_monitoring_snapshot` в `monitoring.sqlite3`.
