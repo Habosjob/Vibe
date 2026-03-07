@@ -111,6 +111,33 @@ def _should_retry_response(status_code: int) -> bool:
     return status_code in {403, 429} or status_code >= 500
 
 
+def _extract_status_code_from_error(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    if response is not None and getattr(response, "status_code", None):
+        return int(response.status_code)
+    text = sanitize_str(exc)
+    m = re.search(r"HTTP\s+(\d{3})", text)
+    return int(m.group(1)) if m else None
+
+
+def _extract_retry_after_seconds(response: requests.Response | None, exc: Exception | None) -> float | None:
+    header = ""
+    if response is not None:
+        header = sanitize_str(response.headers.get("Retry-After"))
+    if not header and exc is not None:
+        err_response = getattr(exc, "response", None)
+        if err_response is not None:
+            header = sanitize_str(err_response.headers.get("Retry-After"))
+    if not header:
+        return None
+    if header.isdigit():
+        return float(header)
+    dt = parse_date(header)
+    if dt is None:
+        return None
+    return max(0.0, (dt - datetime.now()).total_seconds())
+
+
 def request_with_retries(
     session: requests.Session,
     method: str,
@@ -122,6 +149,7 @@ def request_with_retries(
     timeout = timeout or (config.CONNECT_TIMEOUT_SECONDS, config.READ_TIMEOUT_SECONDS)
     last_error: Exception | None = None
     for attempt in range(config.HTTP_RETRIES + 1):
+        response: requests.Response | None = None
         try:
             if config.EDISCLOSURE_FAST_JITTER_MAX_MS > 0:
                 jitter_ms = random.randint(config.EDISCLOSURE_FAST_JITTER_MIN_MS, config.EDISCLOSURE_FAST_JITTER_MAX_MS)
@@ -129,18 +157,24 @@ def request_with_retries(
                     time.sleep(jitter_ms / 1000.0)
             response = session.request(method=method, url=url, timeout=timeout, **kwargs)
             if _should_retry_response(response.status_code):
-                raise requests.HTTPError(f"HTTP {response.status_code}: {url}")
+                err = requests.HTTPError(f"HTTP {response.status_code}: {url}")
+                err.response = response
+                raise err
             return response
         except Exception as exc:  # noqa: BLE001
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            is_retryable_http = status is not None and _should_retry_response(int(status))
+            status = _extract_status_code_from_error(exc)
+            is_retryable_http = status is not None and _should_retry_response(status)
             is_retryable_exception = isinstance(exc, (requests.Timeout, requests.ConnectionError))
             last_error = exc
             if (not is_retryable_http and not is_retryable_exception) or attempt >= config.HTTP_RETRIES:
                 break
+            retry_after = _extract_retry_after_seconds(response, exc)
             retry_jitter = random.randint(config.EDISCLOSURE_RETRY_JITTER_MIN_MS, config.EDISCLOSURE_RETRY_JITTER_MAX_MS)
             sleep_for = config.BACKOFF_BASE_SECONDS * (2 ** attempt) + (retry_jitter / 1000.0)
-            logger.warning("Retry %s for %s %s due to %s", attempt + 1, method, url, exc)
+            if retry_after is not None:
+                sleep_for = max(sleep_for, retry_after)
+            sleep_for = min(sleep_for, config.HTTP_MAX_BACKOFF_SECONDS)
+            logger.warning("Retry %s for %s %s due to %s (sleep %.2fs)", attempt + 1, method, url, exc, sleep_for)
             time.sleep(sleep_for)
     raise RuntimeError(f"Request failed: {method} {url}: {last_error}")
 
@@ -284,8 +318,18 @@ class EDisclosureClient:
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             }
         )
-        request_with_retries(self.session, "GET", "https://www.e-disclosure.ru/", logger)
-        request_with_retries(self.session, "GET", "https://www.e-disclosure.ru/poisk-po-kompaniyam", logger)
+        if config.EDISCLOSURE_INIT_STAGGER_MAX_MS > 0:
+            stagger_ms = random.randint(0, config.EDISCLOSURE_INIT_STAGGER_MAX_MS)
+            if stagger_ms > 0:
+                time.sleep(stagger_ms / 1000.0)
+        if config.EDISCLOSURE_WARMUP_ENABLED:
+            try:
+                request_with_retries(self.session, "GET", "https://www.e-disclosure.ru/", logger)
+                request_with_retries(self.session, "GET", "https://www.e-disclosure.ru/poisk-po-kompaniyam", logger)
+            except RuntimeError as exc:
+                if config.EDISCLOSURE_WARMUP_STRICT:
+                    raise
+                self.logger.warning("Warmup e-disclosure skipped due to error: %s", exc)
 
     def _cache_file(self, company_id: str, data_type: str) -> Path:
         return config.CACHE_DIR / "edisclosure" / f"{md5_short(f'{company_id}_{data_type}', 10)}.json"
@@ -1188,7 +1232,7 @@ def stage_reports_fetch_parallel(tasks: list[dict[str, Any]], report_state: dict
     results: list[ReportFetchResult] = []
     if not tasks:
         return results
-    workers = config.EDISCLOSURE_MAX_WORKERS
+    workers = max(config.EDISCLOSURE_MIN_WORKERS, config.EDISCLOSURE_MAX_WORKERS)
     chunk_size = max(workers * 2, 20)
     idx = 0
     pbar = tqdm(total=len(tasks), desc="Сбор отчетности", position=0, leave=True)

@@ -35,9 +35,10 @@ python monitoring/main.py
 ## Настройка
 Все настройки находятся в `monitoring/config.py` и подробно прокомментированы:
 - пути,
-- timeout/retry/backoff,
+- timeout/retry/backoff (включая лимит max backoff и поддержку Retry-After для 429/503),
 - ttl кэшей,
 - параметры параллельности e-disclosure (adaptive workers, preview rows, parse caps, card checks, fast/retry jitter),
+- управление warmup e-disclosure (включение/strict-режим и anti-burst задержка на инициализацию клиента),
 - режимы обхода e-disclosure (`incremental` / `full_sync`, периодичность полного скана),
 - порог stale alert,
 - оформление Excel.
