@@ -1041,7 +1041,7 @@ def export_portfolio(
     ws_all = wb.create_sheet("Portfolio_All")
     ws_all.append([
         "Тип", "ISIN / Тикер", "ИНН", "Наименование", "Дата скоринга", "Последнее событие",
-        "Дата последнего события", "Ссылка на последнее событие", "Последняя новость", "Дата последней новости",
+        "Дата последнего события", "Источник события", "Ссылка на последнее событие", "Последняя новость", "Дата последней новости",
         "Ссылка на последнюю новость", "_is_new",
     ])
     for item in portfolio_items:
@@ -1055,6 +1055,7 @@ def export_portfolio(
             evt.get("scoring_date", ""),
             evt.get("event_type", ""),
             evt.get("event_date", ""),
+            evt.get("source", ""),
             evt.get("event_url", ""),
             news.get("title", ""),
             news.get("news_date", ""),
@@ -1066,7 +1067,7 @@ def export_portfolio(
     ws_unique = wb.create_sheet("Portfolio_UniqueEmitents")
     ws_unique.append([
         "ИНН", "Наименование", "Кол-во инструментов в портфеле", "Инструменты", "Дата скоринга",
-        "Последнее событие", "Дата последнего события", "Ссылка на последнее событие", "Последняя новость",
+        "Последнее событие", "Дата последнего события", "Источник события", "Ссылка на последнее событие", "Последняя новость",
         "Дата последней новости", "Ссылка на последнюю новость", "_is_new",
     ])
     grouped: dict[str, list[dict[str, str]]] = {}
@@ -1086,6 +1087,7 @@ def export_portfolio(
             evt.get("scoring_date", ""),
             evt.get("event_type", ""),
             evt.get("event_date", ""),
+            evt.get("source", ""),
             evt.get("event_url", ""),
             news.get("title", ""),
             news.get("news_date", ""),
@@ -1178,7 +1180,6 @@ def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) 
         else:
             skipped_tasks.append(task)
 
-    existing_hashes = {r[0] for r in conn.execute("SELECT event_hash FROM report_events WHERE source IN ('e-disclosure','stale-alert')").fetchall()}
     states: dict[tuple[str, str], dict[str, str]] = {}
     for r in conn.execute("SELECT * FROM report_state").fetchall():
         states[(sanitize_str(r["inn"]), sanitize_str(r["report_type_id"]))] = dict(r)
@@ -1190,7 +1191,26 @@ def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) 
         "processed_emitents": len(tasks),
         "skipped_by_cache": len(skipped_tasks),
     }
-    return tasks, skipped_tasks, existing_hashes, states, run_no, prep_stats
+    return tasks, skipped_tasks, set(), states, run_no, prep_stats
+
+
+def fetch_existing_event_hashes(conn: sqlite3.Connection, hashes: set[str], sources: tuple[str, ...]) -> set[str]:
+    if not hashes or not sources:
+        return set()
+    chunk_size = 900
+    existing: set[str] = set()
+    source_placeholders = ",".join("?" for _ in sources)
+    hash_list = list(hashes)
+    for i in range(0, len(hash_list), chunk_size):
+        chunk = hash_list[i : i + chunk_size]
+        hash_placeholders = ",".join("?" for _ in chunk)
+        query = (
+            f"SELECT event_hash FROM report_events "
+            f"WHERE source IN ({source_placeholders}) AND event_hash IN ({hash_placeholders})"
+        )
+        params = [*sources, *chunk]
+        existing.update(r[0] for r in conn.execute(query, params).fetchall())
+    return existing
 
 
 def parse_reports_page(
@@ -1506,7 +1526,11 @@ def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchRe
     report_rows = []
     state_rows = []
     schedule_rows = []
-    stale_rows = []
+    current_event_hashes: set[str] = set()
+    for res in results:
+        for ev in res.report_events:
+            current_event_hashes.add(ev["event_hash"])
+    existing_hashes = fetch_existing_event_hashes(conn, current_event_hashes, ("e-disclosure",))
     stats = {
         "reports_found": 0,
         "new_events": 0,
@@ -1548,12 +1572,6 @@ def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchRe
                 stats["new_events"] += 1
                 all_new_event_hashes.add(ev["event_hash"])
                 existing_hashes.add(ev["event_hash"])
-        if res.latest_report_date:
-            stale_dt = parse_date(res.latest_report_date)
-            if stale_dt and stale_dt < datetime.now() - timedelta(days=config.REPORT_STALE_DAYS):
-                stale_hash = md5_short(f"stale_{res.inn}_{res.latest_report_date}", 16)
-                stale_payload = json.dumps({"latest_report_date": res.latest_report_date}, ensure_ascii=False, separators=(",", ":"))
-                stale_rows.append((stale_hash, res.inn, res.company_name, res.scoring_date, today_iso(), "Нет новой отчетности дольше порога", res.company_map_row.get("company_url", "") if res.company_map_row else "", "stale-alert", stale_payload, now, now))
 
     if company_rows:
         conn.executemany(
@@ -1573,7 +1591,7 @@ def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchRe
         """,
             company_rows,
         )
-    flush_report_events_batch(conn, report_rows + stale_rows)
+    flush_report_events_batch(conn, report_rows)
     update_report_state_batch(conn, state_rows)
     update_emitent_schedule_batch(conn, schedule_rows)
     conn.commit()
@@ -1846,6 +1864,7 @@ def run_monitoring() -> None:
                                 "added_date": today_iso(),
                             }
                         )
+                    source = news.get("source", "Smartlab")
                     news_insert_rows.append(
                         (
                             h,
@@ -1856,7 +1875,7 @@ def run_monitoring() -> None:
                             news["news_date"],
                             news["title"],
                             news["url"],
-                            "Smartlab",
+                            source,
                             now,
                         )
                     )
@@ -1870,7 +1889,7 @@ def run_monitoring() -> None:
                             "news_date": news["news_date"],
                             "title": news["title"],
                             "url": news["url"],
-                            "source": "Smartlab",
+                            "source": source,
                             "is_new": is_new,
                         }
                     )
@@ -1895,7 +1914,12 @@ def run_monitoring() -> None:
     print("Этап 6: Экспорт витрин")
 
     def stage_export() -> None:
-        report_events = [dict(r) for r in conn.execute("SELECT event_hash, inn, company_name, scoring_date, event_date, event_type, event_url FROM report_events").fetchall()]
+        report_events = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT event_hash, inn, company_name, scoring_date, event_date, event_type, event_url, source FROM report_events"
+            ).fetchall()
+        ]
         for row in report_events:
             row["is_new"] = row.get("event_hash") in all_new_event_hashes
         export_reports(report_events)
