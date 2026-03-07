@@ -1209,7 +1209,9 @@ def export_portfolio(
 
     for row in report_rows:
         inn = sanitize_str(row.get("inn", ""))
-        linked_items = instruments_by_inn.get(inn) or [{"instrument_type": "", "instrument_code": ""}]
+        linked_items = instruments_by_inn.get(inn)
+        if not linked_items:
+            continue
         for linked_item in linked_items:
             merged_rows.append(
                 {
