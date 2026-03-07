@@ -1,1 +1,0 @@
-"""Autonomous monitoring contour package."""
