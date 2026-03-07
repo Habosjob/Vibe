@@ -54,8 +54,6 @@ PORTFOLIO_XLSX = BASE_DIR / "Portfolio.xlsx"
 # Snapshot эмитентов.
 EMITENTS_SNAPSHOT_XLSX = BASE_SNAPSHOTS_DIR / "emitents_snapshot.xlsx"
 
-# Snapshot портфеля.
-PORTFOLIO_SNAPSHOT_XLSX = BASE_SNAPSHOTS_DIR / "portfolio_snapshot.xlsx"
 
 # Таймаут установки TCP соединения для e-disclosure (секунды).
 # Значения: int/float > 0. По умолчанию: 4.
@@ -104,21 +102,28 @@ EDISCLOSURE_RECENT_CHANGE_RECHECK_HOURS = 6
 EDISCLOSURE_ACTIVE_RECHECK_HOURS = 24
 EDISCLOSURE_STABLE_RECHECK_HOURS = 72
 
-# Максимум эмитентов, реально обрабатываемых в одном запуске stage_reports.
-# Значения: int >= 1. По умолчанию: 150.
-EDISCLOSURE_MAX_EMITENTS_PER_RUN = 150
-
 # Через сколько дней без full scan принудительно выполнять deep pass.
 # Значения: int >= 1. По умолчанию: 14.
 EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS = 14
 
-# Фиксированное число worker-потоков для stage_reports_fetch_parallel.
-# Значения: int >= 1. По умолчанию: 6.
-EDISCLOSURE_FETCH_WORKERS = 6
+# Пределы и дефолты для worker pool e-disclosure.
+# На старте используется DEFAULT, затем AUTOTUNE может выбрать значение в [MIN, MAX].
+EDISCLOSURE_FETCH_WORKERS_MIN = 8
+EDISCLOSURE_FETCH_WORKERS_DEFAULT = 12
+EDISCLOSURE_FETCH_WORKERS_MAX = 24
 
-# Фиксированный лимит только для тяжелого endpoint files.aspx.
-# Значения: int >= 1. По умолчанию: 3.
-EDISCLOSURE_FILES_SEMAPHORE = 3
+# Пределы и дефолты semaphore для тяжелого endpoint files.aspx.
+# На старте используется DEFAULT, затем AUTOTUNE может выбрать значение в [MIN, MAX].
+EDISCLOSURE_FILES_SEMAPHORE_MIN = 4
+EDISCLOSURE_FILES_SEMAPHORE_DEFAULT = 6
+EDISCLOSURE_FILES_SEMAPHORE_MAX = 10
+
+# Автотюнинг параллельности e-disclosure.
+# True: подбираем стабильные workers/files_semaphore по телеметрии и сохраняем в БД meta.
+EDISCLOSURE_AUTOTUNE_ENABLED = True
+
+# Порог «массовых» 429/timeout (доля от общего числа запросов), выше которого autotune снижает параллельность.
+EDISCLOSURE_AUTOTUNE_ERROR_RATE_THRESHOLD = 0.06
 
 # Максимум кандидатов компании, для которых проверяется карточка при неоднозначном поиске.
 EDISCLOSURE_MAX_CARD_CHECKS = 2
@@ -137,20 +142,7 @@ EDISCLOSURE_FAST_JITTER_MAX_MS = 0
 # Не участвует в runtime execution path.
 EDISCLOSURE_INIT_STAGGER_MAX_MS = 0
 
-# Выполнять warmup-запросы к e-disclosure при создании thread-local клиента.
-# Значения: bool. По умолчанию: False.
-# Рекомендуется выключать и использовать единый global warmup на запуск.
-EDISCLOSURE_WARMUP_ENABLED = False
-
-# Делать один global warmup в начале stage_reports, а не warmup на каждый поток.
-# Значения: bool. По умолчанию: False.
-EDISCLOSURE_GLOBAL_WARMUP_ONCE = False
-
-# Считать warmup обязательным.
-# Значения: bool. По умолчанию: False.
-# False: при 429/503 на warmup логируем предупреждение и продолжаем работу.
-# True: при провале warmup поднимаем исключение.
-EDISCLOSURE_WARMUP_STRICT = False
+# Warmup path intentionally removed from execution flow.
 
 # Jitter только для retry-path (429/403/5xx/timeout).
 EDISCLOSURE_RETRY_JITTER_MIN_MS = 100
