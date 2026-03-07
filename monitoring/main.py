@@ -1367,11 +1367,29 @@ def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) 
     schedule_rows = conn.execute("SELECT * FROM emitent_schedule").fetchall()
     schedule_map = {sanitize_str(r["inn"]): dict(r) for r in schedule_rows}
 
+    states: dict[tuple[str, str], dict[str, str]] = {}
+    for r in conn.execute("SELECT * FROM report_state").fetchall():
+        states[(sanitize_str(r["inn"]), sanitize_str(r["report_type_id"]))] = dict(r)
+
+    has_state_by_inn: dict[str, bool] = {}
+    for inn_key, _type in states:
+        if inn_key:
+            has_state_by_inn[inn_key] = True
+
+    rows = conn.execute(
+        "SELECT inn, COUNT(1) AS c FROM report_events WHERE source='e-disclosure' GROUP BY inn"
+    ).fetchall()
+    has_edisclosure_event_by_inn = {sanitize_str(r["inn"]): int(r["c"] or 0) > 0 for r in rows}
+
     tasks: list[dict[str, Any]] = []
     skipped_tasks: list[dict[str, Any]] = []
     force_full = bool(config.EDISCLOSURE_FORCE_FULL_SCAN)
     now_dt = datetime.now()
     for inn, row in emitent_map.items():
+        missing_reports_history = not has_edisclosure_event_by_inn.get(inn, False)
+        missing_state = not has_state_by_inn.get(inn, False)
+        force_missing_recheck = bool(config.EDISCLOSURE_FORCE_RECHECK_MISSING_HISTORY) and (missing_reports_history or missing_state)
+
         task = {
             "inn": inn,
             "company_name": sanitize_str(row.company_name),
@@ -1379,15 +1397,12 @@ def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) 
             "mapping": mappings.get(inn),
             "schedule": schedule_map.get(inn),
             "force_full": force_full,
+            "force_missing_recheck": force_missing_recheck,
         }
-        if _is_due(task["schedule"], now_dt, force_full):
+        if force_missing_recheck or _is_due(task["schedule"], now_dt, force_full):
             tasks.append(task)
         else:
             skipped_tasks.append(task)
-
-    states: dict[tuple[str, str], dict[str, str]] = {}
-    for r in conn.execute("SELECT * FROM report_state").fetchall():
-        states[(sanitize_str(r["inn"]), sanitize_str(r["report_type_id"]))] = dict(r)
     run_no = int((conn.execute("SELECT value FROM meta WHERE key = 'edisclosure_run_no'").fetchone() or ["0"])[0] or "0") + 1
     conn.execute("INSERT INTO meta (key, value) VALUES ('edisclosure_run_no', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(run_no),))
     conn.commit()
@@ -1472,7 +1487,7 @@ def parse_reports_page(
         if not is_relevant:
             continue
 
-        row_hash = md5_short(f"{company_id}_{type_id}_{doc_type}_{period}_{placement_date}_{file_url}", 16)
+        row_hash = md5_short(f"{company_id}_{type_id}_{doc_type}_{period}_{foundation_date}_{placement_date}", 16)
         if not top_row_hash:
             top_row_hash = row_hash
         if known_hash and row_hash == known_hash:
@@ -1631,6 +1646,7 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
     mapping = task.get("mapping") or {}
     schedule = task.get("schedule") or {}
     force_full = bool(task.get("force_full"))
+    force_missing_recheck = bool(task.get("force_missing_recheck"))
     client = get_thread_local_edisclosure_client(logger)
     try:
         company = choose_company_fast(client, inn, company_name, mapping, telemetry)
@@ -1647,8 +1663,9 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
                 last_known_report_date = sanitize_str(known.get("latest_placement_date"))
 
         known_state_missing = not any(state_by_type.get((inn, str(type_id))) for type_id, _ in REPORT_TYPE_PRIORITY)
-        suspicious_state = known_state_missing or not last_known_report_date
-        needs_deep = force_full or not mapping or not schedule or suspicious_state
+        missing_type4_state = state_by_type.get((inn, "4")) is None
+        suspicious_state = known_state_missing or not last_known_report_date or missing_type4_state
+        needs_deep = force_full or force_missing_recheck or not mapping or not schedule or suspicious_state
         if not needs_deep:
             telemetry["events_requests"] += 1
             events = client.get_company_events(company_id, days_back=60)
@@ -1718,7 +1735,7 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
             "next_check_at": _calc_next_check(latest_report_date, stable_count),
             "last_change_at": latest_report_date or sanitize_str(schedule.get("last_change_at")),
             "stable_run_count": stable_count,
-            "last_mode": "deep" if needs_deep else "event_gate_only",
+            "last_mode": "deep_missing_recheck" if force_missing_recheck else ("deep" if needs_deep else "event_gate_only"),
             "last_event_gate_at": now_ts,
             "last_files_scan_at": now_ts if (needs_deep or fallback_required) else sanitize_str(schedule.get("last_files_scan_at")),
         }

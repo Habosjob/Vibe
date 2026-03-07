@@ -147,6 +147,13 @@ EDISCLOSURE_STABLE_RECHECK_HOURS = 72
 # Значения: int >= 1. По умолчанию: 14.
 EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS = 14
 
+# Принудительный recheck эмитентов без исторических событий e-disclosure или без report_state.
+# True: эмитент попадает в stage_reports даже если scheduler считает его not-due,
+# что предотвращает вечный пропуск кейсов с пустой/поврежденной историей.
+# False: используется только стандартный due-check scheduler.
+# По умолчанию: True.
+EDISCLOSURE_FORCE_RECHECK_MISSING_HISTORY = True
+
 # Пределы и дефолты для worker pool e-disclosure.
 # На старте используется DEFAULT, затем AUTOTUNE может выбрать значение в [MIN, MAX].
 EDISCLOSURE_FETCH_WORKERS_MIN = 16
