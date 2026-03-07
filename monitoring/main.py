@@ -11,7 +11,7 @@ import statistics
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -138,44 +138,79 @@ def _extract_retry_after_seconds(response: requests.Response | None, exc: Except
     return max(0.0, (dt - datetime.now()).total_seconds())
 
 
+def _detect_endpoint_kind(url: str, request_kind: str | None = None) -> str:
+    if request_kind:
+        return request_kind
+    lower = url.lower()
+    if "files.aspx" in lower:
+        return "files"
+    if "/api/search/companies" in lower:
+        return "search"
+    if "poisk-po-kompaniyam" in lower or "company.aspx" in lower:
+        return "company"
+    return "generic"
+
+
 def request_with_retries(
     session: requests.Session,
     method: str,
     url: str,
     logger: logging.Logger,
     timeout: tuple[float, float] | None = None,
+    request_kind: str | None = None,
     **kwargs: Any,
 ) -> requests.Response:
     timeout = timeout or (config.CONNECT_TIMEOUT_SECONDS, config.READ_TIMEOUT_SECONDS)
+    endpoint_kind = _detect_endpoint_kind(url, request_kind)
+    is_files_request = endpoint_kind == "files"
     last_error: Exception | None = None
     for attempt in range(config.HTTP_RETRIES + 1):
         response: requests.Response | None = None
+        started = time.perf_counter()
+        runtime_state.rate_limiter.acquire(is_files_request=is_files_request)
         try:
             if config.EDISCLOSURE_FAST_JITTER_MAX_MS > 0:
                 jitter_ms = random.randint(config.EDISCLOSURE_FAST_JITTER_MIN_MS, config.EDISCLOSURE_FAST_JITTER_MAX_MS)
                 if jitter_ms > 0:
                     time.sleep(jitter_ms / 1000.0)
             response = session.request(method=method, url=url, timeout=timeout, **kwargs)
+            latency = time.perf_counter() - started
+            is_429 = response.status_code == 429
+            runtime_state.register_request_event(RequestTelemetryEvent(endpoint_kind, int(response.status_code), latency, False, is_429))
             if _should_retry_response(response.status_code):
                 err = requests.HTTPError(f"HTTP {response.status_code}: {url}")
                 err.response = response
                 raise err
+            runtime_state.rate_limiter.on_success()
             return response
         except Exception as exc:  # noqa: BLE001
+            latency = time.perf_counter() - started
             status = _extract_status_code_from_error(exc)
+            is_timeout = isinstance(exc, requests.Timeout) or "timed out" in sanitize_str(exc).lower()
+            is_429 = status == 429
+            runtime_state.register_request_event(RequestTelemetryEvent(endpoint_kind, int(status or 0), latency, is_timeout, is_429))
             is_retryable_http = status is not None and _should_retry_response(status)
             is_retryable_exception = isinstance(exc, (requests.Timeout, requests.ConnectionError))
             last_error = exc
+            if is_429:
+                runtime_state.rate_limiter.on_429()
             if (not is_retryable_http and not is_retryable_exception) or attempt >= config.HTTP_RETRIES:
                 break
             retry_after = _extract_retry_after_seconds(response, exc)
             retry_jitter = random.randint(config.EDISCLOSURE_RETRY_JITTER_MIN_MS, config.EDISCLOSURE_RETRY_JITTER_MAX_MS)
             sleep_for = config.BACKOFF_BASE_SECONDS * (2 ** attempt) + (retry_jitter / 1000.0)
-            if retry_after is not None:
-                sleep_for = max(sleep_for, retry_after)
+            if is_429:
+                if retry_after is not None:
+                    sleep_for = max(sleep_for, min(retry_after, config.HTTP_RETRY_AFTER_MAX_SECONDS))
+                else:
+                    sleep_for = max(sleep_for, config.BACKOFF_BASE_SECONDS * 4 * (attempt + 1))
+            elif retry_after is not None:
+                sleep_for = max(sleep_for, min(retry_after, config.HTTP_RETRY_AFTER_MAX_SECONDS))
             sleep_for = min(sleep_for, config.HTTP_MAX_BACKOFF_SECONDS)
             logger.warning("Retry %s for %s %s due to %s (sleep %.2fs)", attempt + 1, method, url, exc, sleep_for)
             time.sleep(sleep_for)
+        finally:
+            runtime_state.rate_limiter.release(is_files_request=is_files_request)
     raise RuntimeError(f"Request failed: {method} {url}: {last_error}")
 
 
@@ -287,6 +322,156 @@ def db_connect() -> sqlite3.Connection:
 _thread_local = threading.local()
 
 
+@dataclass
+class RequestTelemetryEvent:
+    endpoint: str
+    status_code: int
+    latency_sec: float
+    is_timeout: bool
+    is_429: bool
+
+
+class DomainRateLimiter:
+    def __init__(self, max_inflight: int, min_interval_ms: int, burst_size: int, files_inflight: int):
+        self.max_inflight = max(1, int(max_inflight))
+        self.min_interval_sec = max(0.0, min_interval_ms / 1000.0)
+        self.burst_size = max(1, int(burst_size))
+        self.files_inflight = max(1, int(files_inflight))
+        self.lock = threading.Lock()
+        self.cv = threading.Condition(self.lock)
+        self.inflight = 0
+        self.inflight_files = 0
+        self.tokens = float(self.burst_size)
+        self.last_refill_ts = time.perf_counter()
+        self.last_request_ts = 0.0
+        self.throttle_multiplier = 1.0
+        self.total_wait_sec = 0.0
+        self.acquire_count = 0
+        self.max_observed_inflight = 0
+
+    def _refill_tokens(self) -> None:
+        now = time.perf_counter()
+        elapsed = max(0.0, now - self.last_refill_ts)
+        if elapsed <= 0:
+            return
+        rate = 1.0 / max(0.01, self.min_interval_sec * self.throttle_multiplier)
+        self.tokens = min(float(self.burst_size), self.tokens + elapsed * rate)
+        self.last_refill_ts = now
+
+    def acquire(self, is_files_request: bool = False) -> None:
+        with self.cv:
+            started = time.perf_counter()
+            while True:
+                self._refill_tokens()
+                now = time.perf_counter()
+                min_gap = self.min_interval_sec * self.throttle_multiplier
+                gap_ok = (now - self.last_request_ts) >= min_gap
+                files_ok = (not is_files_request) or (self.inflight_files < self.files_inflight)
+                if self.inflight < self.max_inflight and files_ok and self.tokens >= 1.0 and gap_ok:
+                    self.inflight += 1
+                    if is_files_request:
+                        self.inflight_files += 1
+                    self.tokens -= 1.0
+                    self.last_request_ts = now
+                    self.acquire_count += 1
+                    self.max_observed_inflight = max(self.max_observed_inflight, self.inflight)
+                    self.total_wait_sec += max(0.0, now - started)
+                    return
+                wait_for = 0.03
+                if self.tokens < 1.0:
+                    wait_for = max(wait_for, (1.0 - self.tokens) * max(0.01, self.min_interval_sec * self.throttle_multiplier))
+                if not gap_ok:
+                    wait_for = max(wait_for, min_gap - (now - self.last_request_ts))
+                self.cv.wait(timeout=min(wait_for, 0.5))
+
+    def release(self, is_files_request: bool = False) -> None:
+        with self.cv:
+            self.inflight = max(0, self.inflight - 1)
+            if is_files_request:
+                self.inflight_files = max(0, self.inflight_files - 1)
+            self.cv.notify_all()
+
+    def on_429(self) -> None:
+        with self.cv:
+            self.throttle_multiplier = min(4.0, self.throttle_multiplier + 0.25)
+            self.cv.notify_all()
+
+    def on_success(self) -> None:
+        with self.cv:
+            self.throttle_multiplier = max(1.0, self.throttle_multiplier * 0.98)
+
+
+class MonitoringRuntimeState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.global_warmup_done = False
+        self.warmup_requests = 0
+        self.total_requests = 0
+        self.files_requests = 0
+        self.search_requests = 0
+        self.status_429 = 0
+        self.timeout_count = 0
+        self.request_latencies: list[float] = []
+        self.max_consecutive_429 = 0
+        self.max_consecutive_timeouts = 0
+        self._consecutive_429 = 0
+        self._consecutive_timeouts = 0
+        self.reduce_events = 0
+        self.increase_events = 0
+        self.rate_limiter = DomainRateLimiter(
+            max_inflight=config.EDISCLOSURE_MAX_INFLIGHT_REQUESTS,
+            min_interval_ms=config.EDISCLOSURE_MIN_REQUEST_INTERVAL_MS,
+            burst_size=config.EDISCLOSURE_BURST_SIZE,
+            files_inflight=config.EDISCLOSURE_MAX_INFLIGHT_FILES_REQUESTS,
+        )
+
+    def ensure_global_warmup(self, logger: logging.Logger) -> None:
+        if not config.EDISCLOSURE_GLOBAL_WARMUP_ONCE:
+            return
+        with self.lock:
+            if self.global_warmup_done:
+                return
+            self.global_warmup_done = True
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": config.BROWSER_USER_AGENT,
+            "Accept-Language": "ru,en;q=0.9",
+            "Connection": "keep-alive",
+        })
+        for url in ["https://www.e-disclosure.ru/", "https://www.e-disclosure.ru/poisk-po-kompaniyam"]:
+            self.warmup_requests += 1
+            try:
+                request_with_retries(session, "GET", url, logger, request_kind="warmup")
+            except RuntimeError as exc:
+                if config.EDISCLOSURE_WARMUP_STRICT:
+                    raise
+                logger.warning("Global warmup skipped url=%s due to: %s", url, exc)
+
+    def register_request_event(self, event: RequestTelemetryEvent) -> None:
+        with self.lock:
+            self.total_requests += 1
+            self.request_latencies.append(event.latency_sec)
+            if event.endpoint == "files":
+                self.files_requests += 1
+            elif event.endpoint == "search":
+                self.search_requests += 1
+            if event.is_429:
+                self.status_429 += 1
+                self._consecutive_429 += 1
+                self.max_consecutive_429 = max(self.max_consecutive_429, self._consecutive_429)
+            else:
+                self._consecutive_429 = 0
+            if event.is_timeout:
+                self.timeout_count += 1
+                self._consecutive_timeouts += 1
+                self.max_consecutive_timeouts = max(self.max_consecutive_timeouts, self._consecutive_timeouts)
+            else:
+                self._consecutive_timeouts = 0
+
+
+runtime_state = MonitoringRuntimeState()
+
+
 def get_thread_local_edisclosure_client(logger: logging.Logger) -> "EDisclosureClient":
     client = getattr(_thread_local, "edisclosure_client", None)
     if client is None:
@@ -324,12 +509,12 @@ class EDisclosureClient:
                 time.sleep(stagger_ms / 1000.0)
         if config.EDISCLOSURE_WARMUP_ENABLED:
             try:
-                request_with_retries(self.session, "GET", "https://www.e-disclosure.ru/", logger)
-                request_with_retries(self.session, "GET", "https://www.e-disclosure.ru/poisk-po-kompaniyam", logger)
+                request_with_retries(self.session, "GET", "https://www.e-disclosure.ru/", logger, request_kind="warmup")
+                request_with_retries(self.session, "GET", "https://www.e-disclosure.ru/poisk-po-kompaniyam", logger, request_kind="warmup")
             except RuntimeError as exc:
                 if config.EDISCLOSURE_WARMUP_STRICT:
                     raise
-                self.logger.warning("Warmup e-disclosure skipped due to error: %s", exc)
+                self.logger.warning("Thread warmup e-disclosure skipped due to error: %s", exc)
 
     def _cache_file(self, company_id: str, data_type: str) -> Path:
         return config.CACHE_DIR / "edisclosure" / f"{md5_short(f'{company_id}_{data_type}', 10)}.json"
@@ -1112,6 +1297,9 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
     company_name = task["company_name"]
     scoring_date = task["scoring_date"]
     mapping = task.get("mapping") or {}
+    with runtime_state.lock:
+        base_429 = runtime_state.status_429
+        base_timeout = runtime_state.timeout_count
     try:
         t0 = time.perf_counter()
         company = choose_company_fast(client, inn, company_name, mapping, telemetry)
@@ -1220,39 +1408,121 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
         }
         bottleneck = max((("search", telemetry["search_time"]), ("files", telemetry["files_fetch_time"]), ("parse", telemetry["parse_time"]), ("card", telemetry["card_validation_time"])), key=lambda x: x[1])[0]
         telemetry["top_bottleneck"] = bottleneck
+        with runtime_state.lock:
+            telemetry["request_429"] = max(0, runtime_state.status_429 - base_429)
+            telemetry["request_timeouts"] = max(0, runtime_state.timeout_count - base_timeout)
         return ReportFetchResult(inn, company_name, scoring_date, company_row, report_events, report_states, latest_report_date, skipped_unchanged, telemetry, time.perf_counter() - started)
     except Exception as exc:  # noqa: BLE001
         msg = str(exc)
         if any(x in msg for x in ["429", "403", "timeout", "timed out", "Connection", "HTTP 5"]):
             telemetry["retryable_errors"] += 1
+        with runtime_state.lock:
+            telemetry["request_429"] = max(0, runtime_state.status_429 - base_429)
+            telemetry["request_timeouts"] = max(0, runtime_state.timeout_count - base_timeout)
         return ReportFetchResult(inn, company_name, scoring_date, None, [], [], "", False, telemetry, time.perf_counter() - started, error=msg)
+
+
+class AdaptiveConcurrencyController:
+    def __init__(self) -> None:
+        self.window_size = max(5, config.EDISCLOSURE_ADAPTIVE_WINDOW)
+        self.min_inflight = max(1, config.EDISCLOSURE_MIN_WORKERS)
+        self.max_inflight = max(self.min_inflight, config.EDISCLOSURE_MAX_WORKERS)
+        self.current_inflight = min(self.max_inflight, max(self.min_inflight, config.EDISCLOSURE_MAX_WORKERS))
+        self.window: list[ReportFetchResult] = []
+        self.stable_windows = 0
+
+    def _window_metrics(self) -> dict[str, float]:
+        retryable = sum(int(x.telemetry.get("retryable_errors", 0)) for x in self.window)
+        err429 = sum(int(x.telemetry.get("request_429", 0)) for x in self.window)
+        timeout_count = sum(int(x.telemetry.get("request_timeouts", 0)) for x in self.window)
+        latencies = [float(x.elapsed_sec) for x in self.window]
+        median_latency = statistics.median(latencies) if latencies else 0.0
+        return {
+            "retryable": float(retryable),
+            "err429": float(err429),
+            "timeout": float(timeout_count),
+            "median_latency": median_latency,
+        }
+
+    def on_result(self, result: ReportFetchResult) -> tuple[int, str]:
+        self.window.append(result)
+        if len(self.window) > self.window_size:
+            self.window = self.window[-self.window_size :]
+        if len(self.window) < self.window_size:
+            return self.current_inflight, "init"
+        metrics = self._window_metrics()
+        changed = "hold"
+        throttled = metrics["err429"] > 0 or metrics["timeout"] >= max(1, self.window_size // 5)
+        if throttled:
+            new_value = max(self.min_inflight, self.current_inflight - max(1, config.EDISCLOSURE_DECAY_ON_429))
+            if new_value < self.current_inflight:
+                self.current_inflight = new_value
+                runtime_state.reduce_events += 1
+                changed = "reduce"
+            self.stable_windows = 0
+        else:
+            self.stable_windows += 1
+            if self.stable_windows >= max(1, config.EDISCLOSURE_STABLE_WINDOWS_TO_GROW):
+                new_value = min(self.max_inflight, self.current_inflight + max(1, config.EDISCLOSURE_GROWTH_STEP))
+                if new_value > self.current_inflight:
+                    self.current_inflight = new_value
+                    runtime_state.increase_events += 1
+                    changed = "grow"
+                self.stable_windows = 0
+        return self.current_inflight, changed
 
 
 def stage_reports_fetch_parallel(tasks: list[dict[str, Any]], report_state: dict[tuple[str, str], dict[str, str]], logger: logging.Logger, run_no: int) -> list[ReportFetchResult]:
     results: list[ReportFetchResult] = []
     if not tasks:
         return results
-    workers = max(config.EDISCLOSURE_MIN_WORKERS, config.EDISCLOSURE_MAX_WORKERS)
-    chunk_size = max(workers * 2, 20)
-    idx = 0
+
+    runtime_state.ensure_global_warmup(logger)
+    controller = AdaptiveConcurrencyController()
+    throughput_window_sec = 60.0
+    completions: list[float] = []
+
+    max_workers = max(config.EDISCLOSURE_MIN_WORKERS, config.EDISCLOSURE_MAX_WORKERS)
     pbar = tqdm(total=len(tasks), desc="Сбор отчетности", position=0, leave=True)
-    while idx < len(tasks):
-        chunk = tasks[idx : idx + chunk_size]
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(fetch_one_emitent_reports, task, report_state, logger, run_no) for task in chunk]
-            for future in as_completed(futures):
-                results.append(future.result())
+
+    next_index = 0
+    inflight: dict[Any, float] = {}
+    stage_started = time.perf_counter()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        initial = min(controller.current_inflight, len(tasks))
+        for _ in range(initial):
+            future = pool.submit(fetch_one_emitent_reports, tasks[next_index], report_state, logger, run_no)
+            inflight[future] = time.perf_counter()
+            next_index += 1
+
+        while inflight:
+            done, _ = wait(set(inflight.keys()), timeout=1.0, return_when=FIRST_COMPLETED)
+            if not done:
+                continue
+            for future in done:
+                inflight.pop(future, None)
+                result = future.result()
+                now_ts = time.perf_counter()
+                completions.append(now_ts)
+                completions = [x for x in completions if now_ts - x <= throughput_window_sec]
+                result.telemetry["emitents_per_min_window"] = len(completions)
+                results.append(result)
                 pbar.update(1)
-        if config.EDISCLOSURE_ADAPTIVE_CONCURRENCY:
-            sample = results[-len(chunk):]
-            retryable = sum(r.telemetry.get("retryable_errors", 0) for r in sample)
-            errors = sum(1 for r in sample if r.error)
-            if retryable or errors > max(1, len(chunk) // 8):
-                workers = max(config.EDISCLOSURE_MIN_WORKERS, workers - 2)
-            else:
-                workers = min(config.EDISCLOSURE_MAX_WORKERS, workers + 1)
-        idx += chunk_size
+
+                target_inflight, action = controller.on_result(result)
+                if action in {"reduce", "grow"}:
+                    logger.info("adaptive_concurrency action=%s target_inflight=%s inflight_now=%s", action, target_inflight, len(inflight))
+
+                while next_index < len(tasks) and len(inflight) < target_inflight:
+                    future_next = pool.submit(fetch_one_emitent_reports, tasks[next_index], report_state, logger, run_no)
+                    inflight[future_next] = time.perf_counter()
+                    next_index += 1
+
     pbar.close()
+    total_elapsed = max(0.001, time.perf_counter() - stage_started)
+    for item in results:
+        item.telemetry.setdefault("emitents_per_min_stage_avg", len(tasks) / total_elapsed * 60.0)
     return results
 
 
@@ -1317,8 +1587,10 @@ def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchRe
     }
     durations = []
     slowest = []
+    telemetry_samples: list[dict[str, Any]] = []
     for res in results:
         durations.append(res.elapsed_sec)
+        telemetry_samples.append(res.telemetry)
         slowest.append((res.elapsed_sec, res.inn, res.error, res.telemetry.get("search_time", 0.0), res.telemetry.get("card_validation_time", 0.0), res.telemetry.get("files_fetch_time", 0.0), res.telemetry.get("parse_time", 0.0), res.telemetry.get("top_bottleneck", "")))
         if res.error:
             stats["errors"] += 1
@@ -1371,6 +1643,7 @@ def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchRe
     update_report_state_batch(conn, state_rows)
     conn.commit()
     stats["durations"] = durations
+    stats["telemetry_samples"] = telemetry_samples
     stats["slowest"] = sorted(slowest, key=lambda x: x[0], reverse=True)[:30]
     return stats
 
@@ -1381,32 +1654,57 @@ def print_perf_summary(stats: dict[str, Any], total_emitents: int, total_seconds
     median = statistics.median(durations) if durations else 0
     p95 = statistics.quantiles(durations, n=100)[94] if len(durations) >= 20 else (max(durations) if durations else 0)
     emitents_per_min = (total_emitents / total_seconds * 60.0) if total_seconds > 0 else 0.0
-    print(
-        f"Summary reports: emitents={total_emitents}, reports={stats.get('reports_found', 0)}, new_events={stats.get('new_events', 0)}, skipped={stats.get('skipped_unchanged', 0)}"
-    )
+
+    with runtime_state.lock:
+        request_latencies = list(runtime_state.request_latencies)
+        total_requests = runtime_state.total_requests
+        total_429 = runtime_state.status_429
+        total_timeout = runtime_state.timeout_count
+        warmup_requests = runtime_state.warmup_requests
+        files_requests = runtime_state.files_requests
+        company_search_requests = runtime_state.search_requests
+        max_consecutive_429 = runtime_state.max_consecutive_429
+        max_consecutive_timeouts = runtime_state.max_consecutive_timeouts
+        reduced = runtime_state.reduce_events
+        increased = runtime_state.increase_events
+
+    req_median = statistics.median(request_latencies) if request_latencies else 0.0
+    req_p95 = statistics.quantiles(request_latencies, n=100)[94] if len(request_latencies) >= 20 else (max(request_latencies) if request_latencies else 0.0)
+
+    emitent_rates = [float(x.get("emitents_per_min_window", 0.0)) for x in stats.get("telemetry_samples", []) if x.get("emitents_per_min_window")]
+    min_tp = min(emitent_rates) if emitent_rates else 0.0
+    max_tp = max(emitent_rates) if emitent_rates else 0.0
+    avg_tp = statistics.mean(emitent_rates) if emitent_rates else 0.0
+    cv_tp = (statistics.pstdev(emitent_rates) / avg_tp) if len(emitent_rates) > 1 and avg_tp > 0 else 0.0
+
+    avg_inflight = runtime_state.rate_limiter.max_observed_inflight
+
+    print(f"Summary reports: emitents={total_emitents}, reports={stats.get('reports_found', 0)}, new_events={stats.get('new_events', 0)}, skipped={stats.get('skipped_unchanged', 0)}")
     print(f"Timing: avg={avg:.2f}s median={median:.2f}s p95={p95:.2f}s total={total_seconds:.2f}s rate={emitents_per_min:.2f} emitents/min")
+
     logger.info(
-        "stage_reports telemetry total=%s map_hits=%s search=%s card_validations=%s files_requests=%s preview_only=%s full_scans=%s skipped=%s reports=%s new_events=%s seconds=%.2f emitents_per_min=%.2f",
+        "stage_reports telemetry emitents=%s total_requests=%s status_429=%s timeout=%s warmup_requests=%s files_requests=%s company_search_requests=%s request_latency_median=%.3f request_latency_p95=%.3f max_consecutive_429=%s max_consecutive_timeouts=%s avg_inflight=%.2f avg_emitents_min_window=%.2f throughput_min=%s throughput_max=%s throughput_cv=%.4f reduced=%s increased=%s",
         total_emitents,
-        stats.get("company_map_hits", 0),
-        stats.get("search_requests", 0),
-        stats.get("company_card_requests", 0),
-        stats.get("files_page_requests", 0),
-        stats.get("preview_only_checks", 0),
-        stats.get("full_scans", 0),
-        stats.get("skipped_unchanged", 0),
-        stats.get("reports_found", 0),
-        stats.get("new_events", 0),
-        total_seconds,
-        emitents_per_min,
+        total_requests,
+        total_429,
+        total_timeout,
+        warmup_requests,
+        files_requests,
+        company_search_requests,
+        req_median,
+        req_p95,
+        max_consecutive_429,
+        max_consecutive_timeouts,
+        avg_inflight,
+        avg_tp,
+        min_tp,
+        max_tp,
+        cv_tp,
+        reduced,
+        increased,
     )
-    logger.info(
-        "saved_requests fast_path=%s skip_types_2_5=%s top_bottleneck=%s",
-        stats.get("requests_saved_fast_path", 0),
-        stats.get("skip_types_saved", 0),
-        max((x[7] for x in stats.get("slowest", []) if x[7]), default="n/a"),
-    )
-    for row in stats.get("slowest", []):
+
+    for row in stats.get("slowest", [])[:20]:
         logger.info(
             "slow_emitent inn=%s elapsed=%.3f err=%s breakdown(search=%.3f card=%.3f files=%.3f parse=%.3f bottleneck=%s)",
             row[1],
@@ -1418,7 +1716,6 @@ def print_perf_summary(stats: dict[str, Any], total_emitents: int, total_seconds
             row[6],
             row[7],
         )
-
 
 
 
