@@ -339,7 +339,16 @@ def db_connect() -> sqlite3.Connection:
 
 
 _thread_local = threading.local()
-_files_semaphore = threading.BoundedSemaphore(max(1, int(config.EDISCLOSURE_FILES_SEMAPHORE)))
+_files_semaphore = threading.BoundedSemaphore(max(1, int(config.EDISCLOSURE_FILES_SEMAPHORE_DEFAULT)))
+_current_workers = max(1, int(config.EDISCLOSURE_FETCH_WORKERS_DEFAULT))
+_current_files_semaphore = max(1, int(config.EDISCLOSURE_FILES_SEMAPHORE_DEFAULT))
+
+
+def configure_runtime_concurrency(workers: int, files_semaphore: int) -> None:
+    global _files_semaphore, _current_workers, _current_files_semaphore
+    _current_workers = max(1, int(workers))
+    _current_files_semaphore = max(1, int(files_semaphore))
+    _files_semaphore = threading.BoundedSemaphore(_current_files_semaphore)
 
 
 @dataclass
@@ -396,6 +405,11 @@ class MonitoringRuntimeState:
 runtime_state = MonitoringRuntimeState()
 
 
+def reset_runtime_state() -> None:
+    global runtime_state
+    runtime_state = MonitoringRuntimeState()
+
+
 def get_thread_local_edisclosure_client(logger: logging.Logger) -> "EDisclosureClient":
     client = getattr(_thread_local, "edisclosure_client", None)
     if client is None:
@@ -408,8 +422,8 @@ class EDisclosureClient:
         self.logger = logger
         self.session = requests.Session()
         adapter = HTTPAdapter(
-            pool_connections=max(config.EDISCLOSURE_FETCH_WORKERS, 4),
-            pool_maxsize=max(config.EDISCLOSURE_FETCH_WORKERS * 2, 8),
+            pool_connections=max(_current_workers, 8),
+            pool_maxsize=max(_current_workers * 2, 16),
             max_retries=0,
         )
         self.session.mount("http://", adapter)
@@ -760,31 +774,30 @@ def classify_rating_change(old: str, new: str) -> str | None:
 # -----------------------------
 # Portfolio loader
 # -----------------------------
-def find_portfolio_file() -> Path | None:
-    if config.PORTFOLIO_SOURCE_FILE:
-        explicit = Path(config.PORTFOLIO_SOURCE_FILE)
-        if explicit.exists():
-            return explicit
-    candidates: list[Path] = []
-    for pattern in config.PORTFOLIO_GLOBS:
-        candidates.extend(Path.cwd().glob(pattern))
-    filtered = []
-    for p in candidates:
-        rp = p.resolve()
-        if str(config.BASE_DIR.resolve()).lower() in str(rp).lower():
-            continue
-        if rp.name in {config.PORTFOLIO_XLSX.name, config.REPORTS_XLSX.name}:
-            continue
-        filtered.append(rp)
-    if not filtered:
-        return None
-    return sorted(filtered, key=lambda x: x.stat().st_mtime, reverse=True)[0]
+def ensure_portfolio_workbook(path: Path, logger: logging.Logger) -> None:
+    manual_headers = {
+        "Акции": ["Тикер", "Наименование эмитента", "ИНН"],
+        "Облигации": ["ISIN", "Наименование эмитента", "ИНН"],
+    }
+    if path.exists():
+        wb = load_workbook(path)
+    else:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Акции"
+        ws.append(manual_headers["Акции"])
+    for sheet_name, headers in manual_headers.items():
+        if sheet_name not in wb.sheetnames:
+            ws = wb.create_sheet(sheet_name)
+            ws.append(headers)
+        elif wb[sheet_name].max_row < 1:
+            wb[sheet_name].append(headers)
+    wb.save(path)
+    logger.info("Portfolio workbook ready: %s", path)
 
 
-def load_portfolio_items(path: Path | None, logger: logging.Logger) -> list[dict[str, str]]:
-    if not path or not path.exists():
-        logger.info("Portfolio source not found")
-        return []
+def load_portfolio_items(path: Path, logger: logging.Logger) -> list[dict[str, str]]:
+    ensure_portfolio_workbook(path, logger)
     try:
         wb = load_workbook(path, data_only=True)
     except Exception as exc:  # noqa: BLE001
@@ -812,16 +825,10 @@ def load_portfolio_items(path: Path | None, logger: logging.Logger) -> list[dict
             values = list(values)
             inn = get(values, "ИНН")
             company_name = get(values, "Наименование эмитента")
-            ticker = get(values, "Тикер")
-            isin = get(values, "ISIN")
-            issuer_ticker = get(values, "Тикер эмитента")
-            if instrument_type == "Stock":
-                code = ticker
-            else:
-                code = isin or issuer_ticker or ticker
-                if not code:
-                    code = md5_short(f"{inn}_{company_name}", 12)
+            code = get(values, "Тикер") if instrument_type == "Stock" else get(values, "ISIN")
             if not code and not inn and not company_name:
+                continue
+            if not code:
                 continue
             items.append(
                 {
@@ -835,9 +842,6 @@ def load_portfolio_items(path: Path | None, logger: logging.Logger) -> list[dict
 
     result: list[dict[str, str]] = []
     for sheet_name, instrument_type in [("Акции", "Stock"), ("Облигации", "Bond")]:
-        if sheet_name not in wb.sheetnames:
-            logger.warning("Sheet %s missing in portfolio", sheet_name)
-            continue
         try:
             result.extend(parse_sheet(wb[sheet_name], instrument_type))
         except Exception as exc:  # noqa: BLE001
@@ -1027,10 +1031,14 @@ def export_portfolio(
     latest_news_by_key: dict[tuple[str, str], dict[str, str]],
     news_rows: list[dict[str, str]],
 ) -> None:
-    wb = Workbook()
+    ensure_portfolio_workbook(config.PORTFOLIO_XLSX, logging.getLogger("monitoring"))
+    wb = load_workbook(config.PORTFOLIO_XLSX)
 
-    ws_all = wb.active
-    ws_all.title = "Portfolio_All"
+    for sheet_name in ["Portfolio_All", "Portfolio_UniqueEmitents", "News"]:
+        if sheet_name in wb.sheetnames:
+            del wb[sheet_name]
+
+    ws_all = wb.create_sheet("Portfolio_All")
     ws_all.append([
         "Тип", "ISIN / Тикер", "ИНН", "Наименование", "Дата скоринга", "Последнее событие",
         "Дата последнего события", "Ссылка на последнее событие", "Последняя новость", "Дата последней новости",
@@ -1146,32 +1154,25 @@ def _calc_next_check(last_change_at: str, stable_run_count: int) -> str:
 
 
 def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str], dict[tuple[str, str], dict[str, str]], int, dict[str, int]]:
-    now_dt = datetime.now()
     emitent_map = {sanitize_str(row.inn): row for row in emitents if sanitize_str(row.inn)}
     company_rows = conn.execute("SELECT * FROM company_map").fetchall()
     mappings = {sanitize_str(r["inn"]): dict(r) for r in company_rows if sanitize_str(r["inn"]) in emitent_map}
     schedule_rows = conn.execute("SELECT * FROM emitent_schedule").fetchall()
     schedule_map = {sanitize_str(r["inn"]): dict(r) for r in schedule_rows}
 
-    due_tasks: list[dict[str, Any]] = []
-    skipped_tasks: list[dict[str, Any]] = []
+    all_tasks: list[dict[str, Any]] = []
     force_full = bool(config.EDISCLOSURE_FORCE_FULL_SCAN)
     for inn, row in emitent_map.items():
-        task = {
-            "inn": inn,
-            "company_name": sanitize_str(row.company_name),
-            "scoring_date": sanitize_str(row.scoring_date),
-            "mapping": mappings.get(inn),
-            "schedule": schedule_map.get(inn),
-            "force_full": force_full,
-        }
-        if _is_due(task["schedule"], now_dt, force_full):
-            due_tasks.append(task)
-        else:
-            skipped_tasks.append(task)
-
-    max_emitents = max(1, int(config.EDISCLOSURE_MAX_EMITENTS_PER_RUN))
-    due_tasks = due_tasks[:max_emitents]
+        all_tasks.append(
+            {
+                "inn": inn,
+                "company_name": sanitize_str(row.company_name),
+                "scoring_date": sanitize_str(row.scoring_date),
+                "mapping": mappings.get(inn),
+                "schedule": schedule_map.get(inn),
+                "force_full": force_full,
+            }
+        )
 
     existing_hashes = {r[0] for r in conn.execute("SELECT event_hash FROM report_events WHERE source IN ('e-disclosure','stale-alert')").fetchall()}
     states: dict[tuple[str, str], dict[str, str]] = {}
@@ -1182,10 +1183,10 @@ def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) 
     conn.commit()
     prep_stats = {
         "total_emitents": len(emitent_map),
-        "due_emitents": len(due_tasks),
-        "skipped_not_due": len(skipped_tasks),
+        "processed_emitents": len(all_tasks),
+        "skipped_by_cache": 0,
     }
-    return due_tasks, skipped_tasks, existing_hashes, states, run_no, prep_stats
+    return all_tasks, [], existing_hashes, states, run_no, prep_stats
 
 
 def parse_reports_page(
@@ -1274,7 +1275,7 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
         "files_page_requests": 0,
         "company_map_hits": 0,
         "event_gate_only": 0,
-        "deep_reports_scan": 0,
+        "deep_scanned": 0,
         "preview_skips": 0,
         "full_scans": 0,
     }
@@ -1311,15 +1312,10 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
                 telemetry["event_gate_only"] += 1
 
         latest_report_date = last_known_report_date
-        full_scan_old = parse_date(schedule.get("last_files_scan_at")) if schedule else None
-        force_by_age = (not full_scan_old) or (full_scan_old < datetime.now() - timedelta(days=config.EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS))
-        if force_by_age:
-            needs_deep = True
-
         scan_types = REPORT_TYPE_PRIORITY[:2]
         if needs_deep:
-            telemetry["deep_reports_scan"] += 1
-            if force_full or force_by_age:
+            telemetry["deep_scanned"] += 1
+            if force_full or not mapping or not schedule:
                 telemetry["full_scans"] += 1
                 scan_types = REPORT_TYPE_PRIORITY
             for type_id, type_name in scan_types:
@@ -1426,11 +1422,44 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
         return ReportFetchResult(inn, company_name, scoring_date, None, [], [], None, "", False, telemetry, time.perf_counter() - started, error=str(exc))
 
 
+def _read_autotune_meta(conn: sqlite3.Connection) -> tuple[int, int]:
+    workers_raw = conn.execute("SELECT value FROM meta WHERE key='edisclosure_autotune_workers'").fetchone()
+    files_raw = conn.execute("SELECT value FROM meta WHERE key='edisclosure_autotune_files_semaphore'").fetchone()
+    workers = int((workers_raw or [str(config.EDISCLOSURE_FETCH_WORKERS_DEFAULT)])[0])
+    files = int((files_raw or [str(config.EDISCLOSURE_FILES_SEMAPHORE_DEFAULT)])[0])
+    workers = max(config.EDISCLOSURE_FETCH_WORKERS_MIN, min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers))
+    files = max(config.EDISCLOSURE_FILES_SEMAPHORE_MIN, min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files))
+    return workers, files
+
+
+def _save_autotune_meta(conn: sqlite3.Connection, workers: int, files: int) -> None:
+    conn.execute("INSERT INTO meta (key, value) VALUES ('edisclosure_autotune_workers', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(workers),))
+    conn.execute("INSERT INTO meta (key, value) VALUES ('edisclosure_autotune_files_semaphore', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(files),))
+    conn.commit()
+
+
+def _autotune_concurrency(conn: sqlite3.Connection, logger: logging.Logger, workers: int, files: int) -> tuple[int, int]:
+    if not config.EDISCLOSURE_AUTOTUNE_ENABLED:
+        return workers, files
+    with runtime_state.lock:
+        total_requests = max(1, runtime_state.total_requests)
+        err_rate = (runtime_state.status_429 + runtime_state.timeout_count) / total_requests
+    if err_rate > config.EDISCLOSURE_AUTOTUNE_ERROR_RATE_THRESHOLD:
+        workers = max(config.EDISCLOSURE_FETCH_WORKERS_MIN, workers - 2)
+        files = max(config.EDISCLOSURE_FILES_SEMAPHORE_MIN, files - 1)
+    else:
+        workers = min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers + 1)
+        files = min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files + (1 if workers >= 14 else 0))
+    logger.info("autotune chosen workers=%s files_semaphore=%s err_rate=%.4f", workers, files, err_rate)
+    _save_autotune_meta(conn, workers, files)
+    return workers, files
+
+
 def stage_reports_fetch_parallel(tasks: list[dict[str, Any]], report_state: dict[tuple[str, str], dict[str, str]], logger: logging.Logger, run_no: int) -> list[ReportFetchResult]:
     if not tasks:
         return []
     results: list[ReportFetchResult] = []
-    workers = max(1, int(config.EDISCLOSURE_FETCH_WORKERS))
+    workers = max(1, int(_current_workers))
     pbar = tqdm(total=len(tasks), desc="Сбор отчетности", position=0, leave=True)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(fetch_one_emitent_reports, task, report_state, logger, run_no) for task in tasks]
@@ -1499,7 +1528,7 @@ def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchRe
         "fileload_requests": 0,
         "company_map_hits": 0,
         "event_gate_only": 0,
-        "deep_reports_scan": 0,
+        "deep_scanned": 0,
         "preview_skips": 0,
         "full_scans": 0,
         **prep_stats,
@@ -1512,7 +1541,7 @@ def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchRe
         if res.error:
             stats["errors"] += 1
             logger.warning("Failed reports INN=%s: %s", res.inn, res.error)
-        for key in ["company_search_requests", "events_requests", "files_page_requests", "company_map_hits", "event_gate_only", "deep_reports_scan", "preview_skips", "full_scans"]:
+        for key in ["company_search_requests", "events_requests", "files_page_requests", "company_map_hits", "event_gate_only", "deep_scanned", "preview_skips", "full_scans"]:
             stats[key] += int(res.telemetry.get(key, 0) or 0)
         if res.company_map_row:
             cm = res.company_map_row
@@ -1601,43 +1630,53 @@ def print_perf_summary(stats: dict[str, Any], total_emitents: int, total_seconds
         company_search_requests = runtime_state.search_requests
         events_requests = runtime_state.events_requests
         fileload_requests = runtime_state.fileload_requests
-        max_consecutive_429 = runtime_state.max_consecutive_429
-        max_consecutive_timeouts = runtime_state.max_consecutive_timeouts
 
     req_median = statistics.median(request_latencies) if request_latencies else 0.0
     req_p95 = statistics.quantiles(request_latencies, n=100)[94] if len(request_latencies) >= 20 else (max(request_latencies) if request_latencies else 0.0)
 
+    saved_company_map = max(0, stats.get("processed_emitents", 0) - stats.get("company_search_requests", 0))
+    saved_event_gate = max(0, stats.get("event_gate_only", 0) * 2)
+    saved_preview = max(0, stats.get("preview_skips", 0))
 
-    eliminated_http = max(0, stats.get("skipped_not_due", 0) + stats.get("event_gate_only", 0))
     print(
-        f"Summary reports: total={stats.get('total_emitents', total_emitents)}, due={stats.get('due_emitents', total_emitents)}, "
-        f"skipped_not_due={stats.get('skipped_not_due', 0)}, gate_only={stats.get('event_gate_only', 0)}, deep={stats.get('deep_reports_scan', 0)}, "
-        f"reports={stats.get('reports_found', 0)}, new_events={stats.get('new_events', 0)}"
+        f"Summary reports: total_emitents={stats.get('total_emitents', total_emitents)}, processed_emitents={stats.get('processed_emitents', total_emitents)}, "
+        f"skipped_by_cache={stats.get('skipped_by_cache', 0)}, event_gated={stats.get('event_gate_only', 0)}, deep_scanned={stats.get('deep_scanned', 0)}, "
+        f"reports_found={stats.get('reports_found', 0)}, new_events_found={stats.get('new_events', 0)}"
     )
-    print(f"HTTP saved estimate: emitents_without_network={stats.get('skipped_not_due', 0)} gate_saved_files={stats.get('event_gate_only', 0)} eliminated={eliminated_http}")
-    print(f"Timing: avg={avg:.2f}s median={median:.2f}s p95={p95:.2f}s total={total_seconds:.2f}s rate={emitents_per_min:.2f} emitents/min")
+    print(
+        f"HTTP saved: company_map={saved_company_map}, event_gate={saved_event_gate}, preview_skip={saved_preview}, "
+        f"company_search_requests={company_search_requests}, events_requests={events_requests}, files_requests={files_requests}, fileload_requests={fileload_requests}"
+    )
+    print(
+        f"Timing: total_stage_seconds={total_seconds:.2f}s avg={avg:.2f}s median={median:.2f}s p95={p95:.2f}s "
+        f"avg_emitents_per_minute={emitents_per_min:.2f}"
+    )
 
     logger.info(
-        "stage_reports telemetry total_emitents=%s due_emitents=%s skipped_not_due=%s hot_skip=%s event_gate_only=%s deep_reports_scan=%s total_requests=%s events_requests=%s files_requests=%s fileload_requests=%s company_search_requests=%s preview_skips=%s full_scans=%s status_429=%s timeout=%s request_latency_median=%.3f request_latency_p95=%.3f max_consecutive_429=%s max_consecutive_timeouts=%s",
+        "stage_reports telemetry total_emitents=%s processed_emitents=%s skipped_by_cache=%s event_gated=%s deep_scanned=%s company_search_requests=%s events_requests=%s files_requests=%s fileload_requests=%s preview_skips=%s reports_found=%s new_events_found=%s total_stage_seconds=%.3f avg_emitents_per_minute=%.3f median_request_latency=%.3f p95_request_latency=%.3f 429_count=%s timeout_count=%s chosen_workers=%s chosen_files_semaphore=%s http_saved_company_map=%s http_saved_event_gate=%s http_saved_preview_skip=%s",
         stats.get("total_emitents", total_emitents),
-        stats.get("due_emitents", total_emitents),
-        stats.get("skipped_not_due", 0),
-        stats.get("skipped_not_due", 0),
+        stats.get("processed_emitents", total_emitents),
+        stats.get("skipped_by_cache", 0),
         stats.get("event_gate_only", 0),
-        stats.get("deep_reports_scan", 0),
-        total_requests,
+        stats.get("deep_scanned", 0),
+        company_search_requests,
         events_requests,
         files_requests,
         fileload_requests,
-        company_search_requests,
         stats.get("preview_skips", 0),
-        stats.get("full_scans", 0),
-        total_429,
-        total_timeout,
+        stats.get("reports_found", 0),
+        stats.get("new_events", 0),
+        total_seconds,
+        emitents_per_min,
         req_median,
         req_p95,
-        max_consecutive_429,
-        max_consecutive_timeouts,
+        total_429,
+        total_timeout,
+        stats.get("chosen_workers", _current_workers),
+        stats.get("chosen_files_semaphore", _current_files_semaphore),
+        saved_company_map,
+        saved_event_gate,
+        saved_preview,
     )
 
     for row in stats.get("slowest", [])[:20]:
@@ -1671,11 +1710,17 @@ def run_monitoring() -> None:
     print("Этап 2: Сбор отчетности")
 
     def stage_reports() -> None:
+        reset_runtime_state()
+        workers, files_semaphore = _read_autotune_meta(conn)
+        configure_runtime_concurrency(workers, files_semaphore)
         tasks, skipped_tasks, existing_hashes, report_state, run_no, prep_stats = stage_reports_prepare(conn, emitents)
         stage_started = time.perf_counter()
         results = stage_reports_fetch_parallel(tasks, report_state, logger, run_no)
         stats = stage_reports_flush_db(conn, results, existing_hashes, all_new_event_hashes, logger, prep_stats)
-        print_perf_summary(stats, prep_stats.get("due_emitents", len(tasks)), time.perf_counter() - stage_started, logger)
+        chosen_workers, chosen_files_semaphore = _autotune_concurrency(conn, logger, workers, files_semaphore)
+        stats["chosen_workers"] = chosen_workers
+        stats["chosen_files_semaphore"] = chosen_files_semaphore
+        print_perf_summary(stats, prep_stats.get("processed_emitents", len(tasks)), time.perf_counter() - stage_started, logger)
 
     _, elapsed = timed(stage_reports)
     stage_times["Этап 2: Сбор отчетности"] = elapsed
@@ -1741,7 +1786,7 @@ def run_monitoring() -> None:
     print("Этап 4: Загрузка портфеля")
 
     def stage_portfolio() -> list[dict[str, str]]:
-        src = find_portfolio_file()
+        src = config.PORTFOLIO_XLSX
         items = load_portfolio_items(src, logger)
         conn.execute("DELETE FROM portfolio_items")
         for item in items:
@@ -1757,19 +1802,12 @@ def run_monitoring() -> None:
                     item.get("instrument_code", ""),
                     item.get("inn", ""),
                     item.get("company_name", ""),
-                    str(src) if src else "",
+                    str(src),
                     now_iso(),
                 ),
             )
         conn.commit()
 
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "portfolio_snapshot"
-        ws.append(["instrument_type", "instrument_code", "inn", "company_name"])
-        for item in items:
-            ws.append([item.get("instrument_type", ""), item.get("instrument_code", ""), item.get("inn", ""), item.get("company_name", "")])
-        wb.save(config.PORTFOLIO_SNAPSHOT_XLSX)
         return items
 
     portfolio_items, elapsed = timed(stage_portfolio)
