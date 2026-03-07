@@ -81,29 +81,44 @@ HTTP_RETRY_AFTER_MAX_SECONDS = 30
 # Задержка = BACKOFF_BASE_SECONDS * (2 ** attempt).
 BACKOFF_BASE_SECONDS = 0.4
 
-# TTL маппинга INN->company_id в днях.
-COMPANY_MAP_TTL_DAYS = 30
+# Soft TTL маппинга INN->company_id в днях (можно обновлять в фоне, но не ломать hot path).
+# Значения: int >= 1. По умолчанию: 30.
+COMPANY_MAP_SOFT_TTL_DAYS = 30
+
+# Hard TTL маппинга INN->company_id в днях (после истечения нужен новый company search).
+# Значения: int >= 1. По умолчанию: 90.
+COMPANY_MAP_HARD_TTL_DAYS = 90
 
 # TTL кэша карточки компании (часы).
 EDISCLOSURE_CARD_TTL_HOURS = 24
 
-# Режим обхода e-disclosure.
-# Значения: "incremental" (быстрый режим по умолчанию) или "full_sync".
-EDISCLOSURE_MODE = "incremental"
+# Принудительный full scan всех эмитентов (override scheduler + event gate).
+# Значения: bool. По умолчанию: False.
+EDISCLOSURE_FORCE_FULL_SCAN = False
 
-# Запускать полный scan раз в N прогонов (когда режим incremental).
-EDISCLOSURE_FULL_SCAN_EVERY_N_RUNS = 20
+# Интервалы scheduler для stage_reports (часы).
+# RECENT_CHANGE: если изменения были в последние 30 дней.
+# ACTIVE: если изменения были в последние 90 дней.
+# STABLE: давно стабильный эмитент.
+EDISCLOSURE_RECENT_CHANGE_RECHECK_HOURS = 6
+EDISCLOSURE_ACTIVE_RECHECK_HOURS = 24
+EDISCLOSURE_STABLE_RECHECK_HOURS = 72
 
-# Если последний full scan старше N дней, делаем полный обход.
-EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS = 7
+# Максимум эмитентов, реально обрабатываемых в одном запуске stage_reports.
+# Значения: int >= 1. По умолчанию: 150.
+EDISCLOSURE_MAX_EMITENTS_PER_RUN = 150
+
+# Через сколько дней без full scan принудительно выполнять deep pass.
+# Значения: int >= 1. По умолчанию: 14.
+EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS = 14
 
 # Фиксированное число worker-потоков для stage_reports_fetch_parallel.
-# Значения: int >= 1. По умолчанию: 4.
-EDISCLOSURE_FETCH_WORKERS = 4
+# Значения: int >= 1. По умолчанию: 6.
+EDISCLOSURE_FETCH_WORKERS = 6
 
 # Фиксированный лимит только для тяжелого endpoint files.aspx.
-# Значения: int >= 1. По умолчанию: 2.
-EDISCLOSURE_FILES_SEMAPHORE = 2
+# Значения: int >= 1. По умолчанию: 3.
+EDISCLOSURE_FILES_SEMAPHORE = 3
 
 # Максимум кандидатов компании, для которых проверяется карточка при неоднозначном поиске.
 EDISCLOSURE_MAX_CARD_CHECKS = 2

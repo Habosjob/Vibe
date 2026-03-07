@@ -140,6 +140,10 @@ def _detect_endpoint_kind(url: str, request_kind: str | None = None) -> str:
     lower = url.lower()
     if "files.aspx" in lower:
         return "files"
+    if "fileload.ashx" in lower:
+        return "fileload"
+    if "/api/events/page" in lower:
+        return "events"
     if "/api/search/companies" in lower:
         return "search"
     if "poisk-po-kompaniyam" in lower or "company.aspx" in lower:
@@ -249,8 +253,21 @@ CREATE TABLE IF NOT EXISTS report_state (
     latest_hash TEXT,
     latest_placement_date TEXT,
     latest_foundation_date TEXT,
+    top_row_hash TEXT,
+    page_checked_at TEXT,
     last_checked_at TEXT,
     PRIMARY KEY (inn, report_type_id)
+);
+CREATE TABLE IF NOT EXISTS emitent_schedule (
+    inn TEXT PRIMARY KEY,
+    company_id TEXT,
+    last_checked_at TEXT,
+    next_check_at TEXT,
+    last_change_at TEXT,
+    stable_run_count INTEGER,
+    last_mode TEXT,
+    last_event_gate_at TEXT,
+    last_files_scan_at TEXT
 );
 CREATE TABLE IF NOT EXISTS emitents_snapshot (
     inn TEXT PRIMARY KEY,
@@ -303,6 +320,15 @@ def db_connect() -> sqlite3.Connection:
     for col in ["full_scan_at", "fast_scan_at", "verified_inn", "validation_status", "last_success_at"]:
         if col not in company_cols:
             conn.execute(f"ALTER TABLE company_map ADD COLUMN {col} TEXT")
+    report_state_cols = {r[1] for r in conn.execute("PRAGMA table_info(report_state)").fetchall()}
+    for col in ["top_row_hash", "page_checked_at"]:
+        if col not in report_state_cols:
+            conn.execute(f"ALTER TABLE report_state ADD COLUMN {col} TEXT")
+    schedule_cols = {r[1] for r in conn.execute("PRAGMA table_info(emitent_schedule)").fetchall()}
+    for col in ["company_id", "last_checked_at", "next_check_at", "last_change_at", "stable_run_count", "last_mode", "last_event_gate_at", "last_files_scan_at"]:
+        if col not in schedule_cols:
+            col_type = "INTEGER" if col == "stable_run_count" else "TEXT"
+            conn.execute(f"ALTER TABLE emitent_schedule ADD COLUMN {col} {col_type}")
     conn.commit()
     return conn
 
@@ -331,6 +357,8 @@ class MonitoringRuntimeState:
         self.total_requests = 0
         self.files_requests = 0
         self.search_requests = 0
+        self.events_requests = 0
+        self.fileload_requests = 0
         self.status_429 = 0
         self.timeout_count = 0
         self.request_latencies: list[float] = []
@@ -347,6 +375,10 @@ class MonitoringRuntimeState:
                 self.files_requests += 1
             elif event.endpoint == "search":
                 self.search_requests += 1
+            elif event.endpoint == "events":
+                self.events_requests += 1
+            elif event.endpoint == "fileload":
+                self.fileload_requests += 1
             if event.is_429:
                 self.status_429 += 1
                 self._consecutive_429 += 1
@@ -512,6 +544,55 @@ class EDisclosureClient:
             reverse=True,
         )
         return ranked[0]
+
+    def get_reports_page_cached(self, company_id: str, type_id: int, force_refresh: bool = False) -> str:
+        cache_key = f"reports_page_{type_id}"
+        if not force_refresh:
+            cached = self._load_cache(company_id, cache_key, config.EDISCLOSURE_REPORTS_TTL_HOURS)
+            if cached and isinstance(cached.get("html"), str):
+                return cached["html"]
+        page_url = f"https://www.e-disclosure.ru/portal/files.aspx?id={company_id}&type={type_id}"
+        html = request_with_retries(self.session, "GET", page_url, self.logger, request_kind="files").text
+        self._save_cache(company_id, cache_key, {"html": html})
+        return html
+
+    def get_company_events(self, company_id: str, days_back: int = 60) -> list[dict[str, str]]:
+        current_year = datetime.now().year
+        min_date = datetime.now() - timedelta(days=max(1, days_back))
+        rows: list[dict[str, str]] = []
+        for year in [current_year, current_year - 1]:
+            cache_key = f"events_{year}"
+            cached = self._load_cache(company_id, cache_key, config.EDISCLOSURE_EVENTS_TTL_HOURS)
+            payload = None
+            if cached and isinstance(cached.get("payload"), dict):
+                payload = cached["payload"]
+            if payload is None:
+                url = f"https://www.e-disclosure.ru/api/events/page?companyId={company_id}&year={year}"
+                resp = request_with_retries(self.session, "GET", url, self.logger, request_kind="events")
+                payload = resp.json() if resp.text else {}
+                self._save_cache(company_id, cache_key, {"payload": payload})
+            items = payload.get("events") or payload.get("items") or payload.get("data") or []
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                pseudo_guid = sanitize_str(item.get("pseudoGUID") or item.get("eventId") or item.get("id"))
+                event_name = sanitize_str(item.get("eventName") or item.get("name"))
+                event_date = to_iso_date_str(item.get("eventDate"))
+                pub_date = to_iso_date_str(item.get("pubDate") or item.get("publishDate"))
+                if not pseudo_guid:
+                    continue
+                dt = parse_date(pub_date or event_date)
+                if dt and dt < min_date:
+                    continue
+                rows.append({
+                    "pseudoGUID": pseudo_guid,
+                    "eventName": event_name,
+                    "eventDate": event_date,
+                    "pubDate": pub_date,
+                    "isCorrectedByAnotherEvent": sanitize_str(item.get("isCorrectedByAnotherEvent")),
+                    "event_url": f"https://www.e-disclosure.ru/portal/event.aspx?EventId={pseudo_guid}",
+                })
+        return rows
 
     def get_financial_reports(self, company_id: str) -> list[dict[str, str]]:
         cached = self._load_cache(company_id, "reports", config.EDISCLOSURE_REPORTS_TTL_HOURS)
@@ -1026,7 +1107,7 @@ def export_portfolio(
 
 
 REPORT_TYPE_PRIORITY = [(3, "Финансовая"), (4, "Консолидированная"), (5, "Отчет эмитента"), (2, "Годовая")]
-REPORT_KEYWORDS = ("отчет", "бухгалтер", "финанс", "баланс", "прибыль", "убыток", "аудитор", "годовой", "промежуточный")
+REPORT_KEYWORDS = ("отчет", "финансов", "бухгалтер", "консолид", "эмитент", "годовой", "промежуточный", "аудитор")
 
 
 @dataclass
@@ -1037,6 +1118,7 @@ class ReportFetchResult:
     company_map_row: dict[str, str] | None
     report_events: list[dict[str, Any]]
     report_state_rows: list[dict[str, str]]
+    schedule_row: dict[str, Any] | None
     latest_report_date: str
     skipped_unchanged: bool
     telemetry: dict[str, Any]
@@ -1044,13 +1126,53 @@ class ReportFetchResult:
     error: str = ""
 
 
-def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) -> tuple[list[dict[str, Any]], set[str], dict[tuple[str, str], dict[str, str]], int]:
+def _is_due(schedule_row: dict[str, Any] | None, now_dt: datetime, force_full: bool) -> bool:
+    if force_full or not schedule_row:
+        return True
+    next_check = parse_date(schedule_row.get("next_check_at"))
+    if not next_check:
+        return True
+    return next_check <= now_dt
+
+
+def _calc_next_check(last_change_at: str, stable_run_count: int) -> str:
+    last_change_dt = parse_date(last_change_at)
+    if last_change_dt and last_change_dt >= datetime.now() - timedelta(days=30):
+        return (datetime.now() + timedelta(hours=config.EDISCLOSURE_RECENT_CHANGE_RECHECK_HOURS)).isoformat(timespec="seconds")
+    if last_change_dt and last_change_dt >= datetime.now() - timedelta(days=90):
+        return (datetime.now() + timedelta(hours=config.EDISCLOSURE_ACTIVE_RECHECK_HOURS)).isoformat(timespec="seconds")
+    hours = config.EDISCLOSURE_STABLE_RECHECK_HOURS if stable_run_count < 5 else config.EDISCLOSURE_STABLE_RECHECK_HOURS * 2
+    return (datetime.now() + timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str], dict[tuple[str, str], dict[str, str]], int, dict[str, int]]:
+    now_dt = datetime.now()
     emitent_map = {sanitize_str(row.inn): row for row in emitents if sanitize_str(row.inn)}
     company_rows = conn.execute("SELECT * FROM company_map").fetchall()
     mappings = {sanitize_str(r["inn"]): dict(r) for r in company_rows if sanitize_str(r["inn"]) in emitent_map}
-    tasks: list[dict[str, Any]] = []
+    schedule_rows = conn.execute("SELECT * FROM emitent_schedule").fetchall()
+    schedule_map = {sanitize_str(r["inn"]): dict(r) for r in schedule_rows}
+
+    due_tasks: list[dict[str, Any]] = []
+    skipped_tasks: list[dict[str, Any]] = []
+    force_full = bool(config.EDISCLOSURE_FORCE_FULL_SCAN)
     for inn, row in emitent_map.items():
-        tasks.append({"inn": inn, "company_name": sanitize_str(row.company_name), "scoring_date": sanitize_str(row.scoring_date), "mapping": mappings.get(inn)})
+        task = {
+            "inn": inn,
+            "company_name": sanitize_str(row.company_name),
+            "scoring_date": sanitize_str(row.scoring_date),
+            "mapping": mappings.get(inn),
+            "schedule": schedule_map.get(inn),
+            "force_full": force_full,
+        }
+        if _is_due(task["schedule"], now_dt, force_full):
+            due_tasks.append(task)
+        else:
+            skipped_tasks.append(task)
+
+    max_emitents = max(1, int(config.EDISCLOSURE_MAX_EMITENTS_PER_RUN))
+    due_tasks = due_tasks[:max_emitents]
+
     existing_hashes = {r[0] for r in conn.execute("SELECT event_hash FROM report_events WHERE source IN ('e-disclosure','stale-alert')").fetchall()}
     states: dict[tuple[str, str], dict[str, str]] = {}
     for r in conn.execute("SELECT * FROM report_state").fetchall():
@@ -1058,7 +1180,12 @@ def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) 
     run_no = int((conn.execute("SELECT value FROM meta WHERE key = 'edisclosure_run_no'").fetchone() or ["0"])[0] or "0") + 1
     conn.execute("INSERT INTO meta (key, value) VALUES ('edisclosure_run_no', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(run_no),))
     conn.commit()
-    return tasks, existing_hashes, states, run_no
+    prep_stats = {
+        "total_emitents": len(emitent_map),
+        "due_emitents": len(due_tasks),
+        "skipped_not_due": len(skipped_tasks),
+    }
+    return due_tasks, skipped_tasks, existing_hashes, states, run_no, prep_stats
 
 
 def parse_reports_page(
@@ -1069,15 +1196,14 @@ def parse_reports_page(
     known_state: dict[str, str] | None,
     preview_limit: int | None = None,
     max_new_rows: int | None = None,
-) -> tuple[list[dict[str, str]], bool]:
+) -> tuple[list[dict[str, str]], str]:
     soup = BeautifulSoup(html, "lxml")
     table = soup.find("table", class_="zebra")
     if not table:
-        return [], False
-    known_hash = sanitize_str((known_state or {}).get("latest_hash"))
-    known_date = sanitize_str((known_state or {}).get("latest_placement_date"))
-    fresh_found = False
+        return [], ""
     rows: list[dict[str, str]] = []
+    known_hash = sanitize_str((known_state or {}).get("latest_hash"))
+    top_row_hash = ""
     for idx, tr in enumerate(table.find_all("tr")):
         if preview_limit is not None and idx >= preview_limit:
             break
@@ -1098,15 +1224,14 @@ def parse_reports_page(
                 href = urljoin("https://www.e-disclosure.ru", href)
             if "FileLoad.ashx" in href:
                 file_url = href
-        hash_value = md5_short(f"{company_id}_{type_id}_{doc_type}_{period}_{placement_date}", 16)
-        if known_hash and hash_value == known_hash:
+        row_hash = md5_short(f"{company_id}_{type_id}_{doc_type}_{period}_{placement_date}", 16)
+        if not top_row_hash:
+            top_row_hash = row_hash
+        if known_hash and row_hash == known_hash:
             break
-        if known_date and placement_date and placement_date <= known_date and not fresh_found:
-            break
-        if placement_date and known_date and placement_date > known_date:
-            fresh_found = True
         rows.append({
-            "hash": hash_value,
+            "hash": row_hash,
+            "row_hash": row_hash,
             "company_id": company_id,
             "type_id": str(type_id),
             "report_type": type_name,
@@ -1119,161 +1244,171 @@ def parse_reports_page(
         })
         if max_new_rows and len(rows) >= max_new_rows:
             break
-    return rows, fresh_found
+    return rows, top_row_hash
+
+
+def _event_is_relevant(event_name: str) -> bool:
+    low = sanitize_str(event_name).lower()
+    return any(k in low for k in REPORT_KEYWORDS)
 
 
 def choose_company_fast(client: EDisclosureClient, inn: str, company_name: str, mapping: dict[str, Any] | None, telemetry: dict[str, Any]) -> dict[str, str] | None:
     if mapping and sanitize_str(mapping.get("company_id")):
         checked = parse_date(mapping.get("last_checked_at"))
         verified_inn = sanitize_str(mapping.get("verified_inn"))
-        if checked and checked >= datetime.now() - timedelta(days=config.COMPANY_MAP_TTL_DAYS) and (not verified_inn or verified_inn == inn):
+        if checked and checked >= datetime.now() - timedelta(days=config.COMPANY_MAP_HARD_TTL_DAYS) and (not verified_inn or verified_inn == inn):
             telemetry["company_map_hits"] += 1
             return {"id": sanitize_str(mapping.get("company_id")), "name": sanitize_str(mapping.get("company_name")), "url": sanitize_str(mapping.get("company_url"))}
-    telemetry["search_requests"] += 1
+    telemetry["company_search_requests"] += 1
     candidates = client.search_company_by_inn(inn)
     if not candidates:
         return None
-    if len(candidates) == 1:
-        return candidates[0]
-    low_name = sanitize_str(company_name).lower()
-    ranked = sorted(candidates, key=lambda x: int(sanitize_str(x.get("docCount", "0")) or "0"), reverse=True)
-    if low_name:
-        filtered = [c for c in ranked if low_name in sanitize_str(c.get("name")).lower()]
-        if len(filtered) == 1:
-            return filtered[0]
-        if filtered:
-            ranked = filtered
-    for candidate in ranked[: config.EDISCLOSURE_MAX_CARD_CHECKS]:
-        telemetry["company_card_requests"] += 1
-        card_started = time.perf_counter()
-        card = client.get_company_card(candidate["id"])
-        telemetry["card_validation_time"] += time.perf_counter() - card_started
-        if sanitize_str(card.get("inn")) == inn:
-            return candidate
-    return ranked[0] if ranked else None
+    return client.choose_best_candidate(inn, candidates, company_name)
 
 
 def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[str, str], dict[str, str]], logger: logging.Logger, run_no: int) -> ReportFetchResult:
     started = time.perf_counter()
     telemetry = {
-        "search_requests": 0,
-        "company_card_requests": 0,
+        "company_search_requests": 0,
+        "events_requests": 0,
         "files_page_requests": 0,
-        "cache_hits": 0,
         "company_map_hits": 0,
-        "preview_only_checks": 0,
+        "event_gate_only": 0,
+        "deep_reports_scan": 0,
+        "preview_skips": 0,
         "full_scans": 0,
-        "skip_types_saved": 0,
-        "requests_saved_fast_path": 0,
-        "retryable_errors": 0,
-        "search_time": 0.0,
-        "card_validation_time": 0.0,
-        "files_fetch_time": 0.0,
-        "parse_time": 0.0,
-        "top_bottleneck": "",
     }
-    client = get_thread_local_edisclosure_client(logger)
     inn = task["inn"]
     company_name = task["company_name"]
     scoring_date = task["scoring_date"]
     mapping = task.get("mapping") or {}
-    with runtime_state.lock:
-        base_429 = runtime_state.status_429
-        base_timeout = runtime_state.timeout_count
+    schedule = task.get("schedule") or {}
+    force_full = bool(task.get("force_full"))
+    client = get_thread_local_edisclosure_client(logger)
     try:
-        t0 = time.perf_counter()
         company = choose_company_fast(client, inn, company_name, mapping, telemetry)
-        telemetry["search_time"] = time.perf_counter() - t0
         if not company or not company.get("id"):
-            return ReportFetchResult(inn, company_name, scoring_date, None, [], [], "", False, telemetry, time.perf_counter() - started)
+            return ReportFetchResult(inn, company_name, scoring_date, None, [], [], None, "", False, telemetry, time.perf_counter() - started)
         company_id = sanitize_str(company.get("id"))
+
         report_events: list[dict[str, Any]] = []
         report_states: list[dict[str, str]] = []
-        latest_report_date = ""
+        last_known_report_date = ""
+        for type_id, _ in REPORT_TYPE_PRIORITY:
+            known = state_by_type.get((inn, str(type_id)))
+            if known and sanitize_str(known.get("latest_placement_date")) > last_known_report_date:
+                last_known_report_date = sanitize_str(known.get("latest_placement_date"))
 
-        full_scan_due_by_run = run_no % max(config.EDISCLOSURE_FULL_SCAN_EVERY_N_RUNS, 1) == 0
-        last_full_scan = parse_date(mapping.get("full_scan_at")) if mapping else None
-        full_scan_due_by_age = (not last_full_scan) or (last_full_scan < datetime.now() - timedelta(days=config.EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS))
-        base_full_scan = config.EDISCLOSURE_MODE == "full_sync" or full_scan_due_by_run or full_scan_due_by_age or not mapping
+        needs_deep = force_full or not mapping or not schedule
+        if not needs_deep:
+            telemetry["events_requests"] += 1
+            events = client.get_company_events(company_id, days_back=60)
+            rel = [e for e in events if _event_is_relevant(e.get("eventName", ""))]
+            newest_rel = max([sanitize_str(x.get("pubDate") or x.get("eventDate")) for x in rel] or [""])
+            if newest_rel and (not last_known_report_date or newest_rel > last_known_report_date):
+                needs_deep = True
+            else:
+                telemetry["event_gate_only"] += 1
 
-        priority_types = REPORT_TYPE_PRIORITY[:2]
-        all_types = REPORT_TYPE_PRIORITY
-        type_plan = all_types if base_full_scan else priority_types
-        detected_change = False
-        unchanged_types = 0
+        latest_report_date = last_known_report_date
+        full_scan_old = parse_date(schedule.get("last_files_scan_at")) if schedule else None
+        force_by_age = (not full_scan_old) or (full_scan_old < datetime.now() - timedelta(days=config.EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS))
+        if force_by_age:
+            needs_deep = True
 
-        for idx, (type_id, type_name) in enumerate(type_plan):
-            known_state = state_by_type.get((inn, str(type_id)))
-            page_url = f"https://www.e-disclosure.ru/portal/files.aspx?id={company_id}&type={type_id}"
-            fetch_started = time.perf_counter()
-            telemetry["files_page_requests"] += 1
-            html = request_with_retries(client.session, "GET", page_url, logger).text
-            telemetry["files_fetch_time"] += time.perf_counter() - fetch_started
-
-            parse_started = time.perf_counter()
-            preview_rows, preview_fresh = parse_reports_page(html, company_id, type_id, type_name, known_state, preview_limit=config.EDISCLOSURE_PREVIEW_ROWS)
-            telemetry["parse_time"] += time.perf_counter() - parse_started
-
-            if known_state and not preview_rows and not preview_fresh:
-                telemetry["preview_only_checks"] += 1
-                unchanged_types += 1
-                report_states.append({"inn": inn, "company_id": company_id, "report_type_id": str(type_id), "latest_hash": sanitize_str(known_state.get("latest_hash")), "latest_placement_date": sanitize_str(known_state.get("latest_placement_date")), "latest_foundation_date": sanitize_str(known_state.get("latest_foundation_date")), "last_checked_at": now_iso()})
-                continue
-
-            detected_change = True
-            parse_started = time.perf_counter()
-            rows, _ = parse_reports_page(
-                html,
-                company_id,
-                type_id,
-                type_name,
-                known_state,
-                preview_limit=None,
-                max_new_rows=config.EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE,
-            )
-            telemetry["parse_time"] += time.perf_counter() - parse_started
-            if not rows and known_state:
-                report_states.append({"inn": inn, "company_id": company_id, "report_type_id": str(type_id), "latest_hash": sanitize_str(known_state.get("latest_hash")), "latest_placement_date": sanitize_str(known_state.get("latest_placement_date")), "latest_foundation_date": sanitize_str(known_state.get("latest_foundation_date")), "last_checked_at": now_iso()})
-                continue
-            if rows:
-                top = rows[0]
-                report_states.append({"inn": inn, "company_id": company_id, "report_type_id": str(type_id), "latest_hash": top.get("hash", ""), "latest_placement_date": top.get("placement_date", ""), "latest_foundation_date": top.get("foundation_date", ""), "last_checked_at": now_iso()})
-            for rep in rows:
-                event_date = rep.get("placement_date") or rep.get("foundation_date")
-                if event_date and (not latest_report_date or event_date > latest_report_date):
-                    latest_report_date = event_date
-                report_events.append({"event_hash": rep["hash"], "inn": inn, "company_name": company_name or company.get("name", ""), "scoring_date": scoring_date, "event_date": event_date, "event_type": "Опубликована новая отчетность", "event_url": rep.get("file_url") or rep.get("page_url", ""), "source": "e-disclosure", "payload": rep})
-
-            if idx == 1 and not base_full_scan and not detected_change:
-                telemetry["requests_saved_fast_path"] += 2
-                telemetry["skip_types_saved"] += 2
-                break
-
-        if (not base_full_scan) and detected_change:
-            telemetry["full_scans"] += 1
-            for type_id, type_name in REPORT_TYPE_PRIORITY[2:]:
+        scan_types = REPORT_TYPE_PRIORITY[:2]
+        if needs_deep:
+            telemetry["deep_reports_scan"] += 1
+            if force_full or force_by_age:
+                telemetry["full_scans"] += 1
+                scan_types = REPORT_TYPE_PRIORITY
+            for type_id, type_name in scan_types:
                 known_state = state_by_type.get((inn, str(type_id)))
-                page_url = f"https://www.e-disclosure.ru/portal/files.aspx?id={company_id}&type={type_id}"
-                fetch_started = time.perf_counter()
+                html = client.get_reports_page_cached(company_id, type_id, force_refresh=True)
                 telemetry["files_page_requests"] += 1
-                html = request_with_retries(client.session, "GET", page_url, logger).text
-                telemetry["files_fetch_time"] += time.perf_counter() - fetch_started
-                parse_started = time.perf_counter()
-                rows, _ = parse_reports_page(html, company_id, type_id, type_name, known_state, max_new_rows=config.EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE)
-                telemetry["parse_time"] += time.perf_counter() - parse_started
+
+                _, top_preview_hash = parse_reports_page(html, company_id, type_id, type_name, known_state, preview_limit=config.EDISCLOSURE_PREVIEW_ROWS, max_new_rows=1)
+                if known_state and top_preview_hash and top_preview_hash == sanitize_str(known_state.get("top_row_hash")) and not force_full:
+                    telemetry["preview_skips"] += 1
+                    report_states.append({
+                        "inn": inn,
+                        "company_id": company_id,
+                        "report_type_id": str(type_id),
+                        "latest_hash": sanitize_str(known_state.get("latest_hash")),
+                        "latest_placement_date": sanitize_str(known_state.get("latest_placement_date")),
+                        "latest_foundation_date": sanitize_str(known_state.get("latest_foundation_date")),
+                        "top_row_hash": top_preview_hash,
+                        "page_checked_at": now_iso(),
+                        "last_checked_at": now_iso(),
+                    })
+                    continue
+
+                rows, top_row_hash = parse_reports_page(
+                    html,
+                    company_id,
+                    type_id,
+                    type_name,
+                    known_state,
+                    max_new_rows=config.EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE,
+                )
                 if rows:
                     top = rows[0]
-                    report_states.append({"inn": inn, "company_id": company_id, "report_type_id": str(type_id), "latest_hash": top.get("hash", ""), "latest_placement_date": top.get("placement_date", ""), "latest_foundation_date": top.get("foundation_date", ""), "last_checked_at": now_iso()})
+                    report_states.append({
+                        "inn": inn,
+                        "company_id": company_id,
+                        "report_type_id": str(type_id),
+                        "latest_hash": top.get("hash", ""),
+                        "latest_placement_date": top.get("placement_date", ""),
+                        "latest_foundation_date": top.get("foundation_date", ""),
+                        "top_row_hash": top_row_hash,
+                        "page_checked_at": now_iso(),
+                        "last_checked_at": now_iso(),
+                    })
                 elif known_state:
-                    report_states.append({"inn": inn, "company_id": company_id, "report_type_id": str(type_id), "latest_hash": sanitize_str(known_state.get("latest_hash")), "latest_placement_date": sanitize_str(known_state.get("latest_placement_date")), "latest_foundation_date": sanitize_str(known_state.get("latest_foundation_date")), "last_checked_at": now_iso()})
+                    report_states.append({
+                        "inn": inn,
+                        "company_id": company_id,
+                        "report_type_id": str(type_id),
+                        "latest_hash": sanitize_str(known_state.get("latest_hash")),
+                        "latest_placement_date": sanitize_str(known_state.get("latest_placement_date")),
+                        "latest_foundation_date": sanitize_str(known_state.get("latest_foundation_date")),
+                        "top_row_hash": top_row_hash or sanitize_str(known_state.get("top_row_hash")),
+                        "page_checked_at": now_iso(),
+                        "last_checked_at": now_iso(),
+                    })
                 for rep in rows:
                     event_date = rep.get("placement_date") or rep.get("foundation_date")
                     if event_date and (not latest_report_date or event_date > latest_report_date):
                         latest_report_date = event_date
-                    report_events.append({"event_hash": rep["hash"], "inn": inn, "company_name": company_name or company.get("name", ""), "scoring_date": scoring_date, "event_date": event_date, "event_type": "Опубликована новая отчетность", "event_url": rep.get("file_url") or rep.get("page_url", ""), "source": "e-disclosure", "payload": rep})
+                    report_events.append({
+                        "event_hash": rep["hash"],
+                        "inn": inn,
+                        "company_name": company_name or company.get("name", ""),
+                        "scoring_date": scoring_date,
+                        "event_date": event_date,
+                        "event_type": "Опубликована новая отчетность",
+                        "event_url": rep.get("file_url") or rep.get("page_url", ""),
+                        "source": "e-disclosure",
+                        "payload": rep,
+                    })
 
-        skipped_unchanged = unchanged_types >= len(priority_types) and not detected_change
         now_ts = now_iso()
+        stable_count = int(schedule.get("stable_run_count") or 0)
+        if report_events:
+            stable_count = 0
+        else:
+            stable_count += 1
+        schedule_row = {
+            "inn": inn,
+            "company_id": company_id,
+            "last_checked_at": now_ts,
+            "next_check_at": _calc_next_check(latest_report_date, stable_count),
+            "last_change_at": latest_report_date or sanitize_str(schedule.get("last_change_at")),
+            "stable_run_count": stable_count,
+            "last_mode": "deep" if needs_deep else "event_gate_only",
+            "last_event_gate_at": now_ts,
+            "last_files_scan_at": now_ts if needs_deep else sanitize_str(schedule.get("last_files_scan_at")),
+        }
         company_row = {
             "inn": inn,
             "company_id": company_id,
@@ -1282,34 +1417,20 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
             "verified_inn": inn,
             "validation_status": "verified",
             "last_success_at": now_ts,
-            "full_scan_at": now_ts if (base_full_scan or detected_change) else sanitize_str(mapping.get("full_scan_at")),
+            "full_scan_at": now_ts if force_full else sanitize_str(mapping.get("full_scan_at")),
             "fast_scan_at": now_ts,
             "last_checked_at": now_ts,
         }
-        bottleneck = max((("search", telemetry["search_time"]), ("files", telemetry["files_fetch_time"]), ("parse", telemetry["parse_time"]), ("card", telemetry["card_validation_time"])), key=lambda x: x[1])[0]
-        telemetry["top_bottleneck"] = bottleneck
-        with runtime_state.lock:
-            telemetry["request_429"] = max(0, runtime_state.status_429 - base_429)
-            telemetry["request_timeouts"] = max(0, runtime_state.timeout_count - base_timeout)
-        return ReportFetchResult(inn, company_name, scoring_date, company_row, report_events, report_states, latest_report_date, skipped_unchanged, telemetry, time.perf_counter() - started)
+        return ReportFetchResult(inn, company_name, scoring_date, company_row, report_events, report_states, schedule_row, latest_report_date, not needs_deep, telemetry, time.perf_counter() - started)
     except Exception as exc:  # noqa: BLE001
-        msg = str(exc)
-        if any(x in msg for x in ["429", "403", "timeout", "timed out", "Connection", "HTTP 5"]):
-            telemetry["retryable_errors"] += 1
-        with runtime_state.lock:
-            telemetry["request_429"] = max(0, runtime_state.status_429 - base_429)
-            telemetry["request_timeouts"] = max(0, runtime_state.timeout_count - base_timeout)
-        return ReportFetchResult(inn, company_name, scoring_date, None, [], [], "", False, telemetry, time.perf_counter() - started, error=msg)
+        return ReportFetchResult(inn, company_name, scoring_date, None, [], [], None, "", False, telemetry, time.perf_counter() - started, error=str(exc))
 
 
 def stage_reports_fetch_parallel(tasks: list[dict[str, Any]], report_state: dict[tuple[str, str], dict[str, str]], logger: logging.Logger, run_no: int) -> list[ReportFetchResult]:
     if not tasks:
         return []
-
     results: list[ReportFetchResult] = []
     workers = max(1, int(config.EDISCLOSURE_FETCH_WORKERS))
-    stage_started = time.perf_counter()
-
     pbar = tqdm(total=len(tasks), desc="Сбор отчетности", position=0, leave=True)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(fetch_one_emitent_reports, task, report_state, logger, run_no) for task in tasks]
@@ -1317,12 +1438,130 @@ def stage_reports_fetch_parallel(tasks: list[dict[str, Any]], report_state: dict
             results.append(future.result())
             pbar.update(1)
     pbar.close()
-
-    total_elapsed = max(0.001, time.perf_counter() - stage_started)
-    stage_emitents_per_min = len(tasks) / total_elapsed * 60.0
-    for item in results:
-        item.telemetry.setdefault("emitents_per_min_stage_avg", stage_emitents_per_min)
     return results
+
+
+def update_emitent_schedule_batch(conn: sqlite3.Connection, rows: list[tuple[Any, ...]]) -> None:
+    if not rows:
+        return
+    conn.executemany(
+        """
+        INSERT INTO emitent_schedule (inn, company_id, last_checked_at, next_check_at, last_change_at, stable_run_count, last_mode, last_event_gate_at, last_files_scan_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(inn) DO UPDATE SET
+            company_id=excluded.company_id,
+            last_checked_at=excluded.last_checked_at,
+            next_check_at=excluded.next_check_at,
+            last_change_at=excluded.last_change_at,
+            stable_run_count=excluded.stable_run_count,
+            last_mode=excluded.last_mode,
+            last_event_gate_at=excluded.last_event_gate_at,
+            last_files_scan_at=excluded.last_files_scan_at
+        """,
+        rows,
+    )
+
+
+def update_report_state_batch(conn: sqlite3.Connection, rows: list[tuple[str, str, str, str, str, str, str, str, str]]) -> None:
+    if not rows:
+        return
+    conn.executemany(
+        """
+        INSERT INTO report_state (inn, company_id, report_type_id, latest_hash, latest_placement_date, latest_foundation_date, top_row_hash, page_checked_at, last_checked_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(inn, report_type_id) DO UPDATE SET
+            company_id=excluded.company_id,
+            latest_hash=excluded.latest_hash,
+            latest_placement_date=excluded.latest_placement_date,
+            latest_foundation_date=excluded.latest_foundation_date,
+            top_row_hash=excluded.top_row_hash,
+            page_checked_at=excluded.page_checked_at,
+            last_checked_at=excluded.last_checked_at
+        """,
+        rows,
+    )
+
+
+def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchResult], existing_hashes: set[str], all_new_event_hashes: set[str], logger: logging.Logger, prep_stats: dict[str, int]) -> dict[str, Any]:
+    now = now_iso()
+    company_rows = []
+    report_rows = []
+    state_rows = []
+    schedule_rows = []
+    stale_rows = []
+    stats = {
+        "reports_found": 0,
+        "new_events": 0,
+        "errors": 0,
+        "company_search_requests": 0,
+        "events_requests": 0,
+        "files_page_requests": 0,
+        "fileload_requests": 0,
+        "company_map_hits": 0,
+        "event_gate_only": 0,
+        "deep_reports_scan": 0,
+        "preview_skips": 0,
+        "full_scans": 0,
+        **prep_stats,
+    }
+    durations = []
+    slowest = []
+    for res in results:
+        durations.append(res.elapsed_sec)
+        slowest.append((res.elapsed_sec, res.inn, res.error, 0.0, 0.0, 0.0, 0.0, ""))
+        if res.error:
+            stats["errors"] += 1
+            logger.warning("Failed reports INN=%s: %s", res.inn, res.error)
+        for key in ["company_search_requests", "events_requests", "files_page_requests", "company_map_hits", "event_gate_only", "deep_reports_scan", "preview_skips", "full_scans"]:
+            stats[key] += int(res.telemetry.get(key, 0) or 0)
+        if res.company_map_row:
+            cm = res.company_map_row
+            company_rows.append((cm["inn"], cm["company_id"], cm["company_name"], cm["company_url"], cm["verified_inn"], cm["validation_status"], cm["last_success_at"], cm.get("full_scan_at", ""), cm.get("fast_scan_at", ""), cm["last_checked_at"]))
+        if res.schedule_row:
+            sc = res.schedule_row
+            schedule_rows.append((sc["inn"], sc["company_id"], sc["last_checked_at"], sc["next_check_at"], sc["last_change_at"], sc["stable_run_count"], sc["last_mode"], sc["last_event_gate_at"], sc["last_files_scan_at"]))
+        for st in res.report_state_rows:
+            state_rows.append((st["inn"], st["company_id"], st["report_type_id"], st["latest_hash"], st["latest_placement_date"], st["latest_foundation_date"], st.get("top_row_hash", ""), st.get("page_checked_at", ""), st["last_checked_at"]))
+        stats["reports_found"] += len(res.report_events)
+        for ev in res.report_events:
+            payload_json = json.dumps(ev["payload"], ensure_ascii=False, separators=(",", ":"))
+            report_rows.append((ev["event_hash"], ev["inn"], ev["company_name"], ev["scoring_date"], ev["event_date"], ev["event_type"], ev["event_url"], ev["source"], payload_json, now, now))
+            if ev["event_hash"] not in existing_hashes:
+                stats["new_events"] += 1
+                all_new_event_hashes.add(ev["event_hash"])
+                existing_hashes.add(ev["event_hash"])
+        if res.latest_report_date:
+            stale_dt = parse_date(res.latest_report_date)
+            if stale_dt and stale_dt < datetime.now() - timedelta(days=config.REPORT_STALE_DAYS):
+                stale_hash = md5_short(f"stale_{res.inn}_{res.latest_report_date}", 16)
+                stale_payload = json.dumps({"latest_report_date": res.latest_report_date}, ensure_ascii=False, separators=(",", ":"))
+                stale_rows.append((stale_hash, res.inn, res.company_name, res.scoring_date, today_iso(), "Нет новой отчетности дольше порога", res.company_map_row.get("company_url", "") if res.company_map_row else "", "stale-alert", stale_payload, now, now))
+
+    if company_rows:
+        conn.executemany(
+            """
+        INSERT INTO company_map (inn, company_id, company_name, company_url, verified_inn, validation_status, last_success_at, full_scan_at, fast_scan_at, last_checked_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(inn) DO UPDATE SET
+            company_id=excluded.company_id,
+            company_name=excluded.company_name,
+            company_url=excluded.company_url,
+            verified_inn=excluded.verified_inn,
+            validation_status=excluded.validation_status,
+            last_success_at=excluded.last_success_at,
+            full_scan_at=excluded.full_scan_at,
+            fast_scan_at=excluded.fast_scan_at,
+            last_checked_at=excluded.last_checked_at
+        """,
+            company_rows,
+        )
+    flush_report_events_batch(conn, report_rows + stale_rows)
+    update_report_state_batch(conn, state_rows)
+    update_emitent_schedule_batch(conn, schedule_rows)
+    conn.commit()
+    stats["durations"] = durations
+    stats["slowest"] = sorted(slowest, key=lambda x: x[0], reverse=True)[:30]
+    return stats
 
 
 def flush_report_events_batch(conn: sqlite3.Connection, rows: list[tuple[Any, ...]]) -> None:
@@ -1346,107 +1585,6 @@ def flush_report_events_batch(conn: sqlite3.Connection, rows: list[tuple[Any, ..
     )
 
 
-def update_report_state_batch(conn: sqlite3.Connection, rows: list[tuple[str, str, str, str, str, str, str]]) -> None:
-    if not rows:
-        return
-    conn.executemany(
-        """
-        INSERT INTO report_state (inn, company_id, report_type_id, latest_hash, latest_placement_date, latest_foundation_date, last_checked_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(inn, report_type_id) DO UPDATE SET
-            company_id=excluded.company_id,
-            latest_hash=excluded.latest_hash,
-            latest_placement_date=excluded.latest_placement_date,
-            latest_foundation_date=excluded.latest_foundation_date,
-            last_checked_at=excluded.last_checked_at
-        """,
-        rows,
-    )
-
-
-def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchResult], existing_hashes: set[str], all_new_event_hashes: set[str], logger: logging.Logger) -> dict[str, Any]:
-    now = now_iso()
-    company_rows = []
-    report_rows = []
-    state_rows = []
-    stale_rows = []
-    stats = {
-        "reports_found": 0,
-        "new_events": 0,
-        "skipped_unchanged": 0,
-        "errors": 0,
-        "search_requests": 0,
-        "company_card_requests": 0,
-        "files_page_requests": 0,
-        "company_map_hits": 0,
-        "preview_only_checks": 0,
-        "full_scans": 0,
-        "skip_types_saved": 0,
-        "requests_saved_fast_path": 0,
-    }
-    durations = []
-    slowest = []
-    telemetry_samples: list[dict[str, Any]] = []
-    for res in results:
-        durations.append(res.elapsed_sec)
-        telemetry_samples.append(res.telemetry)
-        slowest.append((res.elapsed_sec, res.inn, res.error, res.telemetry.get("search_time", 0.0), res.telemetry.get("card_validation_time", 0.0), res.telemetry.get("files_fetch_time", 0.0), res.telemetry.get("parse_time", 0.0), res.telemetry.get("top_bottleneck", "")))
-        if res.error:
-            stats["errors"] += 1
-            logger.warning("Failed reports INN=%s: %s", res.inn, res.error)
-        for key in ["search_requests", "company_card_requests", "files_page_requests", "company_map_hits", "preview_only_checks", "full_scans", "skip_types_saved", "requests_saved_fast_path"]:
-            stats[key] += int(res.telemetry.get(key, 0) or 0)
-        if res.skipped_unchanged:
-            stats["skipped_unchanged"] += 1
-        if res.company_map_row:
-            cm = res.company_map_row
-            company_rows.append((cm["inn"], cm["company_id"], cm["company_name"], cm["company_url"], cm["verified_inn"], cm["validation_status"], cm["last_success_at"], cm.get("full_scan_at", ""), cm.get("fast_scan_at", ""), cm["last_checked_at"]))
-        for st in res.report_state_rows:
-            state_rows.append((st["inn"], st["company_id"], st["report_type_id"], st["latest_hash"], st["latest_placement_date"], st["latest_foundation_date"], st["last_checked_at"]))
-        stats["reports_found"] += len(res.report_events)
-        for ev in res.report_events:
-            payload_json = json.dumps(ev["payload"], ensure_ascii=False, separators=(",", ":"))
-            report_rows.append((ev["event_hash"], ev["inn"], ev["company_name"], ev["scoring_date"], ev["event_date"], ev["event_type"], ev["event_url"], ev["source"], payload_json, now, now))
-            if ev["event_hash"] not in existing_hashes:
-                stats["new_events"] += 1
-                all_new_event_hashes.add(ev["event_hash"])
-                existing_hashes.add(ev["event_hash"])
-        if res.latest_report_date:
-            stale_dt = parse_date(res.latest_report_date)
-            if stale_dt and stale_dt < datetime.now() - timedelta(days=config.REPORT_STALE_DAYS):
-                stale_hash = md5_short(f"stale_{res.inn}_{res.latest_report_date}", 16)
-                stale_payload = json.dumps({"latest_report_date": res.latest_report_date}, ensure_ascii=False, separators=(",", ":"))
-                stale_rows.append((stale_hash, res.inn, res.company_name, res.scoring_date, today_iso(), "Нет новой отчетности дольше порога", res.company_map_row.get("company_url", "") if res.company_map_row else "", "stale-alert", stale_payload, now, now))
-                if stale_hash not in existing_hashes:
-                    all_new_event_hashes.add(stale_hash)
-                    existing_hashes.add(stale_hash)
-    if company_rows:
-        conn.executemany(
-            """
-        INSERT INTO company_map (inn, company_id, company_name, company_url, verified_inn, validation_status, last_success_at, full_scan_at, fast_scan_at, last_checked_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(inn) DO UPDATE SET
-            company_id=excluded.company_id,
-            company_name=excluded.company_name,
-            company_url=excluded.company_url,
-            verified_inn=excluded.verified_inn,
-            validation_status=excluded.validation_status,
-            last_success_at=excluded.last_success_at,
-            full_scan_at=excluded.full_scan_at,
-            fast_scan_at=excluded.fast_scan_at,
-            last_checked_at=excluded.last_checked_at
-        """,
-            company_rows,
-        )
-    flush_report_events_batch(conn, report_rows + stale_rows)
-    update_report_state_batch(conn, state_rows)
-    conn.commit()
-    stats["durations"] = durations
-    stats["telemetry_samples"] = telemetry_samples
-    stats["slowest"] = sorted(slowest, key=lambda x: x[0], reverse=True)[:30]
-    return stats
-
-
 def print_perf_summary(stats: dict[str, Any], total_emitents: int, total_seconds: float, logger: logging.Logger) -> None:
     durations = stats.get("durations", [])
     avg = sum(durations) / len(durations) if durations else 0
@@ -1461,6 +1599,8 @@ def print_perf_summary(stats: dict[str, Any], total_emitents: int, total_seconds
         total_timeout = runtime_state.timeout_count
         files_requests = runtime_state.files_requests
         company_search_requests = runtime_state.search_requests
+        events_requests = runtime_state.events_requests
+        fileload_requests = runtime_state.fileload_requests
         max_consecutive_429 = runtime_state.max_consecutive_429
         max_consecutive_timeouts = runtime_state.max_consecutive_timeouts
 
@@ -1468,15 +1608,30 @@ def print_perf_summary(stats: dict[str, Any], total_emitents: int, total_seconds
     req_p95 = statistics.quantiles(request_latencies, n=100)[94] if len(request_latencies) >= 20 else (max(request_latencies) if request_latencies else 0.0)
 
 
-    print(f"Summary reports: emitents={total_emitents}, reports={stats.get('reports_found', 0)}, new_events={stats.get('new_events', 0)}, skipped={stats.get('skipped_unchanged', 0)}")
+    eliminated_http = max(0, stats.get("skipped_not_due", 0) + stats.get("event_gate_only", 0))
+    print(
+        f"Summary reports: total={stats.get('total_emitents', total_emitents)}, due={stats.get('due_emitents', total_emitents)}, "
+        f"skipped_not_due={stats.get('skipped_not_due', 0)}, gate_only={stats.get('event_gate_only', 0)}, deep={stats.get('deep_reports_scan', 0)}, "
+        f"reports={stats.get('reports_found', 0)}, new_events={stats.get('new_events', 0)}"
+    )
+    print(f"HTTP saved estimate: emitents_without_network={stats.get('skipped_not_due', 0)} gate_saved_files={stats.get('event_gate_only', 0)} eliminated={eliminated_http}")
     print(f"Timing: avg={avg:.2f}s median={median:.2f}s p95={p95:.2f}s total={total_seconds:.2f}s rate={emitents_per_min:.2f} emitents/min")
 
     logger.info(
-        "stage_reports telemetry emitents=%s total_requests=%s files_requests=%s company_search_requests=%s status_429=%s timeout=%s request_latency_median=%.3f request_latency_p95=%.3f max_consecutive_429=%s max_consecutive_timeouts=%s",
-        total_emitents,
+        "stage_reports telemetry total_emitents=%s due_emitents=%s skipped_not_due=%s hot_skip=%s event_gate_only=%s deep_reports_scan=%s total_requests=%s events_requests=%s files_requests=%s fileload_requests=%s company_search_requests=%s preview_skips=%s full_scans=%s status_429=%s timeout=%s request_latency_median=%.3f request_latency_p95=%.3f max_consecutive_429=%s max_consecutive_timeouts=%s",
+        stats.get("total_emitents", total_emitents),
+        stats.get("due_emitents", total_emitents),
+        stats.get("skipped_not_due", 0),
+        stats.get("skipped_not_due", 0),
+        stats.get("event_gate_only", 0),
+        stats.get("deep_reports_scan", 0),
         total_requests,
+        events_requests,
         files_requests,
+        fileload_requests,
         company_search_requests,
+        stats.get("preview_skips", 0),
+        stats.get("full_scans", 0),
         total_429,
         total_timeout,
         req_median,
@@ -1516,11 +1671,11 @@ def run_monitoring() -> None:
     print("Этап 2: Сбор отчетности")
 
     def stage_reports() -> None:
-        tasks, existing_hashes, report_state, run_no = stage_reports_prepare(conn, emitents)
+        tasks, skipped_tasks, existing_hashes, report_state, run_no, prep_stats = stage_reports_prepare(conn, emitents)
         stage_started = time.perf_counter()
         results = stage_reports_fetch_parallel(tasks, report_state, logger, run_no)
-        stats = stage_reports_flush_db(conn, results, existing_hashes, all_new_event_hashes, logger)
-        print_perf_summary(stats, len(tasks), time.perf_counter() - stage_started, logger)
+        stats = stage_reports_flush_db(conn, results, existing_hashes, all_new_event_hashes, logger, prep_stats)
+        print_perf_summary(stats, prep_stats.get("due_emitents", len(tasks)), time.perf_counter() - stage_started, logger)
 
     _, elapsed = timed(stage_reports)
     stage_times["Этап 2: Сбор отчетности"] = elapsed
