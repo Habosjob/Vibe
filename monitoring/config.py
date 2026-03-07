@@ -128,9 +128,6 @@ EDISCLOSURE_AUTOTUNE_ERROR_RATE_THRESHOLD = 0.06
 # Максимум кандидатов компании, для которых проверяется карточка при неоднозначном поиске.
 EDISCLOSURE_MAX_CARD_CHECKS = 2
 
-# Сколько первых строк читать в cheap-check перед полным парсингом страницы отчетности.
-EDISCLOSURE_PREVIEW_ROWS = 1
-
 # Максимум новых строк, которые парсим сверху на один тип отчета в incremental режиме.
 EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE = 3
 

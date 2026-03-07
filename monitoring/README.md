@@ -25,7 +25,7 @@ python monitoring/main.py
 Монолит содержит в одном файле:
 1. bootstrap директорий и логгера;
 2. bootstrap SQLite и операции идемпотентной записи;
-3. ускоренный web-flow клиент e-disclosure (full-universe run без cap по эмитентам, event-gate перед `files.aspx`, fixed worker pool + autotune workers/files semaphore, простой semaphore только на `files.aspx`, без загрузки `FileLoad.ashx`, preview top-rows + fingerprint, batch DB flush, ttl cache + safe fallback);
+3. ускоренный web-flow клиент e-disclosure (full-universe run без cap по эмитентам, event-gate перед `files.aspx`, fixed worker pool + autotune workers/files semaphore, простой semaphore только на `files.aspx`, без загрузки `FileLoad.ashx`, fingerprint верхней строки, batch DB flush, ttl cache + safe fallback);
 4. сравнение snapshot рейтингов (`Изменен рейтинг/прогноз/отозван`);
 5. загрузчик портфеля только из `monitoring/Portfolio.xlsx` (ручные листы `Акции`/`Облигации` не перезаписываются);
 6. сбор новостей Smartlab в 2 стратегии (ticker → fallback tag);
@@ -55,6 +55,7 @@ python monitoring/main.py
 - Каждый run логически обрабатывает весь universe эмитентов (без `max emitents per run` cap).
 - Для эмитентов с валидным state сначала делается events gate (`/api/events/page`), и только при признаке изменений запускается deep scan `files.aspx`.
 - `files.aspx` парсится как HTML-индекс; `FileLoad.ashx` НЕ скачивается, URL просто сохраняется в событие.
+- На тип отчета выполняется один парс страницы: извлекаются новые строки и одновременно сохраняется fingerprint (`top_row_hash`) для быстрых повторных прогонов без двойного parse-pass.
 - Повторные прогоны активно переиспользуют `company_map` и кэши страниц/событий.
 
 

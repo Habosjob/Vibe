@@ -1160,19 +1160,23 @@ def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) 
     schedule_rows = conn.execute("SELECT * FROM emitent_schedule").fetchall()
     schedule_map = {sanitize_str(r["inn"]): dict(r) for r in schedule_rows}
 
-    all_tasks: list[dict[str, Any]] = []
+    tasks: list[dict[str, Any]] = []
+    skipped_tasks: list[dict[str, Any]] = []
     force_full = bool(config.EDISCLOSURE_FORCE_FULL_SCAN)
+    now_dt = datetime.now()
     for inn, row in emitent_map.items():
-        all_tasks.append(
-            {
-                "inn": inn,
-                "company_name": sanitize_str(row.company_name),
-                "scoring_date": sanitize_str(row.scoring_date),
-                "mapping": mappings.get(inn),
-                "schedule": schedule_map.get(inn),
-                "force_full": force_full,
-            }
-        )
+        task = {
+            "inn": inn,
+            "company_name": sanitize_str(row.company_name),
+            "scoring_date": sanitize_str(row.scoring_date),
+            "mapping": mappings.get(inn),
+            "schedule": schedule_map.get(inn),
+            "force_full": force_full,
+        }
+        if _is_due(task["schedule"], now_dt, force_full):
+            tasks.append(task)
+        else:
+            skipped_tasks.append(task)
 
     existing_hashes = {r[0] for r in conn.execute("SELECT event_hash FROM report_events WHERE source IN ('e-disclosure','stale-alert')").fetchall()}
     states: dict[tuple[str, str], dict[str, str]] = {}
@@ -1183,10 +1187,10 @@ def stage_reports_prepare(conn: sqlite3.Connection, emitents: list[EmitentRow]) 
     conn.commit()
     prep_stats = {
         "total_emitents": len(emitent_map),
-        "processed_emitents": len(all_tasks),
-        "skipped_by_cache": 0,
+        "processed_emitents": len(tasks),
+        "skipped_by_cache": len(skipped_tasks),
     }
-    return all_tasks, [], existing_hashes, states, run_no, prep_stats
+    return tasks, skipped_tasks, existing_hashes, states, run_no, prep_stats
 
 
 def parse_reports_page(
@@ -1313,6 +1317,7 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
 
         latest_report_date = last_known_report_date
         scan_types = REPORT_TYPE_PRIORITY[:2]
+        now_ts = now_iso()
         if needs_deep:
             telemetry["deep_scanned"] += 1
             if force_full or not mapping or not schedule:
@@ -1322,23 +1327,6 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
                 known_state = state_by_type.get((inn, str(type_id)))
                 html = client.get_reports_page_cached(company_id, type_id, force_refresh=True)
                 telemetry["files_page_requests"] += 1
-
-                _, top_preview_hash = parse_reports_page(html, company_id, type_id, type_name, known_state, preview_limit=config.EDISCLOSURE_PREVIEW_ROWS, max_new_rows=1)
-                if known_state and top_preview_hash and top_preview_hash == sanitize_str(known_state.get("top_row_hash")) and not force_full:
-                    telemetry["preview_skips"] += 1
-                    report_states.append({
-                        "inn": inn,
-                        "company_id": company_id,
-                        "report_type_id": str(type_id),
-                        "latest_hash": sanitize_str(known_state.get("latest_hash")),
-                        "latest_placement_date": sanitize_str(known_state.get("latest_placement_date")),
-                        "latest_foundation_date": sanitize_str(known_state.get("latest_foundation_date")),
-                        "top_row_hash": top_preview_hash,
-                        "page_checked_at": now_iso(),
-                        "last_checked_at": now_iso(),
-                    })
-                    continue
-
                 rows, top_row_hash = parse_reports_page(
                     html,
                     company_id,
@@ -1357,10 +1345,12 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
                         "latest_placement_date": top.get("placement_date", ""),
                         "latest_foundation_date": top.get("foundation_date", ""),
                         "top_row_hash": top_row_hash,
-                        "page_checked_at": now_iso(),
-                        "last_checked_at": now_iso(),
+                        "page_checked_at": now_ts,
+                        "last_checked_at": now_ts,
                     })
                 elif known_state:
+                    if top_row_hash and top_row_hash == sanitize_str(known_state.get("top_row_hash")) and not force_full:
+                        telemetry["preview_skips"] += 1
                     report_states.append({
                         "inn": inn,
                         "company_id": company_id,
@@ -1369,8 +1359,8 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
                         "latest_placement_date": sanitize_str(known_state.get("latest_placement_date")),
                         "latest_foundation_date": sanitize_str(known_state.get("latest_foundation_date")),
                         "top_row_hash": top_row_hash or sanitize_str(known_state.get("top_row_hash")),
-                        "page_checked_at": now_iso(),
-                        "last_checked_at": now_iso(),
+                        "page_checked_at": now_ts,
+                        "last_checked_at": now_ts,
                     })
                 for rep in rows:
                     event_date = rep.get("placement_date") or rep.get("foundation_date")
@@ -1388,7 +1378,6 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
                         "payload": rep,
                     })
 
-        now_ts = now_iso()
         stable_count = int(schedule.get("stable_run_count") or 0)
         if report_events:
             stable_count = 0
@@ -1730,6 +1719,16 @@ def run_monitoring() -> None:
     def stage_ratings() -> None:
         prev_rows = conn.execute("SELECT * FROM emitents_snapshot").fetchall()
         prev = {r["inn"]: dict(r) for r in prev_rows if r["inn"]}
+        existing_hashes = {
+            r[0]
+            for r in conn.execute(
+                "SELECT event_hash FROM report_events WHERE source IN ('NRA', 'ACRA', 'NKR', 'RAEX')"
+            ).fetchall()
+        }
+
+        update_rows: list[tuple[str, str]] = []
+        insert_rows: list[tuple[str, str, str, str, str, str, str, str, str, str, str]] = []
+        now = now_iso()
 
         for row in tqdm(emitents, desc="Рейтинговые изменения", position=0):
             old = prev.get(row.inn)
@@ -1741,16 +1740,10 @@ def run_monitoring() -> None:
                     continue
                 event_date = row.scoring_date or today_iso()
                 event_hash = md5_short(f"rate_{row.inn}_{field}_{old.get(field,'')}_{getattr(row, field)}_{event_date}", 16)
-                exists = conn.execute("SELECT event_hash FROM report_events WHERE event_hash = ?", (event_hash,)).fetchone()
-                if exists:
-                    conn.execute("UPDATE report_events SET last_seen_at = ? WHERE event_hash = ?", (now_iso(), event_hash))
+                if event_hash in existing_hashes:
+                    update_rows.append((now, event_hash))
                 else:
-                    conn.execute(
-                        """
-                        INSERT INTO report_events (event_hash, inn, company_name, scoring_date, event_date, event_type, event_url,
-                        source, payload_json, first_seen_at, last_seen_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
+                    insert_rows.append(
                         (
                             event_hash,
                             row.inn,
@@ -1761,22 +1754,36 @@ def run_monitoring() -> None:
                             "",
                             source,
                             json.dumps({"field": field, "old": old.get(field, ""), "new": getattr(row, field)}, ensure_ascii=False),
-                            now_iso(),
-                            now_iso(),
-                        ),
+                            now,
+                            now,
+                        )
                     )
+                    existing_hashes.add(event_hash)
                     all_new_event_hashes.add(event_hash)
-                conn.commit()
+
+        if update_rows:
+            conn.executemany("UPDATE report_events SET last_seen_at = ? WHERE event_hash = ?", update_rows)
+        if insert_rows:
+            conn.executemany(
+                """
+                INSERT INTO report_events (event_hash, inn, company_name, scoring_date, event_date, event_type, event_url,
+                source, payload_json, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
+            )
 
         conn.execute("DELETE FROM emitents_snapshot")
-        for row in emitents:
-            conn.execute(
-                """
-                INSERT INTO emitents_snapshot (inn, company_name, scoring, scoring_date, nra_rate, acra_rate, nkr_rate, raex_rate, snapshot_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (row.inn, row.company_name, row.scoring, row.scoring_date, row.nra_rate, row.acra_rate, row.nkr_rate, row.raex_rate, now_iso()),
-            )
+        conn.executemany(
+            """
+            INSERT INTO emitents_snapshot (inn, company_name, scoring, scoring_date, nra_rate, acra_rate, nkr_rate, raex_rate, snapshot_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (row.inn, row.company_name, row.scoring, row.scoring_date, row.nra_rate, row.acra_rate, row.nkr_rate, row.raex_rate, now)
+                for row in emitents
+            ],
+        )
         conn.commit()
         save_emitents_snapshot_excel(emitents)
 
@@ -1819,6 +1826,8 @@ def run_monitoring() -> None:
         collector = SmartlabNewsCollector(logger)
         cache = NewsCacheManager(config.CACHE_DIR / "news" / "news_cache.csv")
         rows: list[dict[str, str]] = []
+        news_insert_rows: list[tuple[str, str, str, str, str, str, str, str, str, str]] = []
+        now = now_iso()
         for item in tqdm(portfolio_items, desc="Сбор новостей", position=0):
             try:
                 for news in collector.collect(item):
@@ -1837,12 +1846,7 @@ def run_monitoring() -> None:
                                 "added_date": today_iso(),
                             }
                         )
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO news_events (
-                            event_hash, instrument_type, instrument_code, inn, company_name, news_date, title, url, source, first_seen_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
+                    news_insert_rows.append(
                         (
                             h,
                             item.get("instrument_type", ""),
@@ -1853,10 +1857,9 @@ def run_monitoring() -> None:
                             news["title"],
                             news["url"],
                             "Smartlab",
-                            now_iso(),
-                        ),
+                            now,
+                        )
                     )
-                    conn.commit()
                     rows.append(
                         {
                             "event_hash": h,
@@ -1873,6 +1876,16 @@ def run_monitoring() -> None:
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("News failed for %s: %s", item, exc)
+        if news_insert_rows:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO news_events (
+                    event_hash, instrument_type, instrument_code, inn, company_name, news_date, title, url, source, first_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                news_insert_rows,
+            )
+            conn.commit()
         cache.save()
         return rows
 
