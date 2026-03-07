@@ -26,7 +26,7 @@ python monitoring/main.py
 Монолит содержит в одном файле:
 1. bootstrap директорий и логгера;
 2. bootstrap SQLite и операции идемпотентной записи;
-3. ускоренный web-flow клиент e-disclosure (fixed worker pool, простой semaphore только на `files.aspx`, без global/thread warmup, fast incremental/full sync режимы, preview top-rows, hot path по known company_id, batch DB flush, ttl cache + safe fallback);
+3. ускоренный web-flow клиент e-disclosure (scheduled incremental monitoring, event-gate перед `files.aspx`, fixed worker pool, простой semaphore только на `files.aspx`, без загрузки `FileLoad.ashx`, preview top-rows + fingerprint, batch DB flush, ttl cache + safe fallback);
 4. сравнение snapshot рейтингов (`Изменен рейтинг/прогноз/отозван`);
 5. загрузчик портфеля (поиск по маскам + устойчивый парсинг листов);
 6. сбор новостей Smartlab в 2 стратегии (ticker → fallback tag);
@@ -40,10 +40,21 @@ python monitoring/main.py
 - параметры фиксированной параллельности e-disclosure (`EDISCLOSURE_FETCH_WORKERS`, `EDISCLOSURE_FILES_SEMAPHORE`),
 - retry-политика e-disclosure (retry только на 429/5xx/timeout/connection reset; fast/retry jitter),
 - warmup-флаги e-disclosure (по умолчанию выключены и не участвуют в hot path),
-- режимы обхода e-disclosure (`incremental` / `full_sync`, периодичность полного скана),
+- scheduler и full-scan параметры e-disclosure (`EDISCLOSURE_FORCE_FULL_SCAN`, интервалы recheck, max emitents per run),
 - порог stale alert,
 - оформление Excel.
 
 ## Вывод в консоль
 Скрипт выводит только этапы, прогресс-бары `tqdm` и финальный Summary по времени этапов.
 Техническая диагностика пишется в `monitoring/logs/monitoring.log` (перезаписываемый файл).
+
+
+## Новые таблицы SQLite
+- `emitent_schedule`: расписание due-проверок эмитентов (next_check_at, stable_run_count, режим последнего запуска).
+- `report_state`: расширен полями `top_row_hash` и `page_checked_at` для preview/fingerprint skip.
+
+## Ключевые изменения stage_reports
+- Scheduler отбирает только due эмитентов (`skipped_not_due` без сети).
+- Для due эмитентов сначала делается events gate (`/api/events/page`), и только при признаке изменений запускается deep scan `files.aspx`.
+- `files.aspx` парсится как HTML-индекс; `FileLoad.ashx` НЕ скачивается, URL просто сохраняется в событие.
+- Повторные прогоны активно переиспользуют `company_map` и кэши страниц/событий.
