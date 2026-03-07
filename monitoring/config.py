@@ -75,6 +75,23 @@ COMPANY_MAP_TTL_DAYS = 30
 # TTL кэша карточки компании (часы).
 EDISCLOSURE_CARD_TTL_HOURS = 24
 
+# Максимальное число worker-потоков для сбора e-disclosure.
+# Значения: int, рекомендуемый диапазон 6..12. По умолчанию: 8.
+EDISCLOSURE_MAX_WORKERS = 8
+
+# Максимум кандидатов компании, для которых проверяется карточка при неоднозначном поиске.
+# Значения: int >= 1. По умолчанию: 3.
+EDISCLOSURE_MAX_CARD_CHECKS = 3
+
+# Сколько первых строк читать в cheap-check перед полным парсингом страницы отчетности.
+# Значения: int >= 1. По умолчанию: 2.
+EDISCLOSURE_PREVIEW_ROWS = 2
+
+# Случайная задержка (джиттер) перед HTTP запросом к e-disclosure в миллисекундах.
+# Значения: int >= 0. По умолчанию: 50..150.
+EDISCLOSURE_REQUEST_JITTER_MIN_MS = 50
+EDISCLOSURE_REQUEST_JITTER_MAX_MS = 150
+
 # TTL кэша событий компании (часы).
 EDISCLOSURE_EVENTS_TTL_HOURS = 6
 
