@@ -57,17 +57,21 @@ EMITENTS_SNAPSHOT_XLSX = BASE_SNAPSHOTS_DIR / "emitents_snapshot.xlsx"
 # Snapshot портфеля.
 PORTFOLIO_SNAPSHOT_XLSX = BASE_SNAPSHOTS_DIR / "portfolio_snapshot.xlsx"
 
-# Таймаут HTTP-запроса (секунды).
-# Значения: int/float > 0. По умолчанию: 25.
-REQUEST_TIMEOUT_SECONDS = 25
+# Таймаут установки TCP соединения для e-disclosure (секунды).
+# Значения: int/float > 0. По умолчанию: 4.
+CONNECT_TIMEOUT_SECONDS = 4
 
-# Количество повторов сетевых запросов.
-# Значения: int >= 0. По умолчанию: 3.
-HTTP_RETRIES = 3
+# Таймаут чтения тела ответа для e-disclosure (секунды).
+# Значения: int/float > 0. По умолчанию: 8.
+READ_TIMEOUT_SECONDS = 8
 
-# Множитель backoff при повторах.
-# Задержка = BACKOFF_BASE_SECONDS * (attempt + 1).
-BACKOFF_BASE_SECONDS = 1.2
+# Количество повторов сетевых запросов (только для retryable ошибок).
+# Значения: int >= 0. По умолчанию: 1.
+HTTP_RETRIES = 1
+
+# База backoff при повторах.
+# Задержка = BACKOFF_BASE_SECONDS * (2 ** attempt).
+BACKOFF_BASE_SECONDS = 0.4
 
 # TTL маппинга INN->company_id в днях.
 COMPANY_MAP_TTL_DAYS = 30
@@ -75,22 +79,41 @@ COMPANY_MAP_TTL_DAYS = 30
 # TTL кэша карточки компании (часы).
 EDISCLOSURE_CARD_TTL_HOURS = 24
 
+# Режим обхода e-disclosure.
+# Значения: "incremental" (быстрый режим по умолчанию) или "full_sync".
+EDISCLOSURE_MODE = "incremental"
+
+# Запускать полный scan раз в N прогонов (когда режим incremental).
+EDISCLOSURE_FULL_SCAN_EVERY_N_RUNS = 20
+
+# Если последний full scan старше N дней, делаем полный обход.
+EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS = 7
+
 # Максимальное число worker-потоков для сбора e-disclosure.
-# Значения: int, рекомендуемый диапазон 6..12. По умолчанию: 8.
-EDISCLOSURE_MAX_WORKERS = 8
+EDISCLOSURE_MAX_WORKERS = 12
+
+# Минимальное число worker-потоков при деградации/троттлинге.
+EDISCLOSURE_MIN_WORKERS = 4
+
+# Включить авто-регулирование уровня параллелизма.
+EDISCLOSURE_ADAPTIVE_CONCURRENCY = True
 
 # Максимум кандидатов компании, для которых проверяется карточка при неоднозначном поиске.
-# Значения: int >= 1. По умолчанию: 3.
-EDISCLOSURE_MAX_CARD_CHECKS = 3
+EDISCLOSURE_MAX_CARD_CHECKS = 2
 
 # Сколько первых строк читать в cheap-check перед полным парсингом страницы отчетности.
-# Значения: int >= 1. По умолчанию: 2.
-EDISCLOSURE_PREVIEW_ROWS = 2
+EDISCLOSURE_PREVIEW_ROWS = 1
 
-# Случайная задержка (джиттер) перед HTTP запросом к e-disclosure в миллисекундах.
-# Значения: int >= 0. По умолчанию: 50..150.
-EDISCLOSURE_REQUEST_JITTER_MIN_MS = 50
-EDISCLOSURE_REQUEST_JITTER_MAX_MS = 150
+# Максимум новых строк, которые парсим сверху на один тип отчета в incremental режиме.
+EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE = 3
+
+# Символический fast-path jitter в миллисекундах (обычный успешный запрос).
+EDISCLOSURE_FAST_JITTER_MIN_MS = 0
+EDISCLOSURE_FAST_JITTER_MAX_MS = 10
+
+# Jitter только для retry-path (429/403/5xx/timeout).
+EDISCLOSURE_RETRY_JITTER_MIN_MS = 150
+EDISCLOSURE_RETRY_JITTER_MAX_MS = 500
 
 # TTL кэша событий компании (часы).
 EDISCLOSURE_EVENTS_TTL_HOURS = 6
