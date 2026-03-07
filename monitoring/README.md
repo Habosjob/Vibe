@@ -36,10 +36,19 @@ python monitoring/main.py
 - пути,
 - timeout/retry/backoff (включая лимит max backoff и поддержку Retry-After для 429/503),
 - ttl кэшей,
-- параметры параллельности e-disclosure с autotune (`EDISCLOSURE_FETCH_WORKERS_MIN/DEFAULT/MAX`, `EDISCLOSURE_FILES_SEMAPHORE_MIN/DEFAULT/MAX`),
+- параметры параллельности e-disclosure с autotune (`EDISCLOSURE_FETCH_WORKERS_MIN/DEFAULT/MAX`, `EDISCLOSURE_FILES_SEMAPHORE_MIN/DEFAULT/MAX`) и агрессивным cold-start (`EDISCLOSURE_AUTOTUNE_COLD_START_MAX`),
 - retry-политика e-disclosure (retry только на 429/5xx/timeout/connection reset; fast/retry jitter),
 - scheduler и full-scan параметры e-disclosure (`EDISCLOSURE_FORCE_FULL_SCAN`, интервалы recheck),
 - оформление Excel.
+
+
+## Оптимизация скорости (этап 2: Сбор отчетности)
+- Увеличены базовые лимиты параллельности: workers до диапазона `16..64` (дефолт `32`) и semaphore для `files.aspx` до `8..24` (дефолт `14`).
+- Для первого запуска (когда в `meta` еще нет autotune-значений) добавлен `cold-start` режим: старт сразу с максимальных значений, чтобы не разгоняться несколько прогонов.
+- Обновлен autotune: 
+  - быстрое масштабирование вверх при низкой доле 429/timeout;
+  - более агрессивное снижение при перегрузе;
+  - сохранение выбранных значений в SQLite `meta` для следующих запусков.
 
 ## Вывод в консоль
 Скрипт выводит только этапы, прогресс-бары `tqdm` и финальный Summary по времени этапов.
