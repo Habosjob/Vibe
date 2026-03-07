@@ -69,6 +69,14 @@ READ_TIMEOUT_SECONDS = 8
 # Значения: int >= 0. По умолчанию: 1.
 HTTP_RETRIES = 1
 
+# Максимальная пауза backoff между попытками (секунды).
+# Значения: int/float > 0. По умолчанию: 20.
+HTTP_MAX_BACKOFF_SECONDS = 20
+
+# Верхняя граница Retry-After при 429/503 (секунды).
+# Значения: int/float > 0. По умолчанию: 30.
+HTTP_RETRY_AFTER_MAX_SECONDS = 30
+
 # База backoff при повторах.
 # Задержка = BACKOFF_BASE_SECONDS * (2 ** attempt).
 BACKOFF_BASE_SECONDS = 0.4
@@ -110,6 +118,21 @@ EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE = 3
 # Символический fast-path jitter в миллисекундах (обычный успешный запрос).
 EDISCLOSURE_FAST_JITTER_MIN_MS = 0
 EDISCLOSURE_FAST_JITTER_MAX_MS = 10
+
+# Случайная задержка при инициализации thread-local клиента (мс).
+# Нужна для сглаживания всплеска параллельных warmup-запросов к e-disclosure.
+# Значения: int >= 0. По умолчанию: 250.
+EDISCLOSURE_INIT_STAGGER_MAX_MS = 250
+
+# Выполнять warmup-запросы к e-disclosure при создании клиента.
+# Значения: bool. По умолчанию: True.
+EDISCLOSURE_WARMUP_ENABLED = True
+
+# Считать warmup обязательным.
+# Значения: bool. По умолчанию: False.
+# False: при 429/503 на warmup логируем предупреждение и продолжаем работу.
+# True: при провале warmup поднимаем исключение.
+EDISCLOSURE_WARMUP_STRICT = False
 
 # Jitter только для retry-path (429/403/5xx/timeout).
 EDISCLOSURE_RETRY_JITTER_MIN_MS = 150
