@@ -1114,6 +1114,7 @@ def export_portfolio(
     latest_event_by_inn: dict[str, dict[str, str]],
     latest_news_by_key: dict[tuple[str, str], dict[str, str]],
     news_rows: list[dict[str, str]],
+    report_rows: list[dict[str, str]],
 ) -> None:
     ensure_portfolio_workbook(config.PORTFOLIO_XLSX, logging.getLogger("monitoring"))
     wb = load_workbook(config.PORTFOLIO_XLSX)
@@ -1182,7 +1183,50 @@ def export_portfolio(
 
     ws_news = wb.create_sheet("News")
     ws_news.append(["Тип", "ISIN / Тикер", "ИНН", "Наименование", "Дата новости", "Заголовок", "Ссылка", "Источник", "Новое", "_is_new"])
-    for row in sorted(news_rows, key=lambda x: x.get("news_date", ""), reverse=True):
+
+    instruments_by_inn: dict[str, list[dict[str, str]]] = {}
+    for item in portfolio_items:
+        inn = sanitize_str(item.get("inn", ""))
+        if not inn:
+            continue
+        instruments_by_inn.setdefault(inn, []).append(item)
+
+    merged_rows: list[dict[str, str]] = []
+    for row in news_rows:
+        merged_rows.append(
+            {
+                "instrument_type": sanitize_str(row.get("instrument_type", "")),
+                "instrument_code": sanitize_str(row.get("instrument_code", "")),
+                "inn": sanitize_str(row.get("inn", "")),
+                "company_name": sanitize_str(row.get("company_name", "")),
+                "news_date": sanitize_str(row.get("news_date", "")),
+                "title": sanitize_str(row.get("title", "")),
+                "url": sanitize_str(row.get("url", "")),
+                "source": sanitize_str(row.get("source", "Smartlab")) or "Smartlab",
+                "is_new": "1" if row.get("is_new") else "",
+            }
+        )
+
+    for row in report_rows:
+        inn = sanitize_str(row.get("inn", ""))
+        linked_items = instruments_by_inn.get(inn) or [{"instrument_type": "", "instrument_code": ""}]
+        for linked_item in linked_items:
+            merged_rows.append(
+                {
+                    "instrument_type": sanitize_str(linked_item.get("instrument_type", "")),
+                    "instrument_code": sanitize_str(linked_item.get("instrument_code", "")),
+                    "inn": inn,
+                    "company_name": sanitize_str(row.get("company_name", "")),
+                    "news_date": sanitize_str(row.get("event_date", "")),
+                    "title": sanitize_str(row.get("event_type", "")),
+                    "url": sanitize_str(row.get("event_url", "")),
+                    "source": sanitize_str(row.get("source", "")),
+                    "is_new": "1" if row.get("is_new") else "",
+                }
+            )
+
+    merged_rows.sort(key=lambda x: x.get("news_date", ""), reverse=True)
+    for row in merged_rows:
         ws_news.append([
             row.get("instrument_type", ""),
             row.get("instrument_code", ""),
@@ -1191,7 +1235,7 @@ def export_portfolio(
             row.get("news_date", ""),
             row.get("title", ""),
             row.get("url", ""),
-            row.get("source", "Smartlab"),
+            row.get("source", ""),
             "✓ НОВОЕ" if row.get("is_new") else "",
             "1" if row.get("is_new") else "",
         ])
@@ -2068,7 +2112,7 @@ def run_monitoring() -> None:
         for row in sorted(news_rows, key=lambda x: x.get("news_date", ""), reverse=True):
             latest_news_by_key.setdefault((row.get("instrument_type", ""), row.get("instrument_code", "")), row)
 
-        export_portfolio(portfolio_items, latest_event_by_inn, latest_news_by_key, news_rows)
+        export_portfolio(portfolio_items, latest_event_by_inn, latest_news_by_key, news_rows, report_events)
 
     _, elapsed = timed(stage_export)
     stage_times["Этап 6: Экспорт витрин"] = elapsed
