@@ -86,3 +86,16 @@ python monitoring/main.py
 - Для каждого агентства берется последняя запись по ИНН и дате присвоения (`assigned_date/rating_date`).
 - В `Reports_monitoring.xlsx` попадают события `Изменен рейтинг`, `Изменен прогноз`, `Рейтинг отозван / снят` по источникам `NRA/ACRA/NKR/RAEX`.
 - Для сравнения между прогонами используется таблица `ratings_monitoring_snapshot` в `monitoring.sqlite3`.
+
+## Исправления по устойчивости stage_reports
+- Search-burst cooldown для `POST /api/search/companies`: при всплеске 429/timeout включается пауза только для новых search-запросов (с учетом `Retry-After`), без «удушения» всего pipeline.
+- Fixed pool на запуск: `workers/files_semaphore` фиксируются на старте `stage_reports` и не меняются посреди run.
+- Autotune меняет только значения для следующего запуска и использует hysteresis (`EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STREAK`), чтобы единичный tail slowdown не вызывал немедленный scale-down.
+- Добавлена отдельная telemetry по search burst: `search_429_count`, `search_timeout_count`, `search_cooldown_events`, `total_search_cooldown_seconds`, `workers_used`, `files_semaphore_used`, `autotune_changed_next_run`.
+
+## Исправления парсинга files.aspx и fallback
+- Парсер `parse_reports_page` теперь ищет `FileLoad.ashx` по всем `<a href>` внутри строки и не зависит от фиксированного индекса колонки.
+- Извлечение дат/doc_type/period работает best-effort даже при смещенной/неоднородной структуре `<tr>`.
+- Если company_id известен, но отчетность не найдена (или state пустой/подозрительный), выполняется direct files fallback-скан по типам `4 -> 3 -> 5 -> 2`.
+- Добавлен защитный recheck: если по эмитенту нет исторических `e-disclosure` событий или отсутствует `report_state`, он принудительно попадает в `stage_reports`, даже когда scheduler считает его not-due (чтобы ИНН не «зависал» вне витрин).
+- Повторные запуски сильнее переиспользуют verified `company_map`, чтобы не создавать лишний flood на `/api/search/companies`.

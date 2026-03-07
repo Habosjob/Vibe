@@ -94,6 +94,28 @@ HTTP_MAX_BACKOFF_SECONDS = 20
 # Значения: int/float > 0. По умолчанию: 30.
 HTTP_RETRY_AFTER_MAX_SECONDS = 30
 
+# Окно для детекции burst перегруза search endpoint `/api/search/companies` (секунды).
+# Внутри окна считаются только ошибки этого endpoint (429/timeout).
+# По умолчанию: 5.
+SEARCH_BURST_WINDOW_SECONDS = 5
+
+# Порог количества 429 в burst-окне search endpoint, после которого включается cooldown.
+# По умолчанию: 5.
+SEARCH_BURST_429_THRESHOLD = 5
+
+# Порог количества timeout в burst-окне search endpoint, после которого включается cooldown.
+# По умолчанию: 5.
+SEARCH_BURST_TIMEOUT_THRESHOLD = 5
+
+# Базовая длительность cooldown для новых search submissions (секунды), если Retry-After не пришел.
+# По умолчанию: 3.
+SEARCH_COOLDOWN_SECONDS = 3
+
+# Максимальная длительность cooldown для search endpoint (секунды).
+# Используется как upper bound и для Retry-After, и для внутреннего cooldown.
+# По умолчанию: 10.
+SEARCH_COOLDOWN_MAX_SECONDS = 10
+
 # База backoff при повторах.
 # Задержка = BACKOFF_BASE_SECONDS * (2 ** attempt).
 BACKOFF_BASE_SECONDS = 0.4
@@ -124,6 +146,13 @@ EDISCLOSURE_STABLE_RECHECK_HOURS = 72
 # Через сколько дней без full scan принудительно выполнять deep pass.
 # Значения: int >= 1. По умолчанию: 14.
 EDISCLOSURE_FULL_SCAN_MAX_AGE_DAYS = 14
+
+# Принудительный recheck эмитентов без исторических событий e-disclosure или без report_state.
+# True: эмитент попадает в stage_reports даже если scheduler считает его not-due,
+# что предотвращает вечный пропуск кейсов с пустой/поврежденной историей.
+# False: используется только стандартный due-check scheduler.
+# По умолчанию: True.
+EDISCLOSURE_FORCE_RECHECK_MISSING_HISTORY = True
 
 # Пределы и дефолты для worker pool e-disclosure.
 # На старте используется DEFAULT, затем AUTOTUNE может выбрать значение в [MIN, MAX].
@@ -157,6 +186,13 @@ EDISCLOSURE_AUTOTUNE_FAST_GROW_ERROR_RATE_THRESHOLD = 0.015
 # Шаг уменьшения workers/files при перегрузе (ошибки выше ERROR_RATE_THRESHOLD).
 # Значения: int >= 1. По умолчанию: 6.
 EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STEP = 6
+
+# Hysteresis для scale-down autotune между запусками.
+# Параметр задает количество подряд «плохих» запусков stage_reports,
+# после которых разрешено снижать workers/files_semaphore.
+# Единичный tail slowdown не должен давать немедленный scale-down.
+# По умолчанию: 3.
+EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STREAK = 3
 
 # Шаг ускоренного увеличения workers/files при стабильном канале.
 # Значения: int >= 1. По умолчанию: 4.
