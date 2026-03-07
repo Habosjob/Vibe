@@ -11,6 +11,7 @@ import statistics
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -163,6 +164,7 @@ def request_with_retries(
     timeout = timeout or (config.CONNECT_TIMEOUT_SECONDS, config.READ_TIMEOUT_SECONDS)
     endpoint_kind = _detect_endpoint_kind(url, request_kind)
     is_files_request = endpoint_kind == "files"
+    is_search_request = endpoint_kind == "search"
     last_error: Exception | None = None
 
     for attempt in range(config.HTTP_RETRIES + 1):
@@ -170,6 +172,8 @@ def request_with_retries(
         semaphore_acquired = False
         started = time.perf_counter()
         try:
+            if is_search_request:
+                search_burst_controller.before_search_request()
             if is_files_request:
                 _files_semaphore.acquire()
                 semaphore_acquired = True
@@ -191,10 +195,13 @@ def request_with_retries(
             runtime_state.register_request_event(RequestTelemetryEvent(endpoint_kind, int(status or 0), latency, is_timeout, status == 429))
             last_error = exc
 
+            retry_after = _extract_retry_after_seconds(response, exc)
+            if is_search_request and (status == 429 or is_timeout):
+                search_burst_controller.register_search_error(is_429=status == 429, is_timeout=is_timeout, retry_after=retry_after if status == 429 else None)
+
             if (not is_retryable_http and not is_retryable_exception) or attempt >= config.HTTP_RETRIES:
                 break
 
-            retry_after = _extract_retry_after_seconds(response, exc)
             retry_jitter_ms = random.randint(config.EDISCLOSURE_RETRY_JITTER_MIN_MS, config.EDISCLOSURE_RETRY_JITTER_MAX_MS)
             sleep_for = config.BACKOFF_BASE_SECONDS * (2 ** attempt) + retry_jitter_ms / 1000.0
             if status == 429 and retry_after is not None:
@@ -413,9 +420,77 @@ class MonitoringRuntimeState:
 runtime_state = MonitoringRuntimeState()
 
 
+class SearchBurstController:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.cooldown_until = 0.0
+        self.error_window: deque[tuple[float, str]] = deque()
+        self.search_429_count = 0
+        self.search_timeout_count = 0
+        self.search_cooldown_events = 0
+        self.total_search_cooldown_seconds = 0.0
+
+    def _cleanup(self, now_ts: float) -> None:
+        window = max(1.0, float(config.SEARCH_BURST_WINDOW_SECONDS))
+        while self.error_window and now_ts - self.error_window[0][0] > window:
+            self.error_window.popleft()
+
+    def before_search_request(self) -> None:
+        with self.lock:
+            now_ts = time.time()
+            sleep_for = max(0.0, self.cooldown_until - now_ts)
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
+    def register_search_error(self, *, is_429: bool, is_timeout: bool, retry_after: float | None = None) -> None:
+        if not is_429 and not is_timeout:
+            return
+        with self.lock:
+            now_ts = time.time()
+            self._cleanup(now_ts)
+            if is_429:
+                self.search_429_count += 1
+                self.error_window.append((now_ts, "429"))
+            if is_timeout:
+                self.search_timeout_count += 1
+                self.error_window.append((now_ts, "timeout"))
+
+            window_429 = sum(1 for _, kind in self.error_window if kind == "429")
+            window_timeout = sum(1 for _, kind in self.error_window if kind == "timeout")
+            need_cooldown = (
+                window_429 >= max(1, int(config.SEARCH_BURST_429_THRESHOLD))
+                or window_timeout >= max(1, int(config.SEARCH_BURST_TIMEOUT_THRESHOLD))
+            )
+            if not need_cooldown:
+                return
+
+            cooldown = float(config.SEARCH_COOLDOWN_SECONDS)
+            if retry_after is not None:
+                cooldown = max(cooldown, float(retry_after))
+            cooldown = max(0.1, min(float(config.SEARCH_COOLDOWN_MAX_SECONDS), cooldown))
+            new_until = now_ts + cooldown
+            if new_until > self.cooldown_until:
+                self.cooldown_until = new_until
+            self.search_cooldown_events += 1
+            self.total_search_cooldown_seconds += cooldown
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "search_429_count": self.search_429_count,
+                "search_timeout_count": self.search_timeout_count,
+                "search_cooldown_events": self.search_cooldown_events,
+                "total_search_cooldown_seconds": round(self.total_search_cooldown_seconds, 3),
+            }
+
+
+search_burst_controller = SearchBurstController()
+
+
 def reset_runtime_state() -> None:
-    global runtime_state
+    global runtime_state, search_burst_controller
     runtime_state = MonitoringRuntimeState()
+    search_burst_controller = SearchBurstController()
 
 
 def get_thread_local_edisclosure_client(logger: logging.Logger) -> "EDisclosureClient":
@@ -1353,37 +1428,56 @@ def parse_reports_page(
     max_new_rows: int | None = None,
 ) -> tuple[list[dict[str, str]], str]:
     soup = BeautifulSoup(html, "lxml")
-    table = soup.find("table", class_="zebra")
+    table = soup.find("table", class_="zebra") or soup.find("table")
     if not table:
         return [], ""
     rows: list[dict[str, str]] = []
     known_hash = sanitize_str((known_state or {}).get("latest_hash"))
     top_row_hash = ""
+
     for idx, tr in enumerate(table.find_all("tr")):
         if preview_limit is not None and idx >= preview_limit:
             break
         tds = tr.find_all("td")
-        if len(tds) < 4:
+        if not tds:
             continue
-        doc_type = sanitize_str(tds[0].get_text(" ", strip=True))
+
+        row_text = sanitize_str(tr.get_text(" ", strip=True))
+        row_dates = [to_iso_date_str(d) for d in re.findall(r"\b\d{2}[./]\d{2}[./]\d{4}\b", row_text)]
+        row_dates = [d for d in row_dates if d]
+
+        doc_type = sanitize_str(tds[0].get_text(" ", strip=True)) if tds else ""
         period = sanitize_str(tds[1].get_text(" ", strip=True)) if len(tds) > 1 else ""
-        if not (any(k in doc_type.lower() for k in REPORT_KEYWORDS) or period):
-            continue
         foundation_date = to_iso_date_str(tds[2].get_text(" ", strip=True)) if len(tds) > 2 else ""
         placement_date = to_iso_date_str(tds[3].get_text(" ", strip=True)) if len(tds) > 3 else ""
-        anchor = (tds[4] if len(tds) > 4 else tds[-1]).find("a", href=True)
+
+        if not foundation_date and row_dates:
+            foundation_date = row_dates[0]
+        if not placement_date:
+            placement_date = row_dates[-1] if row_dates else ""
+
+        if not doc_type:
+            doc_type = sanitize_str(tds[0].get_text(" ", strip=True)) if tds else ""
+
+        anchors = tr.find_all("a", href=True)
         file_url = ""
-        if anchor:
+        for anchor in anchors:
             href = sanitize_str(anchor.get("href"))
-            if href.startswith("/"):
-                href = urljoin("https://www.e-disclosure.ru", href)
-            if "FileLoad.ashx" in href:
-                file_url = href
-        row_hash = md5_short(f"{company_id}_{type_id}_{doc_type}_{period}_{placement_date}", 16)
+            if "FileLoad.ashx" not in href:
+                continue
+            file_url = urljoin("https://www.e-disclosure.ru", href)
+            break
+
+        is_relevant = any(k in row_text.lower() for k in REPORT_KEYWORDS) or bool(period) or bool(file_url)
+        if not is_relevant:
+            continue
+
+        row_hash = md5_short(f"{company_id}_{type_id}_{doc_type}_{period}_{placement_date}_{file_url}", 16)
         if not top_row_hash:
             top_row_hash = row_hash
         if known_hash and row_hash == known_hash:
             break
+
         rows.append({
             "hash": row_hash,
             "row_hash": row_hash,
@@ -1395,6 +1489,7 @@ def parse_reports_page(
             "foundation_date": foundation_date,
             "placement_date": placement_date,
             "file_url": file_url,
+            "row_text": row_text,
             "page_url": f"https://www.e-disclosure.ru/portal/files.aspx?id={company_id}&type={type_id}",
         })
         if max_new_rows and len(rows) >= max_new_rows:
@@ -1409,16 +1504,112 @@ def _event_is_relevant(event_name: str) -> bool:
 
 def choose_company_fast(client: EDisclosureClient, inn: str, company_name: str, mapping: dict[str, Any] | None, telemetry: dict[str, Any]) -> dict[str, str] | None:
     if mapping and sanitize_str(mapping.get("company_id")):
-        checked = parse_date(mapping.get("last_checked_at"))
+        company_id = sanitize_str(mapping.get("company_id"))
         verified_inn = sanitize_str(mapping.get("verified_inn"))
+        validation_status = sanitize_str(mapping.get("validation_status")).lower()
+        checked = parse_date(mapping.get("last_checked_at"))
+
+        if company_id and (validation_status == "verified" or (verified_inn and verified_inn == inn)):
+            telemetry["company_map_hits"] += 1
+            return {"id": company_id, "name": sanitize_str(mapping.get("company_name")), "url": sanitize_str(mapping.get("company_url"))}
+
         if checked and checked >= datetime.now() - timedelta(days=config.COMPANY_MAP_HARD_TTL_DAYS) and (not verified_inn or verified_inn == inn):
             telemetry["company_map_hits"] += 1
-            return {"id": sanitize_str(mapping.get("company_id")), "name": sanitize_str(mapping.get("company_name")), "url": sanitize_str(mapping.get("company_url"))}
+            return {"id": company_id, "name": sanitize_str(mapping.get("company_name")), "url": sanitize_str(mapping.get("company_url"))}
+
     telemetry["company_search_requests"] += 1
     candidates = client.search_company_by_inn(inn)
     if not candidates:
         return None
     return client.choose_best_candidate(inn, candidates, company_name)
+
+
+def _append_report_rows(
+    rows: list[dict[str, str]],
+    inn: str,
+    company_name: str,
+    scoring_date: str,
+    company_display_name: str,
+    report_events: list[dict[str, Any]],
+    latest_report_date: str,
+) -> str:
+    for rep in rows:
+        event_date = rep.get("placement_date") or rep.get("foundation_date")
+        if event_date and (not latest_report_date or event_date > latest_report_date):
+            latest_report_date = event_date
+        report_events.append({
+            "event_hash": rep["hash"],
+            "inn": inn,
+            "company_name": company_name or company_display_name,
+            "scoring_date": scoring_date,
+            "event_date": event_date,
+            "event_type": "Опубликована новая отчетность",
+            "event_url": rep.get("file_url") or rep.get("page_url", ""),
+            "source": "e-disclosure",
+            "payload": rep,
+        })
+    return latest_report_date
+
+
+def _scan_reports_types(
+    client: EDisclosureClient,
+    *,
+    inn: str,
+    company_name: str,
+    scoring_date: str,
+    company_id: str,
+    company_display_name: str,
+    state_by_type: dict[tuple[str, str], dict[str, str]],
+    report_events: list[dict[str, Any]],
+    report_states: list[dict[str, str]],
+    telemetry: dict[str, Any],
+    now_ts: str,
+    scan_types: list[tuple[int, str]],
+    force_refresh: bool,
+    max_new_rows: int | None,
+    latest_report_date: str,
+) -> str:
+    for type_id, type_name in scan_types:
+        known_state = state_by_type.get((inn, str(type_id)))
+        html = client.get_reports_page_cached(company_id, type_id, force_refresh=force_refresh)
+        telemetry["files_page_requests"] += 1
+        rows, top_row_hash = parse_reports_page(
+            html,
+            company_id,
+            type_id,
+            type_name,
+            known_state,
+            max_new_rows=max_new_rows,
+        )
+        if rows:
+            top = rows[0]
+            report_states.append({
+                "inn": inn,
+                "company_id": company_id,
+                "report_type_id": str(type_id),
+                "latest_hash": top.get("hash", ""),
+                "latest_placement_date": top.get("placement_date", ""),
+                "latest_foundation_date": top.get("foundation_date", ""),
+                "top_row_hash": top_row_hash,
+                "page_checked_at": now_ts,
+                "last_checked_at": now_ts,
+            })
+        elif known_state:
+            if top_row_hash and top_row_hash == sanitize_str(known_state.get("top_row_hash")):
+                telemetry["preview_skips"] += 1
+            report_states.append({
+                "inn": inn,
+                "company_id": company_id,
+                "report_type_id": str(type_id),
+                "latest_hash": sanitize_str(known_state.get("latest_hash")),
+                "latest_placement_date": sanitize_str(known_state.get("latest_placement_date")),
+                "latest_foundation_date": sanitize_str(known_state.get("latest_foundation_date")),
+                "top_row_hash": top_row_hash or sanitize_str(known_state.get("top_row_hash")),
+                "page_checked_at": now_ts,
+                "last_checked_at": now_ts,
+            })
+        latest_report_date = _append_report_rows(rows, inn, company_name, scoring_date, company_display_name, report_events, latest_report_date)
+    return latest_report_date
 
 
 def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[str, str], dict[str, str]], logger: logging.Logger, run_no: int) -> ReportFetchResult:
@@ -1432,6 +1623,7 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
         "deep_scanned": 0,
         "preview_skips": 0,
         "full_scans": 0,
+        "direct_fallback_scans": 0,
     }
     inn = task["inn"]
     company_name = task["company_name"]
@@ -1454,7 +1646,9 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
             if known and sanitize_str(known.get("latest_placement_date")) > last_known_report_date:
                 last_known_report_date = sanitize_str(known.get("latest_placement_date"))
 
-        needs_deep = force_full or not mapping or not schedule
+        known_state_missing = not any(state_by_type.get((inn, str(type_id))) for type_id, _ in REPORT_TYPE_PRIORITY)
+        suspicious_state = known_state_missing or not last_known_report_date
+        needs_deep = force_full or not mapping or not schedule or suspicious_state
         if not needs_deep:
             telemetry["events_requests"] += 1
             events = client.get_company_events(company_id, days_back=60)
@@ -1473,60 +1667,44 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
             if force_full or not mapping or not schedule:
                 telemetry["full_scans"] += 1
                 scan_types = REPORT_TYPE_PRIORITY
-            for type_id, type_name in scan_types:
-                known_state = state_by_type.get((inn, str(type_id)))
-                html = client.get_reports_page_cached(company_id, type_id, force_refresh=True)
-                telemetry["files_page_requests"] += 1
-                rows, top_row_hash = parse_reports_page(
-                    html,
-                    company_id,
-                    type_id,
-                    type_name,
-                    known_state,
-                    max_new_rows=config.EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE,
-                )
-                if rows:
-                    top = rows[0]
-                    report_states.append({
-                        "inn": inn,
-                        "company_id": company_id,
-                        "report_type_id": str(type_id),
-                        "latest_hash": top.get("hash", ""),
-                        "latest_placement_date": top.get("placement_date", ""),
-                        "latest_foundation_date": top.get("foundation_date", ""),
-                        "top_row_hash": top_row_hash,
-                        "page_checked_at": now_ts,
-                        "last_checked_at": now_ts,
-                    })
-                elif known_state:
-                    if top_row_hash and top_row_hash == sanitize_str(known_state.get("top_row_hash")) and not force_full:
-                        telemetry["preview_skips"] += 1
-                    report_states.append({
-                        "inn": inn,
-                        "company_id": company_id,
-                        "report_type_id": str(type_id),
-                        "latest_hash": sanitize_str(known_state.get("latest_hash")),
-                        "latest_placement_date": sanitize_str(known_state.get("latest_placement_date")),
-                        "latest_foundation_date": sanitize_str(known_state.get("latest_foundation_date")),
-                        "top_row_hash": top_row_hash or sanitize_str(known_state.get("top_row_hash")),
-                        "page_checked_at": now_ts,
-                        "last_checked_at": now_ts,
-                    })
-                for rep in rows:
-                    event_date = rep.get("placement_date") or rep.get("foundation_date")
-                    if event_date and (not latest_report_date or event_date > latest_report_date):
-                        latest_report_date = event_date
-                    report_events.append({
-                        "event_hash": rep["hash"],
-                        "inn": inn,
-                        "company_name": company_name or company.get("name", ""),
-                        "scoring_date": scoring_date,
-                        "event_date": event_date,
-                        "event_type": "Опубликована новая отчетность",
-                        "event_url": rep.get("file_url") or rep.get("page_url", ""),
-                        "source": "e-disclosure",
-                        "payload": rep,
-                    })
+            latest_report_date = _scan_reports_types(
+                client,
+                inn=inn,
+                company_name=company_name,
+                scoring_date=scoring_date,
+                company_id=company_id,
+                company_display_name=sanitize_str(company.get("name")),
+                state_by_type=state_by_type,
+                report_events=report_events,
+                report_states=report_states,
+                telemetry=telemetry,
+                now_ts=now_ts,
+                scan_types=scan_types,
+                force_refresh=True,
+                max_new_rows=config.EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE,
+                latest_report_date=latest_report_date,
+            )
+
+        fallback_required = bool(company_id) and (not report_events) and (needs_deep or suspicious_state or force_full)
+        if fallback_required:
+            telemetry["direct_fallback_scans"] += 1
+            latest_report_date = _scan_reports_types(
+                client,
+                inn=inn,
+                company_name=company_name,
+                scoring_date=scoring_date,
+                company_id=company_id,
+                company_display_name=sanitize_str(company.get("name")),
+                state_by_type=state_by_type,
+                report_events=report_events,
+                report_states=report_states,
+                telemetry=telemetry,
+                now_ts=now_ts,
+                scan_types=[(4, "Консолидированная"), (3, "Финансовая"), (5, "Отчет эмитента"), (2, "Годовая")],
+                force_refresh=True,
+                max_new_rows=max(config.EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE, 10),
+                latest_report_date=latest_report_date,
+            )
 
         stable_count = int(schedule.get("stable_run_count") or 0)
         if report_events:
@@ -1542,7 +1720,7 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
             "stable_run_count": stable_count,
             "last_mode": "deep" if needs_deep else "event_gate_only",
             "last_event_gate_at": now_ts,
-            "last_files_scan_at": now_ts if needs_deep else sanitize_str(schedule.get("last_files_scan_at")),
+            "last_files_scan_at": now_ts if (needs_deep or fallback_required) else sanitize_str(schedule.get("last_files_scan_at")),
         }
         company_row = {
             "inn": inn,
@@ -1556,7 +1734,8 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
             "fast_scan_at": now_ts,
             "last_checked_at": now_ts,
         }
-        return ReportFetchResult(inn, company_name, scoring_date, company_row, report_events, report_states, schedule_row, latest_report_date, not needs_deep, telemetry, time.perf_counter() - started)
+        dedup_events = list({ev["event_hash"]: ev for ev in report_events}.values())
+        return ReportFetchResult(inn, company_name, scoring_date, company_row, dedup_events, report_states, schedule_row, latest_report_date, not needs_deep, telemetry, time.perf_counter() - started)
     except Exception as exc:  # noqa: BLE001
         return ReportFetchResult(inn, company_name, scoring_date, None, [], [], None, "", False, telemetry, time.perf_counter() - started, error=str(exc))
 
@@ -1591,33 +1770,58 @@ def _save_autotune_meta(conn: sqlite3.Connection, workers: int, files: int) -> N
     conn.commit()
 
 
-def _autotune_concurrency(conn: sqlite3.Connection, logger: logging.Logger, workers: int, files: int) -> tuple[int, int]:
+def _autotune_concurrency(conn: sqlite3.Connection, logger: logging.Logger, workers: int, files: int) -> tuple[int, int, bool]:
     if not config.EDISCLOSURE_AUTOTUNE_ENABLED:
-        return workers, files
+        return workers, files, False
+
     with runtime_state.lock:
         total_requests = max(1, runtime_state.total_requests)
         err_rate = (runtime_state.status_429 + runtime_state.timeout_count) / total_requests
 
-    if err_rate > config.EDISCLOSURE_AUTOTUNE_ERROR_RATE_THRESHOLD:
-        workers = max(config.EDISCLOSURE_FETCH_WORKERS_MIN, workers - max(1, int(config.EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STEP)))
-        files = max(config.EDISCLOSURE_FILES_SEMAPHORE_MIN, files - max(1, int(config.EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STEP // 2 or 1)))
-    elif err_rate <= config.EDISCLOSURE_AUTOTUNE_FAST_GROW_ERROR_RATE_THRESHOLD:
-        workers = min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers + max(1, int(config.EDISCLOSURE_AUTOTUNE_FAST_GROW_STEP)))
-        files = min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files + max(1, int(config.EDISCLOSURE_AUTOTUNE_FAST_GROW_STEP // 2 or 1)))
+    burst_snapshot = search_burst_controller.snapshot()
+    had_search_burst = burst_snapshot.get("search_cooldown_events", 0) > 0
+
+    bad_streak_raw = conn.execute("SELECT value FROM meta WHERE key='edisclosure_autotune_bad_run_streak'").fetchone()
+    bad_streak = int((bad_streak_raw or ["0"])[0] or "0")
+
+    overloaded = err_rate > config.EDISCLOSURE_AUTOTUNE_ERROR_RATE_THRESHOLD
+    if overloaded:
+        bad_streak += 1
     else:
-        workers = min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers + max(1, int(config.EDISCLOSURE_AUTOTUNE_GROW_STEP)))
-        files = min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files + max(1, int(config.EDISCLOSURE_AUTOTUNE_GROW_STEP // 2 or 1)))
+        bad_streak = 0
+
+    next_workers = workers
+    next_files = files
+    changed = False
+
+    if overloaded and bad_streak >= max(2, int(config.EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STREAK)):
+        # Scale down only after several consecutive overloaded runs.
+        next_workers = max(config.EDISCLOSURE_FETCH_WORKERS_MIN, workers - max(1, int(config.EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STEP)))
+        next_files = max(config.EDISCLOSURE_FILES_SEMAPHORE_MIN, files - max(1, int(config.EDISCLOSURE_AUTOTUNE_SCALE_DOWN_STEP // 2 or 1)))
+        changed = (next_workers != workers) or (next_files != files)
+    elif not overloaded:
+        if err_rate <= config.EDISCLOSURE_AUTOTUNE_FAST_GROW_ERROR_RATE_THRESHOLD and not had_search_burst:
+            next_workers = min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers + max(1, int(config.EDISCLOSURE_AUTOTUNE_FAST_GROW_STEP)))
+            next_files = min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files + max(1, int(config.EDISCLOSURE_AUTOTUNE_FAST_GROW_STEP // 2 or 1)))
+        else:
+            next_workers = min(config.EDISCLOSURE_FETCH_WORKERS_MAX, workers + max(1, int(config.EDISCLOSURE_AUTOTUNE_GROW_STEP)))
+            next_files = min(config.EDISCLOSURE_FILES_SEMAPHORE_MAX, files + max(1, int(config.EDISCLOSURE_AUTOTUNE_GROW_STEP // 2 or 1)))
+        changed = (next_workers != workers) or (next_files != files)
 
     logger.info(
-        "autotune chosen workers=%s files_semaphore=%s err_rate=%.4f thresholds=(fast<=%.4f, down>%.4f)",
-        workers,
-        files,
+        "autotune next workers=%s files_semaphore=%s changed=%s err_rate=%.4f bad_streak=%s thresholds=(fast<=%.4f, down>%.4f) search_cooldown_events=%s",
+        next_workers,
+        next_files,
+        changed,
         err_rate,
+        bad_streak,
         config.EDISCLOSURE_AUTOTUNE_FAST_GROW_ERROR_RATE_THRESHOLD,
         config.EDISCLOSURE_AUTOTUNE_ERROR_RATE_THRESHOLD,
+        burst_snapshot.get("search_cooldown_events", 0),
     )
-    _save_autotune_meta(conn, workers, files)
-    return workers, files
+    conn.execute("INSERT INTO meta (key, value) VALUES ('edisclosure_autotune_bad_run_streak', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(bad_streak),))
+    _save_autotune_meta(conn, next_workers, next_files)
+    return next_workers, next_files, changed
 
 
 def stage_reports_fetch_parallel(tasks: list[dict[str, Any]], report_state: dict[tuple[str, str], dict[str, str]], logger: logging.Logger, run_no: int) -> list[ReportFetchResult]:
@@ -1700,6 +1904,7 @@ def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchRe
         "deep_scanned": 0,
         "preview_skips": 0,
         "full_scans": 0,
+        "direct_fallback_scans": 0,
         **prep_stats,
     }
     durations = []
@@ -1710,7 +1915,7 @@ def stage_reports_flush_db(conn: sqlite3.Connection, results: list[ReportFetchRe
         if res.error:
             stats["errors"] += 1
             logger.warning("Failed reports INN=%s: %s", res.inn, res.error)
-        for key in ["company_search_requests", "events_requests", "files_page_requests", "company_map_hits", "event_gate_only", "deep_scanned", "preview_skips", "full_scans"]:
+        for key in ["company_search_requests", "events_requests", "files_page_requests", "company_map_hits", "event_gate_only", "deep_scanned", "preview_skips", "full_scans", "direct_fallback_scans"]:
             stats[key] += int(res.telemetry.get(key, 0) or 0)
         if res.company_map_row:
             cm = res.company_map_row
@@ -1796,6 +2001,7 @@ def print_perf_summary(stats: dict[str, Any], total_emitents: int, total_seconds
 
     req_median = statistics.median(request_latencies) if request_latencies else 0.0
     req_p95 = statistics.quantiles(request_latencies, n=100)[94] if len(request_latencies) >= 20 else (max(request_latencies) if request_latencies else 0.0)
+    search_burst = search_burst_controller.snapshot()
 
     saved_company_map = max(0, stats.get("processed_emitents", 0) - stats.get("company_search_requests", 0))
     saved_event_gate = max(0, stats.get("event_gate_only", 0) * 2)
@@ -1811,12 +2017,18 @@ def print_perf_summary(stats: dict[str, Any], total_emitents: int, total_seconds
         f"company_search_requests={company_search_requests}, events_requests={events_requests}, files_requests={files_requests}, fileload_requests={fileload_requests}"
     )
     print(
+        f"Search burst: search_429_count={search_burst.get('search_429_count', 0)}, search_timeout_count={search_burst.get('search_timeout_count', 0)}, "
+        f"search_cooldown_events={search_burst.get('search_cooldown_events', 0)}, total_search_cooldown_seconds={search_burst.get('total_search_cooldown_seconds', 0.0):.2f}, "
+        f"workers_used={stats.get('workers_used', _current_workers)}, files_semaphore_used={stats.get('files_semaphore_used', _current_files_semaphore)}, "
+        f"autotune_changed_next_run={stats.get('autotune_changed_next_run', 'no')}"
+    )
+    print(
         f"Timing: total_stage_seconds={total_seconds:.2f}s avg={avg:.2f}s median={median:.2f}s p95={p95:.2f}s "
         f"avg_emitents_per_minute={emitents_per_min:.2f}"
     )
 
     logger.info(
-        "stage_reports telemetry total_emitents=%s processed_emitents=%s skipped_by_cache=%s event_gated=%s deep_scanned=%s company_search_requests=%s events_requests=%s files_requests=%s fileload_requests=%s preview_skips=%s reports_found=%s new_events_found=%s total_stage_seconds=%.3f avg_emitents_per_minute=%.3f median_request_latency=%.3f p95_request_latency=%.3f 429_count=%s timeout_count=%s chosen_workers=%s chosen_files_semaphore=%s http_saved_company_map=%s http_saved_event_gate=%s http_saved_preview_skip=%s",
+        "stage_reports telemetry total_emitents=%s processed_emitents=%s skipped_by_cache=%s event_gated=%s deep_scanned=%s company_search_requests=%s events_requests=%s files_requests=%s fileload_requests=%s preview_skips=%s reports_found=%s new_events_found=%s total_stage_seconds=%.3f avg_emitents_per_minute=%.3f median_request_latency=%.3f p95_request_latency=%.3f 429_count=%s timeout_count=%s workers_used=%s files_semaphore_used=%s next_workers=%s next_files_semaphore=%s autotune_changed_next_run=%s search_429_count=%s search_timeout_count=%s search_cooldown_events=%s total_search_cooldown_seconds=%.3f http_saved_company_map=%s http_saved_event_gate=%s http_saved_preview_skip=%s",
         stats.get("total_emitents", total_emitents),
         stats.get("processed_emitents", total_emitents),
         stats.get("skipped_by_cache", 0),
@@ -1835,8 +2047,15 @@ def print_perf_summary(stats: dict[str, Any], total_emitents: int, total_seconds
         req_p95,
         total_429,
         total_timeout,
+        stats.get("workers_used", _current_workers),
+        stats.get("files_semaphore_used", _current_files_semaphore),
         stats.get("chosen_workers", _current_workers),
         stats.get("chosen_files_semaphore", _current_files_semaphore),
+        stats.get("autotune_changed_next_run", "no"),
+        search_burst.get("search_429_count", 0),
+        search_burst.get("search_timeout_count", 0),
+        search_burst.get("search_cooldown_events", 0),
+        search_burst.get("total_search_cooldown_seconds", 0.0),
         saved_company_map,
         saved_event_gate,
         saved_preview,
@@ -1880,9 +2099,12 @@ def run_monitoring() -> None:
         stage_started = time.perf_counter()
         results = stage_reports_fetch_parallel(tasks, report_state, logger, run_no)
         stats = stage_reports_flush_db(conn, results, existing_hashes, all_new_event_hashes, logger, prep_stats)
-        chosen_workers, chosen_files_semaphore = _autotune_concurrency(conn, logger, workers, files_semaphore)
-        stats["chosen_workers"] = chosen_workers
-        stats["chosen_files_semaphore"] = chosen_files_semaphore
+        next_workers, next_files_semaphore, autotune_changed = _autotune_concurrency(conn, logger, workers, files_semaphore)
+        stats["workers_used"] = workers
+        stats["files_semaphore_used"] = files_semaphore
+        stats["chosen_workers"] = next_workers
+        stats["chosen_files_semaphore"] = next_files_semaphore
+        stats["autotune_changed_next_run"] = "yes" if autotune_changed else "no"
         print_perf_summary(stats, prep_stats.get("processed_emitents", len(tasks)), time.perf_counter() - stage_started, logger)
 
     _, elapsed = timed(stage_reports)
