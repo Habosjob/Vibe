@@ -2675,6 +2675,15 @@ def _format_ytm_percent(ytm_decimal: float) -> str:
     return f"{ytm_decimal * 100:.{precision}f}"
 
 
+def _nominal_periodic_to_effective_annual(rate_nominal: float, periods_per_year: float) -> float:
+    if periods_per_year <= 0:
+        return rate_nominal
+    base = 1.0 + rate_nominal / periods_per_year
+    if base <= 0:
+        return rate_nominal
+    return (base ** periods_per_year) - 1.0
+
+
 def _is_ruble_faceunit(faceunit: object) -> bool:
     return str(faceunit or "").strip().upper() in {"RUB", "RUR", "SUR"}
 
@@ -2924,7 +2933,7 @@ def _build_amortized_cashflows(
     return cashflows
 
 
-def _solve_ytm_bisection(
+def _solve_nominal_periodic_ytm_bisection(
     dirty_price: float,
     coupon_frequency: float,
     cashflows: list[tuple[float, float]],
@@ -2960,6 +2969,13 @@ def _solve_ytm_bisection(
             left = mid
             left_val = mid_val
     return (left + right) / 2
+
+
+def _calculate_perpetual_subord_effective_current_yield(*, annual_coupon: float, dirty_price: float, compounding_frequency: float) -> float | None:
+    if dirty_price <= 0 or compounding_frequency <= 0:
+        return None
+    current_coupon_yield = annual_coupon / dirty_price
+    return _nominal_periodic_to_effective_annual(current_coupon_yield, compounding_frequency)
 
 
 def _calculate_fixed_coupon_ytm(
@@ -3035,8 +3051,13 @@ def _calculate_fixed_coupon_ytm(
     is_subord = _is_true_like(subord_flag)
     is_amort = _is_true_like(amort_flag)
     if is_subord:
-        current_coupon_yield = annual_coupon / dirty_price
-        effective_yield = (1.0 + current_coupon_yield / solver_frequency) ** solver_frequency - 1.0
+        effective_yield = _calculate_perpetual_subord_effective_current_yield(
+            annual_coupon=annual_coupon,
+            dirty_price=dirty_price,
+            compounding_frequency=solver_frequency,
+        )
+        if effective_yield is None:
+            return ""
         return _format_ytm_percent(effective_yield)
 
     if is_zero_coupon:
@@ -3078,15 +3099,15 @@ def _calculate_fixed_coupon_ytm(
     if not cashflows:
         return ""
 
-    ytm_decimal = _solve_ytm_bisection(
+    ytm_nominal = _solve_nominal_periodic_ytm_bisection(
         dirty_price=dirty_price,
         coupon_frequency=solver_frequency,
         cashflows=cashflows,
     )
-    if ytm_decimal is None:
+    if ytm_nominal is None:
         return ""
-
-    return _format_ytm_percent(ytm_decimal)
+    ytm_effective = _nominal_periodic_to_effective_annual(ytm_nominal, solver_frequency)
+    return _format_ytm_percent(ytm_effective)
 
 
 def _run_ytm_self_check() -> list[str]:
@@ -3105,13 +3126,17 @@ def _run_ytm_self_check() -> list[str]:
         period_coupon=period_coupon,
         facevalue=facevalue,
     )
-    ytm_1 = _solve_ytm_bisection(dirty_price=980.0, coupon_frequency=coupon_freq, cashflows=cashflows_coupon)
+    ytm_1 = _solve_nominal_periodic_ytm_bisection(dirty_price=980.0, coupon_frequency=coupon_freq, cashflows=cashflows_coupon)
     if ytm_1 is None:
         errors.append("Self-check #1: не удалось решить YTM для базового фиксированного кейса.")
     else:
         pv_1 = sum(amount / ((1 + ytm_1 / coupon_freq) ** (years * coupon_freq)) for years, amount in cashflows_coupon)
         if abs(pv_1 - 980.0) > 1e-6:
             errors.append("Self-check #1: PV(cashflows, ytm) не совпадает с dirty price.")
+        expected_effective_1 = (1.0 + ytm_1 / coupon_freq) ** coupon_freq - 1.0
+        helper_effective_1 = _nominal_periodic_to_effective_annual(ytm_1, coupon_freq)
+        if abs(expected_effective_1 - helper_effective_1) > 1e-12:
+            errors.append("Self-check #1b: annualization helper mismatch для nominal solver.")
 
     target_non_coupon = datetime.now() + timedelta(days=150)
     cashflows_non_coupon = _build_cashflow_times_years(
@@ -3138,13 +3163,65 @@ def _run_ytm_self_check() -> list[str]:
         coupon_rate=0.12,
         amortization_schedule=amort_schedule,
     )
-    ytm_3 = _solve_ytm_bisection(dirty_price=960.0, coupon_frequency=2.0, cashflows=cashflows_amort)
+    ytm_3 = _solve_nominal_periodic_ytm_bisection(dirty_price=960.0, coupon_frequency=2.0, cashflows=cashflows_amort)
     if ytm_3 is None:
         errors.append("Self-check #3: не удалось решить YTM для амортизационного кейса.")
     else:
         pv_3 = sum(amount / ((1 + ytm_3 / 2.0) ** (years * 2.0)) for years, amount in cashflows_amort)
         if abs(pv_3 - 960.0) > 1e-6:
             errors.append("Self-check #3: PV(cashflows, ytm) для амортизации не совпадает с dirty price.")
+
+    regression_logger = logging.getLogger("bonds_main")
+    ytm_monthly = _calculate_fixed_coupon_ytm(
+        subord_flag="Нет",
+        amort_flag="Нет",
+        coupon_type="Фиксированный",
+        coupon_percent=17,
+        coupon_frequency=None,
+        coupon_period_days=30,
+        next_coupon_date="2026-04-02",
+        faceunit="RUB",
+        corpbonds_nkd=2.79,
+        fallback_nkd=2.79,
+        facevalue=1000,
+        matdate="2029-02-15",
+        offerdate="",
+        corpbonds_price=100.3,
+        dohod_price="",
+        smartlab_price="",
+        moex_price="",
+        amortization_schedule=None,
+        logger=regression_logger,
+        secid="RU000A10EES4",
+    )
+    ytm_monthly_value = _parse_decimal_value(ytm_monthly)
+    if ytm_monthly_value is None or ytm_monthly_value < 18.0:
+        errors.append("Self-check #4: monthly fixed RU000A10EES4-like case должен давать displayed YTM в районе 18.x.")
+
+    ytm_other = _calculate_other_coupon_ytm(
+        subord_flag="Нет",
+        coupon_percent=13,
+        coupon_frequency=None,
+        coupon_period_days=30,
+        next_coupon_date="2026-03-31",
+        amort_flag="Нет",
+        faceunit="RUB",
+        corpbonds_nkd=142.47,
+        fallback_nkd=142.47,
+        facevalue=50000,
+        matdate="2028-12-15",
+        offerdate="",
+        corpbonds_price=90.71,
+        dohod_price="",
+        smartlab_price="",
+        moex_price="",
+        amortization_schedule=None,
+        logger=regression_logger,
+        secid="RU000A10DCM3",
+    )
+    ytm_other_value = _parse_decimal_value(ytm_other)
+    if ytm_other_value is None or ytm_other_value < 15.0:
+        errors.append("Self-check #5: other coupon RU000A10DCM3-like case должен давать high-teens, не 3-4%.")
 
     return errors
 
@@ -3458,13 +3535,20 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
     if _is_true_like(subord_flag):
         rate0 = _forecast_by_bucket(getattr(config, "KEY_RATE_FORECAST", {0: key_current, 2: key_current}), 0) - spread_to_key + premium
         current_coupon = facevalue_value * (rate0 / 100.0)
-        effective = (1.0 + (current_coupon / dirty_price) / coupon_freq) ** coupon_freq - 1.0
+        effective = _calculate_perpetual_subord_effective_current_yield(
+            annual_coupon=current_coupon,
+            dirty_price=dirty_price,
+            compounding_frequency=coupon_freq,
+        )
+        if effective is None:
+            return ""
         return _format_ytm_percent(effective)
 
-    ytm_decimal = _solve_ytm_bisection(dirty_price=dirty_price, coupon_frequency=coupon_freq, cashflows=cashflows)
-    if ytm_decimal is None:
+    ytm_nominal = _solve_nominal_periodic_ytm_bisection(dirty_price=dirty_price, coupon_frequency=coupon_freq, cashflows=cashflows)
+    if ytm_nominal is None:
         return ""
-    return _format_ytm_percent(ytm_decimal)
+    ytm_effective = _nominal_periodic_to_effective_annual(ytm_nominal, coupon_freq)
+    return _format_ytm_percent(ytm_effective)
 
 
 def _calculate_linker_ytm(*, secid: str, bond_type: object, bond_subtype: object, coupon_percent: object, coupon_frequency: object, coupon_period_days: object, next_coupon_date: object, faceunit: object, corpbonds_nkd: object, fallback_nkd: object, facevalue: object, matdate: object, offerdate: object, corpbonds_price: object, dohod_price: object, smartlab_price: object, moex_price: object, logger: logging.Logger) -> str:
@@ -3505,15 +3589,19 @@ def _calculate_linker_ytm(*, secid: str, bond_type: object, bond_subtype: object
     inf_t = _forecast_by_bucket(getattr(config, "INFLATION_FORECAST", {0: 5.4, 2: 4.0}), bucket_t) / 100.0
     principal_target = facevalue_value * ((1 + inf_t) ** years_target)
     cashflows.append((years_target, principal_target))
-    ytm_decimal = _solve_ytm_bisection(dirty_price=dirty_price, coupon_frequency=coupon_freq, cashflows=cashflows)
-    if ytm_decimal is None:
+    ytm_nominal = _solve_nominal_periodic_ytm_bisection(dirty_price=dirty_price, coupon_frequency=coupon_freq, cashflows=cashflows)
+    if ytm_nominal is None:
         return ""
-    return _format_ytm_percent(ytm_decimal)
+    ytm_effective = _nominal_periodic_to_effective_annual(ytm_nominal, coupon_freq)
+    return _format_ytm_percent(ytm_effective)
 
 
-def _calculate_other_coupon_ytm(*, subord_flag: object, coupon_frequency: object, faceunit: object, corpbonds_nkd: object, fallback_nkd: object, facevalue: object, matdate: object, offerdate: object, corpbonds_price: object, dohod_price: object, smartlab_price: object, moex_price: object, amortization_schedule: list[tuple[datetime, float]] | None, logger: logging.Logger, secid: str) -> str:
+def _calculate_other_coupon_ytm(*, subord_flag: object, coupon_percent: object, coupon_frequency: object, coupon_period_days: object, next_coupon_date: object, amort_flag: object, faceunit: object, corpbonds_nkd: object, fallback_nkd: object, facevalue: object, matdate: object, offerdate: object, corpbonds_price: object, dohod_price: object, smartlab_price: object, moex_price: object, amortization_schedule: list[tuple[datetime, float]] | None, logger: logging.Logger, secid: str) -> str:
     price = _pick_price_for_ytm(corpbonds_price, dohod_price, smartlab_price, moex_price)
-    coupon_freq = _resolve_coupon_frequency_per_year(coupon_frequency) or 2.0
+    coupon_rate_percent = _parse_decimal_value(coupon_percent) or 0.0
+    coupon_freq = _resolve_coupon_frequency_per_year(coupon_frequency) or _resolve_coupon_frequency_per_year(coupon_period_days)
+    next_coupon_dt = _parse_bond_date(str(next_coupon_date or ""))
+    tiny_coupon_threshold = float(getattr(config, "YTM_OTHER_COUPON_TINY_THRESHOLD", 1e-8))
     facevalue_value = _parse_decimal_value(facevalue)
     target_date = _parse_bond_date(str(offerdate or "")) or _parse_bond_date(str(matdate or ""))
     if price is None or facevalue_value is None or facevalue_value <= 0 or target_date is None:
@@ -3528,28 +3616,68 @@ def _calculate_other_coupon_ytm(*, subord_flag: object, coupon_frequency: object
         logger=logger,
     )
     dirty_price = _normalize_purchase_price(price, facevalue_value, nkd_value)
-    valuation_date = datetime.now().date()
-    principal = facevalue_value
-    amort_map = {d.date(): p for d, p in (amortization_schedule or []) if p > 0}
-    event_dates = sorted(set(amort_map.keys()) | {target_date.date()})
-    cashflows: list[tuple[float, float]] = []
-    for dt in event_dates:
-        if dt <= valuation_date:
-            continue
-        amount = 0.0
-        if dt in amort_map:
-            principal_payment = min(principal, amort_map[dt])
-            amount += principal_payment
-            principal -= principal_payment
-        if dt == target_date.date() and principal > 0:
-            amount += principal
-        years = (dt - valuation_date).days / 365.25
-        if amount > 0 and years > 0:
-            cashflows.append((years, amount))
-    ytm_decimal = _solve_ytm_bisection(dirty_price=dirty_price, coupon_frequency=coupon_freq, cashflows=cashflows)
-    if ytm_decimal is None:
+    use_principal_only = (
+        coupon_rate_percent <= tiny_coupon_threshold
+        or coupon_freq is None
+        or coupon_freq <= 0
+        or next_coupon_dt is None
+    )
+
+    cashflows: list[tuple[float, float]]
+    solver_frequency: float
+    if use_principal_only:
+        solver_frequency = coupon_freq if coupon_freq is not None and coupon_freq > 0 else 1.0
+        valuation_date = datetime.now().date()
+        principal = facevalue_value
+        amort_map = {d.date(): p for d, p in (amortization_schedule or []) if p > 0}
+        event_dates = sorted(set(amort_map.keys()) | {target_date.date()})
+        cashflows = []
+        for dt in event_dates:
+            if dt <= valuation_date:
+                continue
+            amount = 0.0
+            if dt in amort_map:
+                principal_payment = min(principal, amort_map[dt])
+                amount += principal_payment
+                principal -= principal_payment
+            if dt == target_date.date() and principal > 0:
+                amount += principal
+            years = (dt - valuation_date).days / 365.25
+            if amount > 0 and years > 0:
+                cashflows.append((years, amount))
+    else:
+        solver_frequency = coupon_freq
+        coupon_rate = coupon_rate_percent / 100.0
+        if _is_true_like(amort_flag):
+            cashflows = _build_amortized_cashflows(
+                target_date=target_date,
+                coupon_frequency=solver_frequency,
+                coupon_period_days=coupon_period_days,
+                next_coupon_date=next_coupon_date,
+                facevalue=facevalue_value,
+                coupon_rate=coupon_rate,
+                amortization_schedule=amortization_schedule,
+            )
+        else:
+            period_coupon = facevalue_value * coupon_rate / solver_frequency
+            cashflows = _build_cashflow_times_years(
+                target_date=target_date,
+                coupon_frequency=solver_frequency,
+                coupon_period_days=coupon_period_days,
+                next_coupon_date=next_coupon_date,
+                period_coupon=period_coupon,
+                facevalue=facevalue_value,
+            )
+
+    if not cashflows:
+        logger.info("Other YTM skipped SECID=%s: reason=unsupported_other_coupon_cashflows", secid)
         return ""
-    return _format_ytm_percent(ytm_decimal)
+
+    ytm_nominal = _solve_nominal_periodic_ytm_bisection(dirty_price=dirty_price, coupon_frequency=solver_frequency, cashflows=cashflows)
+    if ytm_nominal is None:
+        return ""
+    ytm_effective = _nominal_periodic_to_effective_annual(ytm_nominal, solver_frequency)
+    return _format_ytm_percent(ytm_effective)
 
 
 def _screener_sort_key(row_values: tuple[object, ...]) -> tuple[int, datetime, str, str]:
@@ -4753,7 +4881,11 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
             elif _is_other_coupon_type(coupon_type):
                 ytm_value = _calculate_other_coupon_ytm(
                     subord_flag=row[7],
+                    coupon_percent=row[19],
                     coupon_frequency=row[20],
+                    coupon_period_days=row[16],
+                    next_coupon_date=row[14],
+                    amort_flag=row[8],
                     faceunit=row[23],
                     corpbonds_nkd=row[17],
                     fallback_nkd=row[18],
