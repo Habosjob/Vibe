@@ -4,7 +4,7 @@ import sqlite3
 import unittest
 from datetime import datetime, timedelta
 
-from monitoring.main import EmitentRow, SCHEMA_SQL, parse_reports_page, stage_reports_prepare
+from monitoring.main import EmitentRow, SCHEMA_SQL, build_latest_event_by_inn, parse_reports_page, stage_reports_prepare
 
 
 class TestEDisclosureRegression6316031581(unittest.TestCase):
@@ -76,6 +76,30 @@ class TestEDisclosureRegression6316031581(unittest.TestCase):
         self.assertEqual(len(tasks), 1)
         self.assertEqual(len(skipped), 0)
         self.assertTrue(tasks[0]["force_missing_recheck"])
+
+
+    def test_latest_event_by_inn_uses_newest_event_date(self) -> None:
+        report_events = [
+            {
+                "event_hash": "old",
+                "inn": "6316031581",
+                "event_date": "2024-01-10",
+                "event_type": "Опубликована новая отчетность",
+                "event_url": "https://www.e-disclosure.ru/portal/files.aspx?id=225&type=4",
+                "source": "e-disclosure",
+            },
+            {
+                "event_hash": "new",
+                "inn": "6316031581",
+                "event_date": "2025-02-15",
+                "event_type": "Опубликована новая отчетность",
+                "event_url": "https://www.e-disclosure.ru/portal/FileLoad.ashx?Fileid=123456",
+                "source": "e-disclosure",
+            },
+        ]
+        latest = build_latest_event_by_inn(report_events)
+        self.assertIn("6316031581", latest)
+        self.assertEqual(latest["6316031581"]["event_hash"], "new")
 
 
 if __name__ == "__main__":

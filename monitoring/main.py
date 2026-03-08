@@ -1184,6 +1184,21 @@ def export_reports(events: list[dict[str, str]]) -> None:
     wb.save(config.REPORTS_XLSX)
 
 
+
+
+def build_latest_event_by_inn(report_events: list[dict[str, str]]) -> dict[str, dict[str, str]]:
+    ordered = sorted(
+        report_events,
+        key=lambda x: (parse_date(x.get("event_date")) or datetime.min, sanitize_str(x.get("event_hash"))),
+        reverse=True,
+    )
+    latest_event_by_inn: dict[str, dict[str, str]] = {}
+    for row in ordered:
+        inn = sanitize_str(row.get("inn", ""))
+        if not inn:
+            continue
+        latest_event_by_inn.setdefault(inn, row)
+    return latest_event_by_inn
 def export_portfolio(
     portfolio_items: list[dict[str, str]],
     latest_event_by_inn: dict[str, dict[str, str]],
@@ -1472,13 +1487,13 @@ def parse_reports_page(
             placement_date = row_dates[-1] if row_dates else ""
 
         if not doc_type:
-            doc_type = sanitize_str(tds[0].get_text(" ", strip=True)) if tds else ""
+            doc_type = sanitize_str(row_text)
 
         anchors = tr.find_all("a", href=True)
         file_url = ""
         for anchor in anchors:
             href = sanitize_str(anchor.get("href"))
-            if "FileLoad.ashx" not in href:
+            if "fileload.ashx" not in href.lower():
                 continue
             file_url = urljoin("https://www.e-disclosure.ru", href)
             break
@@ -1487,7 +1502,7 @@ def parse_reports_page(
         if not is_relevant:
             continue
 
-        row_hash = md5_short(f"{company_id}_{type_id}_{doc_type}_{period}_{foundation_date}_{placement_date}", 16)
+        row_hash = md5_short(f"{company_id}_{type_id}_{doc_type}_{period}_{placement_date}", 16)
         if not top_row_hash:
             top_row_hash = row_hash
         if known_hash and row_hash == known_hash:
@@ -1583,8 +1598,17 @@ def _scan_reports_types(
     force_refresh: bool,
     max_new_rows: int | None,
     latest_report_date: str,
+    logger: logging.Logger,
+    scan_diag: dict[str, Any] | None = None,
 ) -> str:
+    if scan_diag is None:
+        scan_diag = {}
+    scan_diag.setdefault("scanned_types", [])
+    scan_diag.setdefault("found_rows_count", 0)
+    scan_diag.setdefault("found_file_urls_count", 0)
+
     for type_id, type_name in scan_types:
+        scan_diag["scanned_types"].append(str(type_id))
         known_state = state_by_type.get((inn, str(type_id)))
         html = client.get_reports_page_cached(company_id, type_id, force_refresh=force_refresh)
         telemetry["files_page_requests"] += 1
@@ -1596,6 +1620,12 @@ def _scan_reports_types(
             known_state,
             max_new_rows=max_new_rows,
         )
+        scan_diag["found_rows_count"] += len(rows)
+        scan_diag["found_file_urls_count"] += sum(1 for row in rows if sanitize_str(row.get("file_url")))
+
+        if rows and not any(sanitize_str(row.get("file_url")) for row in rows):
+            logger.warning("files page parsed but FileLoad link not found | inn=%s company_id=%s type_id=%s", inn, company_id, type_id)
+
         if rows:
             top = rows[0]
             report_states.append({
@@ -1639,6 +1669,7 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
         "preview_skips": 0,
         "full_scans": 0,
         "direct_fallback_scans": 0,
+        "event_gate_result": "not_used",
     }
     inn = task["inn"]
     company_name = task["company_name"]
@@ -1666,15 +1697,26 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
         missing_type4_state = state_by_type.get((inn, "4")) is None
         suspicious_state = known_state_missing or not last_known_report_date or missing_type4_state
         needs_deep = force_full or force_missing_recheck or not mapping or not schedule or suspicious_state
+        scan_diag: dict[str, Any] = {"scanned_types": [], "found_rows_count": 0, "found_file_urls_count": 0}
+        event_gate_result = "not_used"
         if not needs_deep:
             telemetry["events_requests"] += 1
-            events = client.get_company_events(company_id, days_back=60)
-            rel = [e for e in events if _event_is_relevant(e.get("eventName", ""))]
-            newest_rel = max([sanitize_str(x.get("pubDate") or x.get("eventDate")) for x in rel] or [""])
-            if newest_rel and (not last_known_report_date or newest_rel > last_known_report_date):
+            try:
+                events = client.get_company_events(company_id, days_back=60)
+                rel = [e for e in events if _event_is_relevant(e.get("eventName", ""))]
+                newest_rel = max([sanitize_str(x.get("pubDate") or x.get("eventDate")) for x in rel] or [""])
+                if newest_rel and (not last_known_report_date or newest_rel > last_known_report_date):
+                    needs_deep = True
+                    event_gate_result = "newer_event"
+                else:
+                    telemetry["event_gate_only"] += 1
+                    event_gate_result = "empty" if not rel else "no_newer"
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("event gate failed, forcing direct scan | inn=%s company_id=%s err=%s", inn, company_id, exc)
                 needs_deep = True
-            else:
-                telemetry["event_gate_only"] += 1
+                event_gate_result = "error"
+
+        telemetry["event_gate_result"] = event_gate_result
 
         latest_report_date = last_known_report_date
         scan_types = REPORT_TYPE_PRIORITY[:2]
@@ -1700,9 +1742,18 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
                 force_refresh=True,
                 max_new_rows=config.EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE,
                 latest_report_date=latest_report_date,
+                logger=logger,
+                scan_diag=scan_diag,
             )
 
-        fallback_required = bool(company_id) and (not report_events) and (needs_deep or suspicious_state or force_full)
+        known_company_id = bool(company_id) and bool(sanitize_str(mapping.get("company_id")) or company_id)
+        fallback_required = bool(company_id) and known_company_id and (not report_events) and (
+            suspicious_state
+            or force_full
+            or force_missing_recheck
+            or event_gate_result in {"empty", "error", "not_used"}
+            or not last_known_report_date
+        )
         if fallback_required:
             telemetry["direct_fallback_scans"] += 1
             latest_report_date = _scan_reports_types(
@@ -1721,6 +1772,20 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
                 force_refresh=True,
                 max_new_rows=max(config.EDISCLOSURE_PARSE_MAX_NEW_ROWS_PER_TYPE, 10),
                 latest_report_date=latest_report_date,
+                logger=logger,
+                scan_diag=scan_diag,
+            )
+
+        if company_id and not report_events:
+            logger.warning(
+                "known company_id but no reports parsed | inn=%s company_id=%s scanned_types=%s found_rows_count=%s found_file_urls_count=%s event_gate_result=%s report_state=%s",
+                inn,
+                company_id,
+                ",".join(scan_diag.get("scanned_types", [])),
+                scan_diag.get("found_rows_count", 0),
+                scan_diag.get("found_file_urls_count", 0),
+                event_gate_result,
+                json.dumps({k[1]: v for k, v in state_by_type.items() if k[0] == inn}, ensure_ascii=False),
             )
 
         stable_count = int(schedule.get("stable_run_count") or 0)
@@ -2345,9 +2410,17 @@ def run_monitoring() -> None:
             row["is_new"] = row.get("event_hash") in all_new_event_hashes
         export_reports(report_events)
 
-        latest_event_by_inn: dict[str, dict[str, str]] = {}
-        for row in sorted(report_events, key=lambda x: x.get("event_date", ""), reverse=True):
-            latest_event_by_inn.setdefault(row.get("inn", ""), row)
+        latest_event_by_inn = build_latest_event_by_inn(report_events)
+
+        logger.info(
+            "export diagnostics | report_events=%s latest_event_by_inn=%s portfolio_items=%s has_6316031581_report=%s has_6316031581_latest=%s has_6316031581_portfolio=%s",
+            len(report_events),
+            len(latest_event_by_inn),
+            len(portfolio_items),
+            any(sanitize_str(r.get("inn")) == "6316031581" for r in report_events),
+            "6316031581" in latest_event_by_inn,
+            any(sanitize_str(item.get("inn")) == "6316031581" for item in portfolio_items),
+        )
 
         latest_news_by_key: dict[tuple[str, str], dict[str, str]] = {}
         for row in sorted(news_rows, key=lambda x: x.get("news_date", ""), reverse=True):
