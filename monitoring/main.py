@@ -1459,13 +1459,14 @@ def parse_reports_page(
 ) -> tuple[list[dict[str, str]], str]:
     soup = BeautifulSoup(html, "lxml")
     table = soup.find("table", class_="zebra") or soup.find("table")
-    if not table:
+    row_nodes = table.find_all("tr") if table else soup.find_all("tr")
+    if not row_nodes:
         return [], ""
     rows: list[dict[str, str]] = []
     known_hash = sanitize_str((known_state or {}).get("latest_hash"))
     top_row_hash = ""
 
-    for idx, tr in enumerate(table.find_all("tr")):
+    for idx, tr in enumerate(row_nodes):
         if preview_limit is not None and idx >= preview_limit:
             break
         tds = tr.find_all("td")
@@ -1751,7 +1752,7 @@ def fetch_one_emitent_reports(task: dict[str, Any], state_by_type: dict[tuple[st
             suspicious_state
             or force_full
             or force_missing_recheck
-            or event_gate_result in {"empty", "error", "not_used"}
+            or event_gate_result in {"empty", "error", "no_newer", "not_used"}
             or not last_known_report_date
         )
         if fallback_required:
