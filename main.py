@@ -4687,6 +4687,10 @@ def _normalize_isin(raw_value: object) -> str | None:
     return cleaned or None
 
 
+def _normalize_override_header(raw_value: object) -> str:
+    return str(raw_value or "").strip().replace("﻿", "").casefold()
+
+
 def _safe_save_workbook_atomic(wb: Workbook, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
@@ -4745,24 +4749,24 @@ def ensure_bond_overrides_excel() -> Path:
         header_row = ws[1]
         header_map: dict[str, int] = {}
         for idx, cell in enumerate(header_row, start=1):
-            header_name = str(cell.value or "").strip()
-            if header_name:
-                header_map[header_name] = idx
+            header_key = _normalize_override_header(cell.value)
+            if header_key:
+                header_map[header_key] = idx
 
-        if header_map and "Тип купона" not in header_map:
-            formula_col = header_map.get("CouponFormulaOverride")
-            insert_col = formula_col + 1 if formula_col else (max(header_map.values()) + 1)
-            if insert_col <= ws.max_column:
-                ws.insert_cols(insert_col)
-            ws.cell(row=1, column=insert_col, value="Тип купона")
+        coupon_type_key = _normalize_override_header("Тип купона")
+        coupon_formula_key = _normalize_override_header("CouponFormulaOverride")
+        if header_map and coupon_type_key not in header_map:
+            formula_col = header_map.get(coupon_formula_key)
+            target_col = formula_col + 1 if formula_col else (max(header_map.values()) + 1)
+            if target_col <= ws.max_column and str(ws.cell(row=1, column=target_col).value or "").strip():
+                ws.insert_cols(target_col)
+            ws.cell(row=1, column=target_col, value="Тип купона")
             template_col = formula_col if formula_col else 1
-            ws.cell(row=1, column=insert_col).font = ws.cell(row=1, column=template_col).font.copy()
-            ws.column_dimensions[ws.cell(row=1, column=insert_col).column_letter].width = 22
+            ws.cell(row=1, column=target_col).font = ws.cell(row=1, column=template_col).font.copy()
+            ws.column_dimensions[ws.cell(row=1, column=target_col).column_letter].width = 22
             changed = True
 
-        if ws.auto_filter:
-            ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=ws.max_column).column_letter}1"
-
+        ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=ws.max_column).column_letter}1"
         if changed:
             _safe_save_workbook_atomic(wb, overrides_path)
     finally:
@@ -4795,18 +4799,18 @@ def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, obj
 
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), tuple())
         header_map = {
-            str(value or "").strip(): idx
+            _normalize_override_header(value): idx
             for idx, value in enumerate(header_row)
-            if str(value or "").strip()
+            if _normalize_override_header(value)
         }
 
-        isin_idx = header_map.get("ISIN", 0)
-        enabled_idx = header_map.get("Enabled", 1)
-        drop_idx = header_map.get("Drop", 2)
-        kval_idx = header_map.get("Квал", 3)
-        subord_idx = header_map.get("Суборд", 4)
-        coupon_formula_idx = header_map.get("CouponFormulaOverride", 5)
-        coupon_type_idx = header_map.get("Тип купона")
+        isin_idx = header_map.get(_normalize_override_header("ISIN"), 0)
+        enabled_idx = header_map.get(_normalize_override_header("Enabled"), 1)
+        drop_idx = header_map.get(_normalize_override_header("Drop"), 2)
+        kval_idx = header_map.get(_normalize_override_header("Квал"), 3)
+        subord_idx = header_map.get(_normalize_override_header("Суборд"), 4)
+        coupon_formula_idx = header_map.get(_normalize_override_header("CouponFormulaOverride"), 5)
+        coupon_type_idx = header_map.get(_normalize_override_header("Тип купона"))
 
         max_col = max(
             idx
@@ -5253,9 +5257,10 @@ def main() -> None:
     try:
         print("=====\nЭтап 1: Подготовка окружения")
         s = perf_counter()
-        with progress(total=2, desc="Подготовка", unit="шаг") as pbar:
+        with progress(total=3, desc="Подготовка", unit="шаг") as pbar:
             ensure_directories()
             migrate_legacy_db_if_needed()
+            ensure_bond_overrides_excel()
             pbar.update(1)
             pbar.set_description("Подготовка БД")
             with connect_db(db_path) as conn:
@@ -5263,6 +5268,8 @@ def main() -> None:
                 migrate_legacy_rates_table_if_needed(conn)
                 ensure_emitents_table(conn)
                 ensure_dohod_table(conn)
+            pbar.update(1)
+            pbar.set_description("Инициализация витрин")
             pbar.update(1)
         stage_times["Этап 1: Подготовка окружения"] = perf_counter() - s
 
