@@ -2,6 +2,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+
+def _resolve_input_path(filename: str) -> Path:
+    """Возвращает наиболее вероятный путь к входному Excel-файлу.
+
+    На Windows скрипт часто запускают из разных рабочих каталогов (IDE, bat,
+    планировщик задач). Поэтому путь подбирается из нескольких кандидатов,
+    а не только относительно текущего файла.
+    """
+    candidates = [
+        ROOT_DIR.parent / filename,  # <repo>/<filename> (базовый сценарий)
+        Path.cwd() / filename,       # запуск из корня проекта
+        ROOT_DIR / filename,         # запуск, когда файл положили в Scalp/
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0]
+
 # =============================
 # Базовые пути проекта Scalp
 # =============================
@@ -14,11 +32,11 @@ PROJECT_ROOT = ROOT_DIR.parent
 
 # INPUT_SCREENER_PATH: путь к read-only источнику Screener.xlsx.
 # Дефолт: <корень проекта>/Screener.xlsx.
-INPUT_SCREENER_PATH = PROJECT_ROOT / "Screener.xlsx"
+INPUT_SCREENER_PATH = _resolve_input_path("Screener.xlsx")
 
 # INPUT_EMITENTS_PATH: путь к read-only источнику Emitents.xlsx.
 # Используется для обогащения полями эмитента при наличии.
-INPUT_EMITENTS_PATH = PROJECT_ROOT / "Emitents.xlsx"
+INPUT_EMITENTS_PATH = _resolve_input_path("Emitents.xlsx")
 
 # OUTPUT_EXCEL_PATH: целевой файл витрины сигналов.
 OUTPUT_EXCEL_PATH = ROOT_DIR / "Scalp.xlsx"
