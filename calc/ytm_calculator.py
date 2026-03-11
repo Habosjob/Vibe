@@ -285,7 +285,7 @@ def parse_floater_terms(formula_raw: object) -> tuple[str, float | None, float] 
     else:
         return None
 
-    prem = re.search(r"([+\-])\s*([0-9]+(?:[\.,][0-9]+)?)\s*%", normalized)
+    prem = re.search(r"([+\-])\s*([0-9]+(?:[\.,][0-9]+)?)(?:\s*%)?", normalized)
     premium = 0.0
     if prem:
         sign = -1.0 if prem.group(1) == "-" else 1.0
@@ -316,6 +316,29 @@ def pick_zcyc_point(zcyc: dict[object, object], tenor_years: float | None) -> fl
             alpha = (tenor_years - l_t) / (r_t - l_t)
             return l_y + alpha * (r_y - l_y)
     return None
+
+
+def _resolve_target_date(data: "BondData") -> datetime | None:
+    candidates = [
+        _parse_bond_date(data.corpbonds_offerdate),
+        _parse_bond_date(data.offerdate),
+        _parse_bond_date(data.matdate),
+    ]
+    valid = [d for d in candidates if d is not None]
+    return min(valid) if valid else None
+
+
+def _resolve_floater_reference_rate(index_type: str, tenor: float | None, cbr_data: dict[str, object]) -> float:
+    key_rate = _parse_decimal_value(cbr_data.get("key_rate"))
+    if key_rate is None:
+        key_rate = float(KEY_RATE_FORECAST.get(0, 0.0))
+    if index_type == "key":
+        return key_rate
+    if index_type == "ruonia":
+        ruonia = _parse_decimal_value(cbr_data.get("ruonia"))
+        return ruonia if ruonia is not None else key_rate
+    zcyc_rate = pick_zcyc_point(cbr_data.get("zcyc", {}), tenor)
+    return zcyc_rate if zcyc_rate is not None else key_rate
 
 
 @dataclass
@@ -530,7 +553,7 @@ def _build_coupon_dates(target_date: datetime, coupon_frequency: float, coupon_p
 
 
 def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Logger) -> dict[str, str]:
-    target_date = _parse_bond_date(data.corpbonds_offerdate) or _parse_bond_date(data.offerdate) or _parse_bond_date(data.matdate)
+    target_date = _resolve_target_date(data)
     if not target_date:
         raise ValueError("Нет даты оферты/погашения")
 
@@ -553,27 +576,15 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
     effective_formula = data.corpbonds_coupon_formula or data.coupon_formula
     effective_coupon_percent = data.corpbonds_coupon_rate if data.corpbonds_coupon_rate > 0 else data.coupon_percent
 
+    current_index_rate = None
+    premium = None
     if _is_floater_coupon_type(effective_coupon_type):
         terms = parse_floater_terms(effective_formula)
         if not terms:
             raise ValueError("Не удалось распарсить формулу флоатера. Введите формулу вручную.")
         index_type, tenor, premium = terms
-        key_rate = _parse_decimal_value(cbr_data.get("key_rate"))
-        if key_rate is None:
-            key_rate = float(KEY_RATE_FORECAST.get(0, 0.0))
-        if index_type == "key":
-            spread_to_key = 0.0
-        elif index_type == "ruonia":
-            ruonia = _parse_decimal_value(cbr_data.get("ruonia"))
-            if ruonia is None:
-                raise ValueError("Не найдена RUONIA")
-            spread_to_key = key_rate - ruonia
-        else:
-            idx = pick_zcyc_point(cbr_data.get("zcyc", {}), tenor)
-            if idx is None:
-                spread_to_key = 0.0
-            else:
-                spread_to_key = key_rate - idx
+        current_index_rate = _resolve_floater_reference_rate(index_type, tenor, cbr_data)
+        coupon_rate = current_index_rate + premium
 
         event_dates = sorted(set(coupon_dates) | set(amort_map.keys()) | {target_date.date()})
         for dt in event_dates:
@@ -581,9 +592,6 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
                 continue
             amount = 0.0
             if dt in coupon_dates:
-                bucket = _year_bucket(dt, datetime.now().date())
-                idx_forecast = _forecast_by_bucket(KEY_RATE_FORECAST, bucket) - spread_to_key
-                coupon_rate = idx_forecast + premium
                 amount += principal * (coupon_rate / 100.0) / coupon_freq
             if dt in amort_map:
                 pay = min(principal, amort_map[dt])
@@ -595,7 +603,6 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
             if amount > 0 and years > 0:
                 cashflows.append((years, amount))
     else:
-        period_coupon = data.facevalue * (effective_coupon_percent / 100.0) / coupon_freq
         event_dates = sorted(set(coupon_dates) | set(amort_map.keys()) | {target_date.date()})
         for dt in event_dates:
             if dt <= datetime.now().date():
@@ -624,20 +631,27 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
     years_to_target = (target_date.date() - datetime.now().date()).days / 365.25
     total_income = sum(cf for _, cf in cashflows) - dirty_price
     simple_yield_to_maturity = (total_income / dirty_price) / years_to_target if years_to_target > 0 else 0.0
-    annual_coupon_money = data.facevalue * (effective_coupon_percent / 100.0)
-    current_yield = annual_coupon_money / dirty_price if dirty_price > 0 else 0.0
+
+    first_year_coupon = sum(amount for years, amount in cashflows if years <= 1.0)
+    current_yield = first_year_coupon / dirty_price if dirty_price > 0 else 0.0
+
+    discount_spread = ((data.facevalue - dirty_price) / dirty_price) / years_to_target if years_to_target > 0 and dirty_price > 0 else 0.0
+    if _is_floater_coupon_type(effective_coupon_type):
+        current_yield += discount_spread
 
     simple_margin = ""
-    if _is_floater_coupon_type(effective_coupon_type):
-        discount_spread = ((data.facevalue - dirty_price) / data.facevalue) / years_to_target * 100 if years_to_target > 0 else 0.0
-        simple_margin = f"{discount_spread:.2f}%"
+    if _is_floater_coupon_type(effective_coupon_type) and current_index_rate is not None:
+        simple_margin = f"{(current_yield * 100.0) - current_index_rate:.2f}%"
 
+    years_to_event = max(0.0, years_to_target)
     return {
         "ISIN": data.isin,
         "Короткое наименование": data.shortname,
         "Цена с учетом НКД": f"{dirty_price:.2f}",
         "YTM": f"{_format_ytm_percent(ytm_effective)}%",
         "Доходность к погашению": f"{simple_yield_to_maturity * 100:.2f}%",
+        "Срок до погашения/оферты (лет)": f"{years_to_event:.2f}",
+        "Тип купона": effective_coupon_type or "-",
         "Периодичность платежей": f"{coupon_freq:.2f}",
         "ТКД": f"{current_yield * 100:.2f}%",
         "Simple margin для флоатеров": simple_margin,
@@ -652,24 +666,82 @@ def _manual_override(data: BondData) -> BondData:
     if choice not in {"y", "yes", "д", "да"}:
         return data
 
-    shown_formula = data.corpbonds_coupon_formula or data.coupon_formula
-    formula = input(f"Формула купона [{shown_formula}]: ").strip()
     price = input(f"Цена, % [{data.price_percent}]: ").strip()
     nkd = input(f"НКД [{data.nkd}]: ").strip()
-    ctype = input(f"Тип купона (Фиксированный/Флоатер/Прочее) [{data.coupon_type}]: ").strip()
     freq = input(f"Частота выплат в год [{data.coupon_frequency}]: ").strip()
+
+    shown_type = data.corpbonds_coupon_type or data.coupon_type or "Фиксированный"
+    coupon_type_choice = input(
+        f"Тип купона: (f) флоатер, (x) фикс, (o) прочее [{shown_type}]: "
+    ).strip().lower()
+
+    effective_type = shown_type
+    if coupon_type_choice in {"f", "ф"}:
+        effective_type = "Флоатер"
+    elif coupon_type_choice in {"x", "х"}:
+        effective_type = "Фиксированный"
+    elif coupon_type_choice in {"o", "о"}:
+        effective_type = "Прочее"
+
+    formula = ""
+    if _is_floater_coupon_type(effective_type):
+        shown_formula = data.corpbonds_coupon_formula or data.coupon_formula
+        parsed_terms = parse_floater_terms(shown_formula)
+        default_index = "c"
+        default_tenor = 1.0
+        default_premium = 3.75
+        if parsed_terms:
+            idx, ten, prem = parsed_terms
+            default_index = "r" if idx == "ruonia" else ("g" if idx == "zcyc" else "c")
+            default_tenor = ten if ten is not None else default_tenor
+            default_premium = prem
+
+        index_choice = input(
+            f"Выбрать индекс: (r) RUONIA, (c) КС ЦБ, (g) G-Curve [{default_index}]: "
+        ).strip().lower()
+        if not index_choice:
+            index_choice = default_index
+
+        tenor_value = default_tenor
+        if index_choice == "g":
+            tenor = input(f"Срок G-Curve (в годах) [{default_tenor:g}]: ").strip()
+            if tenor:
+                parsed_tenor = _parse_decimal_value(tenor)
+                if parsed_tenor is not None and parsed_tenor > 0:
+                    tenor_value = parsed_tenor
+
+        premium = input(f"Премия к индексу, % [{default_premium:g}]: ").strip()
+        premium_value = _parse_decimal_value(premium) if premium else default_premium
+        premium_value = premium_value if premium_value is not None else default_premium
+        if index_choice == "r":
+            formula = f"RUONIA + {premium_value:g}%"
+        elif index_choice == "g":
+            formula = f"G-Curve {tenor_value:g}Y + {premium_value:g}%"
+        else:
+            formula = f"КС + {premium_value:g}%"
+    else:
+        shown_formula = data.corpbonds_coupon_formula or data.coupon_formula
+        formula = input(f"Формула купона [{shown_formula}]: ").strip() or shown_formula
 
     if formula:
         data.corpbonds_coupon_formula = formula
         data.coupon_formula = formula
     if price:
-        data.price_percent = _parse_decimal_value(price) or data.price_percent
+        parsed = _parse_decimal_value(price)
+        if parsed is not None:
+            data.price_percent = parsed
+            data.corpbonds_price = parsed
     if nkd:
-        data.nkd = _parse_decimal_value(nkd) or data.nkd
-    if ctype:
-        data.coupon_type = ctype
+        parsed = _parse_decimal_value(nkd)
+        if parsed is not None:
+            data.nkd = parsed
+            data.corpbonds_nkd = parsed
     if freq:
-        data.coupon_frequency = _parse_decimal_value(freq) or data.coupon_frequency
+        parsed = _parse_decimal_value(freq)
+        if parsed is not None and parsed > 0:
+            data.coupon_frequency = parsed
+    data.coupon_type = effective_type
+    data.corpbonds_coupon_type = effective_type
     return data
 
 
