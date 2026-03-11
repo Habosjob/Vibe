@@ -4913,6 +4913,31 @@ def ensure_bond_overrides_excel(logger: logging.Logger | None = None) -> Path:
     finally:
         verify_wb.close()
 
+    verify_wb = load_workbook(overrides_path, read_only=True, data_only=True)
+    try:
+        verify_ws = verify_wb[sheet_name] if sheet_name in verify_wb.sheetnames else verify_wb.active
+        headers_after_reopen = _extract_sheet_headers(verify_ws)
+        rows_after = verify_ws.max_row
+        logger.info("BondOverrides ensure: headers_after_reopen=%s rows_after=%s", headers_after_reopen, rows_after)
+        if "Тип купона" not in headers_after_reopen:
+            raise RuntimeError(
+                "BondOverrides verification failed after save+reopen: missing expected header 'Тип купона'. "
+                f"file={overrides_path}; sheet={verify_ws.title}; headers={headers_after_reopen}"
+            )
+        missing_legacy = [header for header in required_headers[:-1] if header not in headers_after_reopen]
+        if missing_legacy:
+            raise RuntimeError(
+                "BondOverrides verification failed after save+reopen: required legacy headers are missing. "
+                f"file={overrides_path}; sheet={verify_ws.title}; missing={missing_legacy}; headers={headers_after_reopen}"
+            )
+        if rows_after < rows_before:
+            raise RuntimeError(
+                "BondOverrides verification failed after save+reopen: row count decreased. "
+                f"file={overrides_path}; sheet={verify_ws.title}; rows_before={rows_before}; rows_after={rows_after}"
+            )
+    finally:
+        verify_wb.close()
+
     return overrides_path
 
 
