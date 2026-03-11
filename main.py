@@ -4954,7 +4954,7 @@ def _parse_override_bool(raw_value: object) -> bool | None:
     return None
 
 
-def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, object]], int, int]:
+def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, object]], dict[str, int], set[str]]:
     overrides_path = ensure_bond_overrides_excel(logger)
     wb = load_workbook(overrides_path, read_only=True, data_only=True)
     try:
@@ -4962,6 +4962,7 @@ def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, obj
         overrides: dict[str, dict[str, object]] = {}
         total_rows = 0
         enabled_rows = 0
+        overrides_all_isins: set[str] = set()
 
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), tuple())
         header_map = {
@@ -4990,6 +4991,7 @@ def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, obj
             if not isin_norm:
                 continue
             total_rows += 1
+            overrides_all_isins.add(isin_norm)
             enabled = _parse_override_bool(row[enabled_idx] if enabled_idx < len(row) else None)
             if enabled is not True:
                 continue
@@ -5020,8 +5022,15 @@ def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, obj
         enabled_rows,
         coupon_type_read_count,
     )
-
-    return overrides, total_rows, enabled_rows
+    return (
+        overrides,
+        {
+            "total_rows": total_rows,
+            "enabled_rows": enabled_rows,
+            "coupon_type_values_read": coupon_type_read_count,
+        },
+        overrides_all_isins,
+    )
 
 
 def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
@@ -5034,12 +5043,16 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
     ytm_linker_count = 0
     ytm_other_count = 0
     logger = logging.getLogger("bonds_main")
-    overrides_by_isin, overrides_total_rows, overrides_enabled_rows = load_bond_overrides(logger)
+    overrides_by_isin, overrides_stats, override_isins_all = load_bond_overrides(logger)
     overrides_drop_applied_count = 0
     overrides_kval_applied_count = 0
     overrides_subord_applied_count = 0
     overrides_formula_applied_count = 0
     overrides_coupon_type_applied_count = 0
+    total_base_universe_count = 0
+    total_matched_overrides = 0
+    total_unmatched_base_rows = 0
+    dropped_isins: set[str] = set()
 
     cbr_data = get_cbr_reference_data(conn, logger, datetime.now(timezone.utc))
     for source_table, source_list, score in SCREENER_SOURCE_TABLES:
@@ -5063,12 +5076,20 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
         secids_with_amort: set[str] = set()
         filtered_rows: list[tuple[object, ...]] = []
         for row in rows:
+            total_base_universe_count += 1
             row_values = list(row)
             isin_norm = _normalize_isin(row_values[1])
             override = overrides_by_isin.get(isin_norm or "") if isin_norm else None
+            if isin_norm in override_isins_all:
+                total_matched_overrides += 1
+            else:
+                total_unmatched_base_rows += 1
+
             if override and override.get("enabled") is True:
                 if override.get("drop") is True:
                     overrides_drop_applied_count += 1
+                    if isin_norm:
+                        dropped_isins.add(isin_norm)
                     continue
                 if override.get("kval") is not None:
                     row_values[5] = 1 if bool(override.get("kval")) else 0
@@ -5278,11 +5299,63 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
             )
 
     conn.commit()
+
+    total_final_green = conn.execute(
+        f'SELECT COUNT(*) FROM "{SCREENER_TABLE_NAME}" WHERE "Список" = ?',
+        ("Green",),
+    ).fetchone()[0]
+    total_final_yellow = conn.execute(
+        f'SELECT COUNT(*) FROM "{SCREENER_TABLE_NAME}" WHERE "Список" = ?',
+        ("Yellow",),
+    ).fetchone()[0]
+    total_final = int(total_final_green) + int(total_final_yellow)
+    final_isins = {
+        _normalize_isin(row[0])
+        for row in conn.execute(
+            f'SELECT DISTINCT "ISIN" FROM "{SCREENER_TABLE_NAME}" WHERE TRIM(COALESCE("ISIN", "")) <> ""'
+        ).fetchall()
+        if _normalize_isin(row[0])
+    }
+    total_final_without_overrides = len(final_isins - override_isins_all)
+    dropped_isins_in_final = len(final_isins & dropped_isins)
+
+    if dropped_isins_in_final > 0:
+        raise RuntimeError(
+            "Screener fail-fast: обнаружены бумаги с активным Drop=✅ в финальном Screener. "
+            f"dropped_isins_in_final={dropped_isins_in_final}"
+        )
+    if total_unmatched_base_rows > 0 and total_final_without_overrides == 0:
+        raise RuntimeError(
+            "Screener fail-fast: бумаги вне BondOverrides исчезли из финального Screener "
+            "(whitelist-поведение недопустимо)."
+        )
+    if (
+        total_base_universe_count > overrides_stats["enabled_rows"]
+        and total_final > 0
+        and total_final <= overrides_stats["enabled_rows"]
+        and total_final_without_overrides == 0
+    ):
+        raise RuntimeError(
+            "Screener fail-fast: финальный Screener выглядит как подмножество BondOverrides "
+            "(whitelist-поведение недопустимо)."
+        )
+
     logger.info(
-        "BondOverrides: total_rows=%s, enabled_rows=%s, drop_applied=%s, kval_applied=%s, subord_applied=%s, formula_applied=%s, coupon_type_applied=%s",
-        overrides_total_rows,
-        overrides_enabled_rows,
+        "Screener diagnostics: total_base_universe_count=%s, total_overrides_rows=%s, total_matched_overrides=%s, "
+        "total_unmatched_base_rows=%s, total_drop_applied=%s, total_enabled_override_rows=%s, total_final_green=%s, total_final_yellow=%s, "
+        "total_final_without_overrides=%s, dropped_isins_excluded=%s, dropped_isins_in_final=%s, "
+        "kval_applied=%s, subord_applied=%s, formula_applied=%s, coupon_type_applied=%s",
+        total_base_universe_count,
+        overrides_stats["total_rows"],
+        total_matched_overrides,
+        total_unmatched_base_rows,
         overrides_drop_applied_count,
+        overrides_stats["enabled_rows"],
+        total_final_green,
+        total_final_yellow,
+        total_final_without_overrides,
+        len(dropped_isins),
+        dropped_isins_in_final,
         overrides_kval_applied_count,
         overrides_subord_applied_count,
         overrides_formula_applied_count,
