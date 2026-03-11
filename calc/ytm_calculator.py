@@ -18,10 +18,12 @@ HTTP_TIMEOUT_SECONDS = 20
 # Пауза между сетевыми этапами (секунды), чтобы не «ддосить» источники. По умолчанию: 0.05.
 STEP_SLEEP_SECONDS = 0.05
 # Прогноз ключевой ставки ЦБ по корзинам лет до денежного потока.
-# Ключ: порог лет (0, 1, 2, 3...), значение: ставка в % годовых. По умолчанию: консервативный сценарий.
-KEY_RATE_FORECAST = {0: 21.0, 1: 19.0, 2: 16.0, 3: 14.0, 5: 12.0}
+# Ключ: номер года от даты расчета (0..3), 3-й bucket используется для горизонтов 3+ лет.
+# По умолчанию: значения из основного пайплайна, локально зафиксированные в этом скрипте.
+KEY_RATE_FORECAST = {0: 14.0, 1: 8.5, 2: 8.0, 3: 8.0}
 # Прогноз инфляции для линкеров (ОФЗ-ИН/инфляционных выпусков).
-INFLATION_FORECAST = {0: 8.0, 1: 7.0, 2: 6.0, 3: 5.0, 5: 4.0}
+# Механика bucket аналогична KEY_RATE_FORECAST: после 3 лет используется bucket=3.
+INFLATION_FORECAST = {0: 5.4, 1: 4.0, 2: 4.0, 3: 4.0}
 # Порог sanity-check для НКД: доля от номинала. Если НКД выше — игнорируем как аномалию.
 NCD_FACEVALUE_SANITY_RATIO = 0.2
 # Точность отображения доходностей в процентах.
@@ -157,9 +159,24 @@ def _forecast_by_bucket(forecast_cfg: dict[int, float], bucket: int) -> float:
     return float(forecast_cfg.get(best, 0.0))
 
 
+def _normalize_forecast_to_three_year_horizon(forecast_cfg: dict[int, float]) -> dict[int, float]:
+    normalized = {int(k): float(v) for k, v in forecast_cfg.items()}
+    if not normalized:
+        return {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0}
+    for year in (0, 1, 2, 3):
+        if year not in normalized:
+            normalized[year] = _forecast_by_bucket(normalized, year)
+    normalized[3] = _forecast_by_bucket(normalized, 3)
+    return {0: normalized[0], 1: normalized[1], 2: normalized[2], 3: normalized[3]}
+
+
 def _year_bucket(target_date, valuation_date) -> int:
     delta_days = max(0, (target_date - valuation_date).days)
-    return int(delta_days / 365.25)
+    return min(3, int(delta_days / 365.25))
+
+
+KEY_RATE_FORECAST = _normalize_forecast_to_three_year_horizon(KEY_RATE_FORECAST)
+INFLATION_FORECAST = _normalize_forecast_to_three_year_horizon(INFLATION_FORECAST)
 
 
 def _normalize_label(raw_label: str) -> str:
@@ -634,10 +651,6 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
 
     first_year_coupon = sum(amount for years, amount in cashflows if years <= 1.0)
     current_yield = first_year_coupon / dirty_price if dirty_price > 0 else 0.0
-
-    discount_spread = ((data.facevalue - dirty_price) / dirty_price) / years_to_target if years_to_target > 0 and dirty_price > 0 else 0.0
-    if _is_floater_coupon_type(effective_coupon_type):
-        current_yield += discount_spread
 
     simple_margin = ""
     if _is_floater_coupon_type(effective_coupon_type) and current_index_rate is not None:

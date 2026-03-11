@@ -3419,11 +3419,11 @@ def is_linker(secid: str, bond_type: object, bond_subtype: object) -> bool:
 
 
 def _forecast_by_bucket(forecast_cfg: dict[int, float], bucket: int) -> float:
-    return float(forecast_cfg.get(bucket, forecast_cfg.get(2, 0.0)))
+    return float(forecast_cfg.get(bucket, forecast_cfg.get(3, 0.0)))
 
 
 def _year_bucket(event_date: datetime.date, valuation_date: datetime.date) -> int:
-    return max(0, min(2, int((event_date - valuation_date).days / 365.25)))
+    return max(0, min(3, int((event_date - valuation_date).days / 365.25)))
 
 
 def pick_zcyc_point(zcyc: dict[object, object], tenor_years: float | None) -> float | None:
@@ -3524,7 +3524,7 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
         amount = 0.0
         if dt in coupon_dates:
             bucket = _year_bucket(dt, valuation_date)
-            index_forecast = _forecast_by_bucket(getattr(config, "KEY_RATE_FORECAST", {0: key_current, 2: key_current}), bucket) - spread_to_key
+            index_forecast = _forecast_by_bucket(getattr(config, "KEY_RATE_FORECAST", {0: key_current, 1: key_current, 2: key_current, 3: key_current}), bucket) - spread_to_key
             coupon_rate = index_forecast + premium
             amount += principal * (coupon_rate / 100.0) / coupon_freq
         if dt in amort_map:
@@ -3538,7 +3538,7 @@ def _calculate_floater_ytm(*, coupon_formula: object, subord_flag: object, coupo
             cashflows.append((years, amount))
 
     if _is_true_like(subord_flag):
-        rate0 = _forecast_by_bucket(getattr(config, "KEY_RATE_FORECAST", {0: key_current, 2: key_current}), 0) - spread_to_key + premium
+        rate0 = _forecast_by_bucket(getattr(config, "KEY_RATE_FORECAST", {0: key_current, 1: key_current, 2: key_current, 3: key_current}), 0) - spread_to_key + premium
         current_coupon = facevalue_value * (rate0 / 100.0)
         effective = _calculate_perpetual_subord_effective_current_yield(
             annual_coupon=current_coupon,
@@ -3583,7 +3583,7 @@ def _calculate_linker_ytm(*, secid: str, bond_type: object, bond_subtype: object
             continue
         years = (dt - valuation_date).days / 365.25
         bucket = _year_bucket(dt, valuation_date)
-        inf = _forecast_by_bucket(getattr(config, "INFLATION_FORECAST", {0: 5.4, 2: 4.0}), bucket) / 100.0
+        inf = _forecast_by_bucket(getattr(config, "INFLATION_FORECAST", {0: 5.4, 1: 4.0, 2: 4.0, 3: 4.0}), bucket) / 100.0
         principal_t = facevalue_value * ((1 + inf) ** years)
         amount = principal_t * (coupon_rate_percent / 100.0) / coupon_freq
         cashflows.append((years, amount))
@@ -3591,7 +3591,7 @@ def _calculate_linker_ytm(*, secid: str, bond_type: object, bond_subtype: object
     if years_target <= 0:
         return ""
     bucket_t = _year_bucket(target_date.date(), valuation_date)
-    inf_t = _forecast_by_bucket(getattr(config, "INFLATION_FORECAST", {0: 5.4, 2: 4.0}), bucket_t) / 100.0
+    inf_t = _forecast_by_bucket(getattr(config, "INFLATION_FORECAST", {0: 5.4, 1: 4.0, 2: 4.0, 3: 4.0}), bucket_t) / 100.0
     principal_target = facevalue_value * ((1 + inf_t) ** years_target)
     cashflows.append((years_target, principal_target))
     ytm_nominal = _solve_nominal_periodic_ytm_bisection(dirty_price=dirty_price, coupon_frequency=coupon_freq, cashflows=cashflows)
