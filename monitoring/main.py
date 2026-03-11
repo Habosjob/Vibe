@@ -1199,14 +1199,91 @@ def build_latest_event_by_inn(report_events: list[dict[str, str]]) -> dict[str, 
             continue
         latest_event_by_inn.setdefault(inn, row)
     return latest_event_by_inn
+
+
+def _event_record_kind(source: str) -> str:
+    normalized = sanitize_str(source).lower()
+    if normalized == "e-disclosure":
+        return "Report"
+    if normalized in {"nra", "acra", "nkr", "raex"}:
+        return "Rating"
+    return "Report"
+
+
+def _validate_portfolio_workbook(
+    path: Path,
+    portfolio_items: list[dict[str, str]],
+    latest_event_by_inn: dict[str, dict[str, str]],
+    logger: logging.Logger,
+) -> None:
+    wb = load_workbook(path, data_only=True)
+    ws_all = wb["Portfolio_All"]
+    ws_unique = wb["Portfolio_UniqueEmitents"]
+    ws_news = wb["News"]
+
+    expected_inns = {
+        sanitize_str(item.get("inn", ""))
+        for item in portfolio_items
+        if sanitize_str(item.get("inn", "")) and sanitize_str(item.get("inn", "")) in latest_event_by_inn
+    }
+    rows_all: dict[str, tuple[str, str, str, str]] = {}
+    for row in ws_all.iter_rows(min_row=2, values_only=True):
+        inn = sanitize_str(row[2])
+        if not inn:
+            continue
+        rows_all[inn] = (sanitize_str(row[5]), sanitize_str(row[6]), sanitize_str(row[7]), sanitize_str(row[8]))
+
+    rows_unique: dict[str, tuple[str, str, str, str]] = {}
+    for row in ws_unique.iter_rows(min_row=2, values_only=True):
+        inn = sanitize_str(row[0])
+        if not inn:
+            continue
+        rows_unique[inn] = (sanitize_str(row[5]), sanitize_str(row[6]), sanitize_str(row[7]), sanitize_str(row[8]))
+
+    for inn in sorted(expected_inns):
+        expected_evt = latest_event_by_inn[inn]
+        all_evt = rows_all.get(inn)
+        unique_evt = rows_unique.get(inn)
+        if not all_evt or not unique_evt:
+            raise RuntimeError(f"Portfolio validation failed: INN={inn} missing in generated sheet")
+        event_type, event_date, source, event_url = all_evt
+        if not (event_type and event_date and source):
+            raise RuntimeError(f"Portfolio validation failed: INN={inn} has empty event fields in Portfolio_All")
+        if sanitize_str(expected_evt.get("source", "")).lower() == "e-disclosure" and not event_url:
+            raise RuntimeError(f"Portfolio validation failed: INN={inn} has e-disclosure event without URL in Portfolio_All")
+        u_event_type, u_event_date, u_source, u_event_url = unique_evt
+        if not (u_event_type and u_event_date and u_source):
+            raise RuntimeError(f"Portfolio validation failed: INN={inn} has empty event fields in Portfolio_UniqueEmitents")
+        if sanitize_str(expected_evt.get("source", "")).lower() == "e-disclosure" and not u_event_url:
+            raise RuntimeError(f"Portfolio validation failed: INN={inn} has e-disclosure event without URL in Portfolio_UniqueEmitents")
+
+    probe_inn = "6316031581"
+    has_probe_news_report = False
+    for row in ws_news.iter_rows(min_row=2, values_only=True):
+        if sanitize_str(row[0]) == "Report" and sanitize_str(row[3]) == probe_inn and sanitize_str(row[7]).lower() == "e-disclosure":
+            has_probe_news_report = True
+            break
+    if probe_inn in latest_event_by_inn and not has_probe_news_report:
+        raise RuntimeError("Portfolio validation failed: INN=6316031581 missing Report/e-disclosure row in News")
+    logger.info(
+        "post-save diagnostics | has_6316031581_portfolio_all=%s has_6316031581_portfolio_unique=%s has_6316031581_news_report=%s portfolio_all_event=%s portfolio_unique_event=%s",
+        probe_inn in rows_all,
+        probe_inn in rows_unique,
+        has_probe_news_report,
+        rows_all.get(probe_inn, ("", "", "", "")),
+        rows_unique.get(probe_inn, ("", "", "", "")),
+    )
+
+
 def export_portfolio(
     portfolio_items: list[dict[str, str]],
     latest_event_by_inn: dict[str, dict[str, str]],
     latest_news_by_key: dict[tuple[str, str], dict[str, str]],
     news_rows: list[dict[str, str]],
     report_rows: list[dict[str, str]],
+    logger: logging.Logger,
 ) -> None:
-    ensure_portfolio_workbook(config.PORTFOLIO_XLSX, logging.getLogger("monitoring"))
+    ensure_portfolio_workbook(config.PORTFOLIO_XLSX, logger)
     wb = load_workbook(config.PORTFOLIO_XLSX)
 
     for sheet_name in ["Portfolio_All", "Portfolio_UniqueEmitents", "News"]:
@@ -1220,12 +1297,13 @@ def export_portfolio(
         "Ссылка на последнюю новость", "_is_new",
     ])
     for item in portfolio_items:
-        evt = latest_event_by_inn.get(item.get("inn", ""), {})
+        inn = sanitize_str(item.get("inn", ""))
+        evt = latest_event_by_inn.get(inn, {})
         news = latest_news_by_key.get((item.get("instrument_type", ""), item.get("instrument_code", "")), {})
-        ws_all.append([
+        row_payload = [
             item.get("instrument_type", ""),
             item.get("instrument_code", ""),
-            item.get("inn", ""),
+            inn,
             item.get("company_name", ""),
             evt.get("scoring_date", ""),
             evt.get("event_type", ""),
@@ -1236,7 +1314,19 @@ def export_portfolio(
             news.get("news_date", ""),
             news.get("url", ""),
             "1" if news.get("is_new") else "",
-        ])
+        ]
+        ws_all.append(row_payload)
+        if inn == "6316031581":
+            logger.info(
+                "portfolio_all row payload | inn=%s instrument=%s type=%s event_type=%s event_date=%s source=%s url=%s",
+                inn,
+                item.get("instrument_code", ""),
+                item.get("instrument_type", ""),
+                row_payload[5],
+                row_payload[6],
+                row_payload[7],
+                row_payload[8],
+            )
     apply_ws_style(ws_all, {"Ссылка на последнее событие", "Ссылка на последнюю новость"})
 
     ws_unique = wb.create_sheet("Portfolio_UniqueEmitents")
@@ -1247,14 +1337,14 @@ def export_portfolio(
     ])
     grouped: dict[str, list[dict[str, str]]] = {}
     for item in portfolio_items:
-        grouped.setdefault(item.get("inn", ""), []).append(item)
+        grouped.setdefault(sanitize_str(item.get("inn", "")), []).append(item)
     for inn, items in grouped.items():
         first = items[0] if items else {}
         evt = latest_event_by_inn.get(inn, {})
         news_candidates = [latest_news_by_key.get((x.get("instrument_type", ""), x.get("instrument_code", "")), {}) for x in items]
         news_candidates.sort(key=lambda x: x.get("news_date", ""), reverse=True)
         news = news_candidates[0] if news_candidates else {}
-        ws_unique.append([
+        unique_payload = [
             inn,
             first.get("company_name", ""),
             len(items),
@@ -1268,11 +1358,33 @@ def export_portfolio(
             news.get("news_date", ""),
             news.get("url", ""),
             "1" if news.get("is_new") else "",
-        ])
+        ]
+        ws_unique.append(unique_payload)
+        if inn == "6316031581":
+            logger.info(
+                "portfolio_unique row payload | inn=%s event_type=%s event_date=%s source=%s url=%s",
+                inn,
+                unique_payload[5],
+                unique_payload[6],
+                unique_payload[7],
+                unique_payload[8],
+            )
     apply_ws_style(ws_unique, {"Ссылка на последнее событие", "Ссылка на последнюю новость"})
 
     ws_news = wb.create_sheet("News")
-    ws_news.append(["Тип", "ISIN / Тикер", "ИНН", "Наименование", "Дата новости", "Заголовок", "Ссылка", "Источник", "Новое", "_is_new"])
+    ws_news.append([
+        "Тип записи",
+        "Тип инструмента",
+        "ISIN / Тикер",
+        "ИНН",
+        "Наименование",
+        "Дата",
+        "Заголовок / Событие",
+        "Источник",
+        "Ссылка",
+        "Новое",
+        "_is_new",
+    ])
 
     instruments_by_inn: dict[str, list[dict[str, str]]] = {}
     for item in portfolio_items:
@@ -1293,6 +1405,7 @@ def export_portfolio(
                 "title": sanitize_str(row.get("title", "")),
                 "url": sanitize_str(row.get("url", "")),
                 "source": sanitize_str(row.get("source", "Smartlab")) or "Smartlab",
+                "record_type": "News",
                 "is_new": "1" if row.get("is_new") else "",
             }
         )
@@ -1313,6 +1426,7 @@ def export_portfolio(
                     "title": sanitize_str(row.get("event_type", "")),
                     "url": sanitize_str(row.get("event_url", "")),
                     "source": sanitize_str(row.get("source", "")),
+                    "record_type": _event_record_kind(sanitize_str(row.get("source", ""))),
                     "is_new": "1" if row.get("is_new") else "",
                 }
             )
@@ -1320,20 +1434,22 @@ def export_portfolio(
     merged_rows.sort(key=lambda x: x.get("news_date", ""), reverse=True)
     for row in merged_rows:
         ws_news.append([
+            row.get("record_type", ""),
             row.get("instrument_type", ""),
             row.get("instrument_code", ""),
             row.get("inn", ""),
             row.get("company_name", ""),
             row.get("news_date", ""),
             row.get("title", ""),
-            row.get("url", ""),
             row.get("source", ""),
+            row.get("url", ""),
             "✓ НОВОЕ" if row.get("is_new") else "",
             "1" if row.get("is_new") else "",
         ])
     apply_ws_style(ws_news, {"Ссылка"})
 
     wb.save(config.PORTFOLIO_XLSX)
+    _validate_portfolio_workbook(config.PORTFOLIO_XLSX, portfolio_items, latest_event_by_inn, logger)
 
 
 REPORT_TYPE_PRIORITY = [(3, "Финансовая"), (4, "Консолидированная"), (5, "Отчет эмитента"), (2, "Годовая")]
@@ -1499,7 +1615,8 @@ def parse_reports_page(
             file_url = urljoin("https://www.e-disclosure.ru", href)
             break
 
-        is_relevant = any(k in row_text.lower() for k in REPORT_KEYWORDS) or bool(period) or bool(file_url)
+        has_meaningful_date = bool(placement_date or foundation_date)
+        is_relevant = any(k in row_text.lower() for k in REPORT_KEYWORDS) or bool(period) or bool(file_url) or (bool(doc_type) and has_meaningful_date)
         if not is_relevant:
             continue
 
@@ -2413,21 +2530,33 @@ def run_monitoring() -> None:
 
         latest_event_by_inn = build_latest_event_by_inn(report_events)
 
+        has_6316031581_report = any(sanitize_str(r.get("inn")) == "6316031581" for r in report_events)
+        has_6316031581_latest = "6316031581" in latest_event_by_inn
+        has_6316031581_portfolio = any(sanitize_str(item.get("inn")) == "6316031581" for item in portfolio_items)
         logger.info(
             "export diagnostics | report_events=%s latest_event_by_inn=%s portfolio_items=%s has_6316031581_report=%s has_6316031581_latest=%s has_6316031581_portfolio=%s",
             len(report_events),
             len(latest_event_by_inn),
             len(portfolio_items),
-            any(sanitize_str(r.get("inn")) == "6316031581" for r in report_events),
-            "6316031581" in latest_event_by_inn,
-            any(sanitize_str(item.get("inn")) == "6316031581" for item in portfolio_items),
+            has_6316031581_report,
+            has_6316031581_latest,
+            has_6316031581_portfolio,
         )
+        if has_6316031581_latest:
+            probe_evt = latest_event_by_inn["6316031581"]
+            logger.info(
+                "pre-export latest_event probe | inn=6316031581 event_type=%s event_date=%s source=%s url=%s",
+                probe_evt.get("event_type", ""),
+                probe_evt.get("event_date", ""),
+                probe_evt.get("source", ""),
+                probe_evt.get("event_url", ""),
+            )
 
         latest_news_by_key: dict[tuple[str, str], dict[str, str]] = {}
         for row in sorted(news_rows, key=lambda x: x.get("news_date", ""), reverse=True):
             latest_news_by_key.setdefault((row.get("instrument_type", ""), row.get("instrument_code", "")), row)
 
-        export_portfolio(portfolio_items, latest_event_by_inn, latest_news_by_key, news_rows, report_events)
+        export_portfolio(portfolio_items, latest_event_by_inn, latest_news_by_key, news_rows, report_events, logger)
 
     _, elapsed = timed(stage_export)
     stage_times["Этап 6: Экспорт витрин"] = elapsed
