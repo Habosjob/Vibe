@@ -749,10 +749,13 @@ def export_scalp_excel(signals: list[dict[str, Any]], snapshots: list[dict[str, 
 
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
-    ws.conditional_formatting.add(
-        f"B2:B{ws.max_row}",
-        ColorScaleRule(start_type="num", start_value=0, start_color="FFF2CC", mid_type="num", mid_value=50, mid_color="FFD966", end_type="num", end_value=100, end_color="63BE7B"),
-    )
+    if ws.max_row >= 2:
+        ws.conditional_formatting.add(
+            f"B2:B{ws.max_row}",
+            ColorScaleRule(start_type="num", start_value=0, start_color="FFF2CC", mid_type="num", mid_value=50, mid_color="FFD966", end_type="num", end_value=100, end_color="63BE7B"),
+        )
+    else:
+        logger.info("No signal rows for conditional formatting; exported headers only")
 
     for row in range(2, ws.max_row + 1):
         score_cell = ws[f"I{row}"]
