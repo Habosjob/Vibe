@@ -1257,21 +1257,32 @@ def _validate_portfolio_workbook(
         if sanitize_str(expected_evt.get("source", "")).lower() == "e-disclosure" and not u_event_url:
             raise RuntimeError(f"Portfolio validation failed: INN={inn} has e-disclosure event without URL in Portfolio_UniqueEmitents")
 
-    probe_inn = "6316031581"
-    has_probe_news_report = False
+    news_report_by_inn: set[str] = set()
     for row in ws_news.iter_rows(min_row=2, values_only=True):
-        if sanitize_str(row[0]) == "Report" and sanitize_str(row[3]) == probe_inn and sanitize_str(row[7]).lower() == "e-disclosure":
-            has_probe_news_report = True
-            break
-    if probe_inn in latest_event_by_inn and not has_probe_news_report:
-        raise RuntimeError("Portfolio validation failed: INN=6316031581 missing Report/e-disclosure row in News")
+        if sanitize_str(row[0]) == "Report" and sanitize_str(row[7]).lower() == "e-disclosure":
+            inn = sanitize_str(row[3])
+            if inn:
+                news_report_by_inn.add(inn)
+
+    expected_report_news_inns = {
+        inn
+        for inn in expected_inns
+        if sanitize_str(latest_event_by_inn.get(inn, {}).get("source", "")).lower() == "e-disclosure"
+    }
+    missing_report_news_inns = sorted(expected_report_news_inns - news_report_by_inn)
+    if missing_report_news_inns:
+        raise RuntimeError(
+            "Portfolio validation failed: missing Report/e-disclosure row(s) in News for INN="
+            + ", ".join(missing_report_news_inns)
+        )
+
+    probe_inn = "6316031581"
     logger.info(
-        "post-save diagnostics | has_6316031581_portfolio_all=%s has_6316031581_portfolio_unique=%s has_6316031581_news_report=%s portfolio_all_event=%s portfolio_unique_event=%s",
+        "post-save diagnostics | has_6316031581_portfolio_all=%s has_6316031581_portfolio_unique=%s has_6316031581_news_report=%s expected_report_news_count=%s",
         probe_inn in rows_all,
         probe_inn in rows_unique,
-        has_probe_news_report,
-        rows_all.get(probe_inn, ("", "", "", "")),
-        rows_unique.get(probe_inn, ("", "", "", "")),
+        probe_inn in news_report_by_inn,
+        len(expected_report_news_inns),
     )
 
 
