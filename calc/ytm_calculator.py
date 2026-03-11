@@ -358,6 +358,14 @@ def _resolve_floater_reference_rate(index_type: str, tenor: float | None, cbr_da
     return zcyc_rate if zcyc_rate is not None else key_rate
 
 
+def _resolve_floater_spread_to_key(index_type: str, tenor: float | None, cbr_data: dict[str, object]) -> float:
+    key_rate = _parse_decimal_value(cbr_data.get("key_rate"))
+    if key_rate is None:
+        key_rate = float(KEY_RATE_FORECAST.get(0, 0.0))
+    reference_rate = _resolve_floater_reference_rate(index_type, tenor, cbr_data)
+    return key_rate - reference_rate
+
+
 @dataclass
 class BondData:
     isin: str
@@ -595,13 +603,15 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
 
     current_index_rate = None
     premium = None
+    current_coupon_rate_percent = effective_coupon_percent
     if _is_floater_coupon_type(effective_coupon_type):
         terms = parse_floater_terms(effective_formula)
         if not terms:
             raise ValueError("Не удалось распарсить формулу флоатера. Введите формулу вручную.")
         index_type, tenor, premium = terms
         current_index_rate = _resolve_floater_reference_rate(index_type, tenor, cbr_data)
-        coupon_rate = current_index_rate + premium
+        spread_to_key = _resolve_floater_spread_to_key(index_type, tenor, cbr_data)
+        current_coupon_rate_percent = current_index_rate + premium
 
         event_dates = sorted(set(coupon_dates) | set(amort_map.keys()) | {target_date.date()})
         for dt in event_dates:
@@ -609,6 +619,10 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
                 continue
             amount = 0.0
             if dt in coupon_dates:
+                bucket = _year_bucket(dt, datetime.now().date())
+                key_forecast = _forecast_by_bucket(KEY_RATE_FORECAST, bucket)
+                forecast_index_rate = key_forecast - spread_to_key
+                coupon_rate = forecast_index_rate + premium
                 amount += principal * (coupon_rate / 100.0) / coupon_freq
             if dt in amort_map:
                 pay = min(principal, amort_map[dt])
@@ -649,8 +663,8 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
     total_income = sum(cf for _, cf in cashflows) - dirty_price
     simple_yield_to_maturity = (total_income / dirty_price) / years_to_target if years_to_target > 0 else 0.0
 
-    first_year_coupon = sum(amount for years, amount in cashflows if years <= 1.0)
-    current_yield = first_year_coupon / dirty_price if dirty_price > 0 else 0.0
+    annual_coupon_amount = data.facevalue * (current_coupon_rate_percent / 100.0)
+    current_yield = annual_coupon_amount / dirty_price if dirty_price > 0 else 0.0
 
     simple_margin = ""
     if _is_floater_coupon_type(effective_coupon_type) and current_index_rate is not None:
