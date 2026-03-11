@@ -4724,34 +4724,64 @@ def _extract_sheet_headers(ws: Worksheet) -> list[str]:
     return headers
 
 
+def _extract_sheet_rows_by_headers(ws: Worksheet, headers: list[str]) -> list[dict[str, str]]:
+    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), tuple())
+    header_map = {
+        _normalize_override_header(value): idx
+        for idx, value in enumerate(header_row)
+        if _normalize_override_header(value)
+    }
+    rows: list[dict[str, str]] = []
+    max_col = max(header_map.values()) + 1 if header_map else len(headers)
+    for raw_row in ws.iter_rows(min_row=2, max_col=max_col, values_only=True):
+        row_dict: dict[str, str] = {}
+        for header in headers:
+            idx = header_map.get(_normalize_override_header(header))
+            value = raw_row[idx] if idx is not None and idx < len(raw_row) else ""
+            row_dict[header] = str(value or "").strip()
+        if any(str(v).strip() for v in row_dict.values()):
+            rows.append(row_dict)
+    return rows
+
+
+def _apply_default_bond_overrides_sheet_ux(ws: Worksheet) -> None:
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = "A1:G1"
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 12
+    ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["F"].width = 54
+    ws.column_dimensions["G"].width = 22
+    bool_validation = DataValidation(type="list", formula1='"✅,❌"', allow_blank=True)
+    ws.add_data_validation(bool_validation)
+    for col in ("B", "C", "D", "E"):
+        bool_validation.add(f"{col}2:{col}5000")
+
+
 def ensure_bond_overrides_excel(logger: logging.Logger | None = None) -> Path:
     overrides_path = config.BASE_DIR / getattr(config, "BOND_OVERRIDES_XLSX_FILENAME", "BondOverrides.xlsx")
+    backup_path = overrides_path.with_name(f"{overrides_path.stem}.backup{overrides_path.suffix}")
     sheet_name = BOND_OVERRIDES_SHEET_NAME
     required_headers = ["ISIN", "Enabled", "Drop", "Квал", "Суборд", "CouponFormulaOverride", "Тип купона"]
     logger = logger or logging.getLogger("bonds_main")
-    logger.info("BondOverrides ensure: file_exists=%s path=%s", overrides_path.exists(), overrides_path)
+    logger.info(
+        "BondOverrides ensure: file_exists=%s backup_exists=%s path=%s backup_path=%s",
+        overrides_path.exists(),
+        backup_path.exists(),
+        overrides_path,
+        backup_path,
+    )
 
-    if not overrides_path.exists():
+    if not overrides_path.exists() and not backup_path.exists():
         wb = Workbook()
         ws = wb.active
         ws.title = sheet_name
         ws.append(BOND_OVERRIDES_HEADERS)
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = "A1:G1"
-        ws.column_dimensions["A"].width = 20
-        ws.column_dimensions["B"].width = 12
-        ws.column_dimensions["C"].width = 12
-        ws.column_dimensions["D"].width = 12
-        ws.column_dimensions["E"].width = 12
-        ws.column_dimensions["F"].width = 54
-        ws.column_dimensions["G"].width = 22
-
-        bool_validation = DataValidation(type="list", formula1='"✅,❌"', allow_blank=True)
-        ws.add_data_validation(bool_validation)
-        for col in ("B", "C", "D", "E"):
-            bool_validation.add(f"{col}2:{col}5000")
+        _apply_default_bond_overrides_sheet_ux(ws)
 
         _safe_save_workbook_atomic(wb, overrides_path)
         wb.close()
@@ -4774,43 +4804,114 @@ def ensure_bond_overrides_excel(logger: logging.Logger | None = None) -> Path:
             verify_wb.close()
         return overrides_path
 
-    wb = load_workbook(overrides_path)
+    wb = load_workbook(overrides_path) if overrides_path.exists() else Workbook()
+    backup_wb = load_workbook(backup_path, data_only=True) if backup_path.exists() else None
     try:
-        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
-        logger.info("BondOverrides ensure: sheet_found=%s using_sheet=%s", sheet_name in wb.sheetnames, ws.title)
-        changed = False
-        rows_before = ws.max_row
-        header_row = ws[1]
-        header_map: dict[str, int] = {}
-        for idx, cell in enumerate(header_row, start=1):
-            header_key = _normalize_override_header(cell.value)
-            if header_key:
-                header_map[header_key] = idx
-
-        headers_before = _extract_sheet_headers(ws)
-        logger.info("BondOverrides ensure: headers_before=%s rows_before=%s", headers_before, rows_before)
-
-        coupon_type_key = _normalize_override_header("Тип купона")
-        coupon_formula_key = _normalize_override_header("CouponFormulaOverride")
-        if header_map and coupon_type_key not in header_map:
-            formula_col = header_map.get(coupon_formula_key)
-            target_col = formula_col + 1 if formula_col else (max(header_map.values()) + 1)
-            if target_col <= ws.max_column and str(ws.cell(row=1, column=target_col).value or "").strip():
-                ws.insert_cols(target_col)
-            ws.cell(row=1, column=target_col, value="Тип купона")
-            template_col = formula_col if formula_col else 1
-            ws.cell(row=1, column=target_col).font = ws.cell(row=1, column=template_col).font.copy()
-            ws.column_dimensions[ws.cell(row=1, column=target_col).column_letter].width = 22
-            changed = True
-            logger.info("BondOverrides ensure: coupon_type_added=true target_col=%s", target_col)
+        if sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
         else:
-            logger.info("BondOverrides ensure: coupon_type_present=%s", coupon_type_key in header_map)
+            ws = wb.active
+            ws.title = sheet_name
 
-        ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=ws.max_column).column_letter}1"
-        if changed:
-            _safe_save_workbook_atomic(wb, overrides_path)
+        backup_ws = None
+        if backup_wb is not None:
+            backup_ws = backup_wb[sheet_name] if sheet_name in backup_wb.sheetnames else backup_wb.active
+
+        headers_backup = _extract_sheet_headers(backup_ws) if backup_ws is not None else []
+        headers_before = _extract_sheet_headers(ws)
+        rows_before = ws.max_row
+        logger.info(
+            "BondOverrides ensure: headers_backup=%s headers_current_before_repair=%s rows_before=%s",
+            headers_backup,
+            headers_before,
+            rows_before,
+        )
+
+        current_rows = _extract_sheet_rows_by_headers(ws, required_headers)
+        backup_rows = _extract_sheet_rows_by_headers(backup_ws, required_headers) if backup_ws is not None else []
+
+        current_by_isin: dict[str, dict[str, str]] = {}
+        current_order: list[str] = []
+        for row in current_rows:
+            isin = _normalize_isin(row.get("ISIN"))
+            if not isin:
+                continue
+            current_by_isin[isin] = row
+            if isin not in current_order:
+                current_order.append(isin)
+
+        appended_from_backup = 0
+        for row in backup_rows:
+            isin = _normalize_isin(row.get("ISIN"))
+            if not isin or isin in current_by_isin:
+                continue
+            current_by_isin[isin] = row
+            current_order.append(isin)
+            appended_from_backup += 1
+
+        was_coupon_type_present = "Тип купона" in headers_before
+        removed_extra_columns = len([
+            header for header in headers_before if header and header not in required_headers
+        ])
+
+        if ws.max_row > 1:
+            ws.delete_rows(2, ws.max_row - 1)
+        if ws.max_column > len(required_headers):
+            ws.delete_cols(len(required_headers) + 1, ws.max_column - len(required_headers))
+        elif ws.max_column < len(required_headers):
+            ws.insert_cols(ws.max_column + 1, len(required_headers) - ws.max_column)
+
+        for col_idx, header in enumerate(required_headers, start=1):
+            ws.cell(row=1, column=col_idx, value=header)
+
+        for isin in current_order:
+            row_data = current_by_isin.get(isin, {})
+            ws.append([row_data.get(header, "") for header in required_headers])
+
+        _apply_default_bond_overrides_sheet_ux(ws)
+        _safe_save_workbook_atomic(wb, overrides_path)
+
+        logger.info(
+            "BondOverrides ensure: coupon_type_added=%s removed_extra_columns=%s rows_transferred=%s appended_from_backup=%s",
+            not was_coupon_type_present,
+            removed_extra_columns,
+            len(current_order),
+            appended_from_backup,
+        )
     finally:
         wb.close()
+        if backup_wb is not None:
+            backup_wb.close()
+
+    verify_wb = load_workbook(overrides_path, read_only=True, data_only=True)
+    try:
+        verify_ws = verify_wb[sheet_name] if sheet_name in verify_wb.sheetnames else verify_wb.active
+        headers_after_reopen = _extract_sheet_headers(verify_ws)
+        rows_after = verify_ws.max_row
+        logger.info("BondOverrides ensure: headers_after_reopen=%s rows_after=%s", headers_after_reopen, rows_after)
+        if headers_after_reopen != required_headers:
+            raise RuntimeError(
+                "BondOverrides verification failed after save+reopen: unexpected headers. "
+                f"file={overrides_path}; sheet={verify_ws.title}; headers={headers_after_reopen}"
+            )
+        if rows_after < rows_before:
+            raise RuntimeError(
+                "BondOverrides verification failed after save+reopen: row count decreased. "
+                f"file={overrides_path}; sheet={verify_ws.title}; rows_before={rows_before}; rows_after={rows_after}"
+            )
+
+        verify_isins = set()
+        for raw_row in verify_ws.iter_rows(min_row=2, values_only=True):
+            isin = _normalize_isin(raw_row[0] if raw_row else None)
+            if isin:
+                verify_isins.add(isin)
+        if len(verify_isins) < len(current_by_isin):
+            raise RuntimeError(
+                "BondOverrides verification failed after save+reopen: ISIN rows were lost. "
+                f"file={overrides_path}; sheet={verify_ws.title}; expected_isin_count={len(current_by_isin)}; actual_isin_count={len(verify_isins)}"
+            )
+    finally:
+        verify_wb.close()
 
     verify_wb = load_workbook(overrides_path, read_only=True, data_only=True)
     try:
