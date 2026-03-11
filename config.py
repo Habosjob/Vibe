@@ -327,7 +327,7 @@ SCREENER_XLSX_FILENAME = "Screener.xlsx"
 
 # Имя Excel-файла ручных переопределений по облигациям для Screener.
 # Внутри лист BondOverrides с колонками:
-# ISIN, Enabled, Drop, Квал, Суборд, CouponFormulaOverride.
+# ISIN, Enabled, Drop, Квал, Суборд, CouponFormulaOverride, Тип купона.
 # По умолчанию: BondOverrides.xlsx.
 BOND_OVERRIDES_XLSX_FILENAME = "BondOverrides.xlsx"
 
