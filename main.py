@@ -6,9 +6,11 @@ import html
 import io
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
+import tempfile
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2358,6 +2360,9 @@ SCREENER_SOURCE_TABLES = (
     (config.MERGE_YELLOW_TABLE_NAME, "Yellow", 0),
 )
 
+BOND_OVERRIDES_SHEET_NAME = "BondOverrides"
+BOND_OVERRIDES_HEADERS = ["ISIN", "Enabled", "Drop", "Квал", "Суборд", "CouponFormulaOverride", "Тип купона"]
+
 SCREENER_COLUMNS = [
     "ISIN",
     "Название",
@@ -4682,33 +4687,91 @@ def _normalize_isin(raw_value: object) -> str | None:
     return cleaned or None
 
 
+def _normalize_override_header(raw_value: object) -> str:
+    return str(raw_value or "").strip().replace("﻿", "").casefold()
+
+
+def _safe_save_workbook_atomic(wb: Workbook, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        backup_path = destination.with_name(f"{destination.stem}.backup{destination.suffix}")
+        if not backup_path.exists():
+            backup_path.write_bytes(destination.read_bytes())
+
+    with tempfile.NamedTemporaryFile(
+        prefix=f"{destination.stem}.",
+        suffix=destination.suffix,
+        dir=destination.parent,
+        delete=False,
+    ) as tmp_file:
+        temp_path = Path(tmp_file.name)
+
+    try:
+        wb.save(temp_path)
+        os.replace(temp_path, destination)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
 def ensure_bond_overrides_excel() -> Path:
     overrides_path = config.BASE_DIR / getattr(config, "BOND_OVERRIDES_XLSX_FILENAME", "BondOverrides.xlsx")
-    if overrides_path.exists():
+    if not overrides_path.exists():
+        wb = Workbook()
+        ws = wb.active
+        ws.title = BOND_OVERRIDES_SHEET_NAME
+        ws.append(BOND_OVERRIDES_HEADERS)
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = "A1:G1"
+        ws.column_dimensions["A"].width = 20
+        ws.column_dimensions["B"].width = 12
+        ws.column_dimensions["C"].width = 12
+        ws.column_dimensions["D"].width = 12
+        ws.column_dimensions["E"].width = 12
+        ws.column_dimensions["F"].width = 54
+        ws.column_dimensions["G"].width = 22
+
+        bool_validation = DataValidation(type="list", formula1='"✅,❌"', allow_blank=True)
+        ws.add_data_validation(bool_validation)
+        for col in ("B", "C", "D", "E"):
+            bool_validation.add(f"{col}2:{col}5000")
+
+        _safe_save_workbook_atomic(wb, overrides_path)
+        wb.close()
         return overrides_path
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "BondOverrides"
-    headers = ["ISIN", "Enabled", "Drop", "Квал", "Суборд", "CouponFormulaOverride"]
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = "A1:F1"
-    ws.column_dimensions["A"].width = 20
-    ws.column_dimensions["B"].width = 12
-    ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 12
-    ws.column_dimensions["E"].width = 12
-    ws.column_dimensions["F"].width = 54
+    wb = load_workbook(overrides_path)
+    try:
+        ws = wb[BOND_OVERRIDES_SHEET_NAME] if BOND_OVERRIDES_SHEET_NAME in wb.sheetnames else wb.active
+        changed = False
+        header_row = ws[1]
+        header_map: dict[str, int] = {}
+        for idx, cell in enumerate(header_row, start=1):
+            header_key = _normalize_override_header(cell.value)
+            if header_key:
+                header_map[header_key] = idx
 
-    bool_validation = DataValidation(type="list", formula1='"✅,❌"', allow_blank=True)
-    ws.add_data_validation(bool_validation)
-    for col in ("B", "C", "D", "E"):
-        bool_validation.add(f"{col}2:{col}5000")
+        coupon_type_key = _normalize_override_header("Тип купона")
+        coupon_formula_key = _normalize_override_header("CouponFormulaOverride")
+        if header_map and coupon_type_key not in header_map:
+            formula_col = header_map.get(coupon_formula_key)
+            target_col = formula_col + 1 if formula_col else (max(header_map.values()) + 1)
+            if target_col <= ws.max_column and str(ws.cell(row=1, column=target_col).value or "").strip():
+                ws.insert_cols(target_col)
+            ws.cell(row=1, column=target_col, value="Тип купона")
+            template_col = formula_col if formula_col else 1
+            ws.cell(row=1, column=target_col).font = ws.cell(row=1, column=template_col).font.copy()
+            ws.column_dimensions[ws.cell(row=1, column=target_col).column_letter].width = 22
+            changed = True
 
-    wb.save(overrides_path)
+        ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=ws.max_column).column_letter}1"
+        if changed:
+            _safe_save_workbook_atomic(wb, overrides_path)
+    finally:
+        wb.close()
+
     return overrides_path
 
 
@@ -4729,26 +4792,54 @@ def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, obj
     overrides_path = ensure_bond_overrides_excel()
     wb = load_workbook(overrides_path, read_only=True, data_only=True)
     try:
-        ws = wb["BondOverrides"] if "BondOverrides" in wb.sheetnames else wb.active
+        ws = wb[BOND_OVERRIDES_SHEET_NAME] if BOND_OVERRIDES_SHEET_NAME in wb.sheetnames else wb.active
         overrides: dict[str, dict[str, object]] = {}
         total_rows = 0
         enabled_rows = 0
-        for row in ws.iter_rows(min_row=2, max_col=6, values_only=True):
-            isin_norm = _normalize_isin(row[0])
+
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), tuple())
+        header_map = {
+            _normalize_override_header(value): idx
+            for idx, value in enumerate(header_row)
+            if _normalize_override_header(value)
+        }
+
+        isin_idx = header_map.get(_normalize_override_header("ISIN"), 0)
+        enabled_idx = header_map.get(_normalize_override_header("Enabled"), 1)
+        drop_idx = header_map.get(_normalize_override_header("Drop"), 2)
+        kval_idx = header_map.get(_normalize_override_header("Квал"), 3)
+        subord_idx = header_map.get(_normalize_override_header("Суборд"), 4)
+        coupon_formula_idx = header_map.get(_normalize_override_header("CouponFormulaOverride"), 5)
+        coupon_type_idx = header_map.get(_normalize_override_header("Тип купона"))
+
+        max_col = max(
+            idx
+            for idx in [isin_idx, enabled_idx, drop_idx, kval_idx, subord_idx, coupon_formula_idx, coupon_type_idx]
+            if idx is not None
+        ) + 1
+
+        for row in ws.iter_rows(min_row=2, max_col=max_col, values_only=True):
+            isin_norm = _normalize_isin(row[isin_idx] if isin_idx < len(row) else None)
             if not isin_norm:
                 continue
             total_rows += 1
-            enabled = _parse_override_bool(row[1])
+            enabled = _parse_override_bool(row[enabled_idx] if enabled_idx < len(row) else None)
             if enabled is not True:
                 continue
             enabled_rows += 1
-            coupon_formula_override = str(row[5] or "").strip()
+            coupon_formula_override = str(row[coupon_formula_idx] or "").strip() if coupon_formula_idx < len(row) else ""
+            coupon_type_override = (
+                str(row[coupon_type_idx] or "").strip()
+                if coupon_type_idx is not None and coupon_type_idx < len(row)
+                else ""
+            )
             overrides[isin_norm] = {
                 "enabled": True,
-                "drop": _parse_override_bool(row[2]),
-                "kval": _parse_override_bool(row[3]),
-                "subord": _parse_override_bool(row[4]),
+                "drop": _parse_override_bool(row[drop_idx] if drop_idx < len(row) else None),
+                "kval": _parse_override_bool(row[kval_idx] if kval_idx < len(row) else None),
+                "subord": _parse_override_bool(row[subord_idx] if subord_idx < len(row) else None),
                 "coupon_formula_override": coupon_formula_override or None,
+                "coupon_type_override": coupon_type_override or None,
             }
     finally:
         wb.close()
@@ -4771,6 +4862,7 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
     overrides_kval_applied_count = 0
     overrides_subord_applied_count = 0
     overrides_formula_applied_count = 0
+    overrides_coupon_type_applied_count = 0
 
     cbr_data = get_cbr_reference_data(conn, logger, datetime.now(timezone.utc))
     for source_table, source_list, score in SCREENER_SOURCE_TABLES:
@@ -4811,6 +4903,9 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
                 if override.get("coupon_formula_override"):
                     row_values[21] = str(override.get("coupon_formula_override") or "").strip()
                     overrides_formula_applied_count += 1
+                if override.get("coupon_type_override"):
+                    row_values[15] = str(override.get("coupon_type_override") or "").strip()
+                    overrides_coupon_type_applied_count += 1
             filtered_rows.append(tuple(row_values))
 
         rows = filtered_rows
@@ -5007,13 +5102,14 @@ def rebuild_screener_table(conn: sqlite3.Connection) -> dict[str, int]:
 
     conn.commit()
     logger.info(
-        "BondOverrides: total_rows=%s, enabled_rows=%s, drop_applied=%s, kval_applied=%s, subord_applied=%s, formula_applied=%s",
+        "BondOverrides: total_rows=%s, enabled_rows=%s, drop_applied=%s, kval_applied=%s, subord_applied=%s, formula_applied=%s, coupon_type_applied=%s",
         overrides_total_rows,
         overrides_enabled_rows,
         overrides_drop_applied_count,
         overrides_kval_applied_count,
         overrides_subord_applied_count,
         overrides_formula_applied_count,
+        overrides_coupon_type_applied_count,
     )
     total = conn.execute(f'SELECT COUNT(*) FROM "{SCREENER_TABLE_NAME}"').fetchone()[0]
     return {
@@ -5161,9 +5257,10 @@ def main() -> None:
     try:
         print("=====\nЭтап 1: Подготовка окружения")
         s = perf_counter()
-        with progress(total=2, desc="Подготовка", unit="шаг") as pbar:
+        with progress(total=3, desc="Подготовка", unit="шаг") as pbar:
             ensure_directories()
             migrate_legacy_db_if_needed()
+            ensure_bond_overrides_excel()
             pbar.update(1)
             pbar.set_description("Подготовка БД")
             with connect_db(db_path) as conn:
@@ -5171,6 +5268,8 @@ def main() -> None:
                 migrate_legacy_rates_table_if_needed(conn)
                 ensure_emitents_table(conn)
                 ensure_dohod_table(conn)
+            pbar.update(1)
+            pbar.set_description("Инициализация витрин")
             pbar.update(1)
         stage_times["Этап 1: Подготовка окружения"] = perf_counter() - s
 
