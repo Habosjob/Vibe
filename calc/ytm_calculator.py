@@ -1,7 +1,5 @@
-import json
 import logging
 import re
-import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,6 +8,7 @@ from typing import Any
 
 import requests
 from tqdm import tqdm
+from lxml import etree
 
 # =========================
 # CONFIG (настройки скрипта)
@@ -33,6 +32,12 @@ ENABLE_FILE_LOG = True
 LOG_FILENAME = "ytm_calc.log"
 # Включить полуавтоматический режим ручных правок (формула/цена/НКД/частота): True/False.
 ENABLE_MANUAL_OVERRIDE = True
+# Префикс URL карточки бумаги на Corpbonds (источник формулы купона).
+CORPBONDS_BOND_URL_PREFIX = "https://corpbonds.ru/bond/"
+# Таймаут запросов к Corpbonds, секунды.
+CORPBONDS_REQUEST_TIMEOUT_SECONDS = 30
+# User-Agent для Corpbonds (чтобы сайт не резал пустые агенты).
+CORPBONDS_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 
 def _setup_logger() -> logging.Logger:
@@ -157,6 +162,82 @@ def _year_bucket(target_date, valuation_date) -> int:
     return int(delta_days / 365.25)
 
 
+def _normalize_label(raw_label: str) -> str:
+    cleaned = str(raw_label or "").replace("\xa0", " ").replace("?", " ")
+    return " ".join(cleaned.split()).casefold()
+
+
+def parse_corpbonds_page_fields(raw_html: str) -> dict[str, str]:
+    parser = etree.HTMLParser(recover=True)
+    root = etree.HTML(raw_html, parser=parser)
+    parsed = {
+        "Цена последняя": "",
+        "Тип купона": "",
+        "Ставка купона": "",
+        "НКД": "",
+        "Формула купона": "",
+        "Дата ближайшего купона": "",
+        "Дата ближайшей оферты": "",
+        "Наличие амортизации": "",
+        "Купон лесенкой": "",
+    }
+    if root is None:
+        return parsed
+
+    target_tables = root.xpath(
+        "//h1[contains(translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'доходность')]/following::table[1]"
+        " | //*[contains(translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'купонные выплаты')]/following::table[1]"
+        " | //*[contains(translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'доходность и цена')]/following::table[1]"
+    )
+    if not target_tables:
+        target_tables = root.xpath("//table")
+
+    for row in [r for table in target_tables for r in table.xpath('.//tr[td]')]:
+        tds = row.xpath("./td")
+        if len(tds) < 2:
+            continue
+        label = " ".join(" ".join(tds[0].itertext()).split())
+        value = " ".join(" ".join(tds[-1].itertext()).split())
+        if not label:
+            continue
+        normalized = _normalize_label(label)
+        if normalized.startswith("цена последняя"):
+            parsed["Цена последняя"] = value
+        elif normalized.startswith("тип купона"):
+            parsed["Тип купона"] = value
+        elif normalized.startswith("ставка купона"):
+            parsed["Ставка купона"] = value
+        elif normalized.startswith("накопленный купонный доход (нкд)") or normalized == "нкд":
+            parsed["НКД"] = value
+        elif normalized.startswith("формула купона") or normalized.startswith("формула флоатера"):
+            parsed["Формула купона"] = value
+        elif normalized.startswith("дата ближайшего купона"):
+            parsed["Дата ближайшего купона"] = value
+        elif normalized.startswith("дата ближайшей оферты"):
+            parsed["Дата ближайшей оферты"] = value
+        elif normalized.startswith("наличие амортизации"):
+            parsed["Наличие амортизации"] = value
+        elif normalized.startswith("купон лесенкой"):
+            parsed["Купон лесенкой"] = value
+    return parsed
+
+
+def _fetch_corpbonds_payload(secid: str, logger: logging.Logger) -> dict[str, str]:
+    url = f"{CORPBONDS_BOND_URL_PREFIX}{secid}"
+    logger.info("GET %s", url)
+    response = requests.get(
+        url,
+        timeout=CORPBONDS_REQUEST_TIMEOUT_SECONDS,
+        headers={
+            "User-Agent": CORPBONDS_USER_AGENT,
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    )
+    response.raise_for_status()
+    return parse_corpbonds_page_fields(response.text)
+
+
 def _solve_nominal_periodic_ytm_bisection(dirty_price: float, coupon_frequency: float, cashflows: list[tuple[float, float]]) -> float | None:
     if not cashflows:
         return None
@@ -198,7 +279,7 @@ def parse_floater_terms(formula_raw: object) -> tuple[str, float | None, float] 
     elif "ruonia" in normalized:
         index_type = "ruonia"
         tenor_years = None
-    elif "ключ" in normalized or "цб" in normalized:
+    elif "ключ" in normalized or "цб" in normalized or "key rate" in normalized or re.search(r"(^|[^a-zа-я])(kc|кс)([^a-zа-я]|$)", normalized):
         index_type = "key"
         tenor_years = None
     else:
@@ -255,6 +336,14 @@ class BondData:
     offerdate: str
     price_percent: float
     amort_schedule: list[tuple[datetime, float]]
+    corpbonds_coupon_type: str
+    corpbonds_coupon_formula: str
+    corpbonds_coupon_rate: float
+    corpbonds_nkd: float
+    corpbonds_price: float
+    corpbonds_next_coupon_date: str
+    corpbonds_offerdate: str
+    corpbonds_has_amort: str
 
 
 def _http_get_json(url: str, logger: logging.Logger) -> dict[str, Any]:
@@ -359,6 +448,8 @@ def _fetch_bond_by_isin(isin: str, logger: logging.Logger) -> BondData:
     coupons = _get_table(bondization, "coupons")
     amorts = _get_table(bondization, "amortizations")
 
+    corpbonds_payload = _fetch_corpbonds_payload(secid, logger)
+
     next_coupon_date = ""
     formula = ""
     coupon_type = "Фиксированный"
@@ -406,6 +497,14 @@ def _fetch_bond_by_isin(isin: str, logger: logging.Logger) -> BondData:
         offerdate=str(sec_row.get("OFFERDATE") or desc.get("OFFERDATE") or ""),
         price_percent=price_percent,
         amort_schedule=amort_schedule,
+        corpbonds_coupon_type=str(corpbonds_payload.get("Тип купона", "") or ""),
+        corpbonds_coupon_formula=str(corpbonds_payload.get("Формула купона", "") or ""),
+        corpbonds_coupon_rate=_parse_decimal_value(corpbonds_payload.get("Ставка купона")) or 0.0,
+        corpbonds_nkd=_parse_decimal_value(corpbonds_payload.get("НКД")) or 0.0,
+        corpbonds_price=_parse_decimal_value(corpbonds_payload.get("Цена последняя")) or 0.0,
+        corpbonds_next_coupon_date=str(corpbonds_payload.get("Дата ближайшего купона", "") or ""),
+        corpbonds_offerdate=str(corpbonds_payload.get("Дата ближайшей оферты", "") or ""),
+        corpbonds_has_amort=str(corpbonds_payload.get("Наличие амортизации", "") or ""),
     )
 
 
@@ -431,7 +530,7 @@ def _build_coupon_dates(target_date: datetime, coupon_frequency: float, coupon_p
 
 
 def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Logger) -> dict[str, str]:
-    target_date = _parse_bond_date(data.offerdate) or _parse_bond_date(data.matdate)
+    target_date = _parse_bond_date(data.corpbonds_offerdate) or _parse_bond_date(data.offerdate) or _parse_bond_date(data.matdate)
     if not target_date:
         raise ValueError("Нет даты оферты/погашения")
 
@@ -439,22 +538,29 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
         logger.warning("Suspicious NKD=%s for %s", data.nkd, data.isin)
         data.nkd = 0.0
 
-    dirty_price = _normalize_purchase_price(data.price_percent, data.facevalue, data.nkd)
+    input_price = data.corpbonds_price if data.corpbonds_price > 0 else data.price_percent
+    input_nkd = data.corpbonds_nkd if data.corpbonds_nkd > 0 else data.nkd
+    dirty_price = _normalize_purchase_price(input_price, data.facevalue, input_nkd)
     coupon_freq = data.coupon_frequency
-    coupon_dates = _build_coupon_dates(target_date, coupon_freq, data.coupon_period_days, data.next_coupon_date)
+    next_coupon_dt = data.corpbonds_next_coupon_date or data.next_coupon_date
+    coupon_dates = _build_coupon_dates(target_date, coupon_freq, data.coupon_period_days, next_coupon_dt)
 
     principal = data.facevalue
     amort_map = {d.date(): p for d, p in data.amort_schedule if p > 0}
     cashflows = []
 
-    if _is_floater_coupon_type(data.coupon_type):
-        terms = parse_floater_terms(data.coupon_formula)
+    effective_coupon_type = data.corpbonds_coupon_type or data.coupon_type
+    effective_formula = data.corpbonds_coupon_formula or data.coupon_formula
+    effective_coupon_percent = data.corpbonds_coupon_rate if data.corpbonds_coupon_rate > 0 else data.coupon_percent
+
+    if _is_floater_coupon_type(effective_coupon_type):
+        terms = parse_floater_terms(effective_formula)
         if not terms:
             raise ValueError("Не удалось распарсить формулу флоатера. Введите формулу вручную.")
         index_type, tenor, premium = terms
         key_rate = _parse_decimal_value(cbr_data.get("key_rate"))
         if key_rate is None:
-            raise ValueError("Не найдена ключевая ставка")
+            key_rate = float(KEY_RATE_FORECAST.get(0, 0.0))
         if index_type == "key":
             spread_to_key = 0.0
         elif index_type == "ruonia":
@@ -489,14 +595,14 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
             if amount > 0 and years > 0:
                 cashflows.append((years, amount))
     else:
-        period_coupon = data.facevalue * (data.coupon_percent / 100.0) / coupon_freq
+        period_coupon = data.facevalue * (effective_coupon_percent / 100.0) / coupon_freq
         event_dates = sorted(set(coupon_dates) | set(amort_map.keys()) | {target_date.date()})
         for dt in event_dates:
             if dt <= datetime.now().date():
                 continue
             amount = 0.0
             if dt in coupon_dates:
-                amount += principal * (data.coupon_percent / 100.0) / coupon_freq
+                amount += principal * (effective_coupon_percent / 100.0) / coupon_freq
             if dt in amort_map:
                 pay = min(principal, amort_map[dt])
                 amount += pay
@@ -518,11 +624,11 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
     years_to_target = (target_date.date() - datetime.now().date()).days / 365.25
     total_income = sum(cf for _, cf in cashflows) - dirty_price
     simple_yield_to_maturity = (total_income / dirty_price) / years_to_target if years_to_target > 0 else 0.0
-    annual_coupon_money = data.facevalue * (data.coupon_percent / 100.0)
+    annual_coupon_money = data.facevalue * (effective_coupon_percent / 100.0)
     current_yield = annual_coupon_money / dirty_price if dirty_price > 0 else 0.0
 
     simple_margin = ""
-    if _is_floater_coupon_type(data.coupon_type):
+    if _is_floater_coupon_type(effective_coupon_type):
         discount_spread = ((data.facevalue - dirty_price) / data.facevalue) / years_to_target * 100 if years_to_target > 0 else 0.0
         simple_margin = f"{discount_spread:.2f}%"
 
@@ -535,7 +641,7 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
         "Периодичность платежей": f"{coupon_freq:.2f}",
         "ТКД": f"{current_yield * 100:.2f}%",
         "Simple margin для флоатеров": simple_margin,
-        "Формула": data.coupon_formula or "-",
+        "Формула": effective_formula or "-",
     }
 
 
@@ -546,13 +652,15 @@ def _manual_override(data: BondData) -> BondData:
     if choice not in {"y", "yes", "д", "да"}:
         return data
 
-    formula = input(f"Формула купона [{data.coupon_formula}]: ").strip()
+    shown_formula = data.corpbonds_coupon_formula or data.coupon_formula
+    formula = input(f"Формула купона [{shown_formula}]: ").strip()
     price = input(f"Цена, % [{data.price_percent}]: ").strip()
     nkd = input(f"НКД [{data.nkd}]: ").strip()
     ctype = input(f"Тип купона (Фиксированный/Флоатер/Прочее) [{data.coupon_type}]: ").strip()
     freq = input(f"Частота выплат в год [{data.coupon_frequency}]: ").strip()
 
     if formula:
+        data.corpbonds_coupon_formula = formula
         data.coupon_formula = formula
     if price:
         data.price_percent = _parse_decimal_value(price) or data.price_percent
