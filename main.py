@@ -4714,12 +4714,27 @@ def _safe_save_workbook_atomic(wb: Workbook, destination: Path) -> None:
             temp_path.unlink(missing_ok=True)
 
 
-def ensure_bond_overrides_excel() -> Path:
+def _extract_sheet_headers(ws: Worksheet) -> list[str]:
+    headers: list[str] = []
+    for cell in ws[1]:
+        value = str(cell.value or "").strip()
+        if not value and len(headers) > 0:
+            break
+        headers.append(value)
+    return headers
+
+
+def ensure_bond_overrides_excel(logger: logging.Logger | None = None) -> Path:
     overrides_path = config.BASE_DIR / getattr(config, "BOND_OVERRIDES_XLSX_FILENAME", "BondOverrides.xlsx")
+    sheet_name = BOND_OVERRIDES_SHEET_NAME
+    required_headers = ["ISIN", "Enabled", "Drop", "Квал", "Суборд", "CouponFormulaOverride", "Тип купона"]
+    logger = logger or logging.getLogger("bonds_main")
+    logger.info("BondOverrides ensure: file_exists=%s path=%s", overrides_path.exists(), overrides_path)
+
     if not overrides_path.exists():
         wb = Workbook()
         ws = wb.active
-        ws.title = BOND_OVERRIDES_SHEET_NAME
+        ws.title = sheet_name
         ws.append(BOND_OVERRIDES_HEADERS)
         for cell in ws[1]:
             cell.font = Font(bold=True)
@@ -4740,18 +4755,40 @@ def ensure_bond_overrides_excel() -> Path:
 
         _safe_save_workbook_atomic(wb, overrides_path)
         wb.close()
+
+        verify_wb = load_workbook(overrides_path, read_only=True, data_only=True)
+        try:
+            verify_ws = verify_wb[sheet_name] if sheet_name in verify_wb.sheetnames else verify_wb.active
+            headers_after_reopen = _extract_sheet_headers(verify_ws)
+            if "Тип купона" not in headers_after_reopen:
+                raise RuntimeError(
+                    "BondOverrides verification failed after create: missing expected header 'Тип купона'. "
+                    f"file={overrides_path}; sheet={sheet_name}; headers={headers_after_reopen}"
+                )
+            logger.info(
+                "BondOverrides ensure(create): headers_after_reopen=%s rows=%s",
+                headers_after_reopen,
+                verify_ws.max_row,
+            )
+        finally:
+            verify_wb.close()
         return overrides_path
 
     wb = load_workbook(overrides_path)
     try:
-        ws = wb[BOND_OVERRIDES_SHEET_NAME] if BOND_OVERRIDES_SHEET_NAME in wb.sheetnames else wb.active
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+        logger.info("BondOverrides ensure: sheet_found=%s using_sheet=%s", sheet_name in wb.sheetnames, ws.title)
         changed = False
+        rows_before = ws.max_row
         header_row = ws[1]
         header_map: dict[str, int] = {}
         for idx, cell in enumerate(header_row, start=1):
             header_key = _normalize_override_header(cell.value)
             if header_key:
                 header_map[header_key] = idx
+
+        headers_before = _extract_sheet_headers(ws)
+        logger.info("BondOverrides ensure: headers_before=%s rows_before=%s", headers_before, rows_before)
 
         coupon_type_key = _normalize_override_header("Тип купона")
         coupon_formula_key = _normalize_override_header("CouponFormulaOverride")
@@ -4765,12 +4802,40 @@ def ensure_bond_overrides_excel() -> Path:
             ws.cell(row=1, column=target_col).font = ws.cell(row=1, column=template_col).font.copy()
             ws.column_dimensions[ws.cell(row=1, column=target_col).column_letter].width = 22
             changed = True
+            logger.info("BondOverrides ensure: coupon_type_added=true target_col=%s", target_col)
+        else:
+            logger.info("BondOverrides ensure: coupon_type_present=%s", coupon_type_key in header_map)
 
         ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=ws.max_column).column_letter}1"
         if changed:
             _safe_save_workbook_atomic(wb, overrides_path)
     finally:
         wb.close()
+
+    verify_wb = load_workbook(overrides_path, read_only=True, data_only=True)
+    try:
+        verify_ws = verify_wb[sheet_name] if sheet_name in verify_wb.sheetnames else verify_wb.active
+        headers_after_reopen = _extract_sheet_headers(verify_ws)
+        rows_after = verify_ws.max_row
+        logger.info("BondOverrides ensure: headers_after_reopen=%s rows_after=%s", headers_after_reopen, rows_after)
+        if "Тип купона" not in headers_after_reopen:
+            raise RuntimeError(
+                "BondOverrides verification failed after save+reopen: missing expected header 'Тип купона'. "
+                f"file={overrides_path}; sheet={verify_ws.title}; headers={headers_after_reopen}"
+            )
+        missing_legacy = [header for header in required_headers[:-1] if header not in headers_after_reopen]
+        if missing_legacy:
+            raise RuntimeError(
+                "BondOverrides verification failed after save+reopen: required legacy headers are missing. "
+                f"file={overrides_path}; sheet={verify_ws.title}; missing={missing_legacy}; headers={headers_after_reopen}"
+            )
+        if rows_after < rows_before:
+            raise RuntimeError(
+                "BondOverrides verification failed after save+reopen: row count decreased. "
+                f"file={overrides_path}; sheet={verify_ws.title}; rows_before={rows_before}; rows_after={rows_after}"
+            )
+    finally:
+        verify_wb.close()
 
     return overrides_path
 
@@ -4789,7 +4854,7 @@ def _parse_override_bool(raw_value: object) -> bool | None:
 
 
 def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, object]], int, int]:
-    overrides_path = ensure_bond_overrides_excel()
+    overrides_path = ensure_bond_overrides_excel(logger)
     wb = load_workbook(overrides_path, read_only=True, data_only=True)
     try:
         ws = wb[BOND_OVERRIDES_SHEET_NAME] if BOND_OVERRIDES_SHEET_NAME in wb.sheetnames else wb.active
@@ -4811,6 +4876,7 @@ def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, obj
         subord_idx = header_map.get(_normalize_override_header("Суборд"), 4)
         coupon_formula_idx = header_map.get(_normalize_override_header("CouponFormulaOverride"), 5)
         coupon_type_idx = header_map.get(_normalize_override_header("Тип купона"))
+        coupon_type_read_count = 0
 
         max_col = max(
             idx
@@ -4833,6 +4899,8 @@ def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, obj
                 if coupon_type_idx is not None and coupon_type_idx < len(row)
                 else ""
             )
+            if coupon_type_override:
+                coupon_type_read_count += 1
             overrides[isin_norm] = {
                 "enabled": True,
                 "drop": _parse_override_bool(row[drop_idx] if drop_idx < len(row) else None),
@@ -4843,6 +4911,14 @@ def load_bond_overrides(logger: logging.Logger) -> tuple[dict[str, dict[str, obj
             }
     finally:
         wb.close()
+
+    logger.info(
+        "BondOverrides load: path=%s total_rows=%s enabled_rows=%s coupon_type_values_read=%s",
+        overrides_path,
+        total_rows,
+        enabled_rows,
+        coupon_type_read_count,
+    )
 
     return overrides, total_rows, enabled_rows
 
