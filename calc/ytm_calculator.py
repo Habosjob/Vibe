@@ -345,17 +345,39 @@ def _resolve_target_date(data: "BondData") -> datetime | None:
     return min(valid) if valid else None
 
 
-def _resolve_floater_reference_rate(index_type: str, tenor: float | None, cbr_data: dict[str, object]) -> float:
+def _resolve_floater_reference_rate(index_type: str, tenor: float | None, cbr_data: dict[str, object], allow_forecast_fallback: bool = True) -> float | None:
     key_rate = _parse_decimal_value(cbr_data.get("key_rate"))
-    if key_rate is None:
-        key_rate = float(KEY_RATE_FORECAST.get(0, 0.0))
     if index_type == "key":
+        if key_rate is None and allow_forecast_fallback:
+            return float(KEY_RATE_FORECAST.get(0, 0.0))
         return key_rate
     if index_type == "ruonia":
         ruonia = _parse_decimal_value(cbr_data.get("ruonia"))
-        return ruonia if ruonia is not None else key_rate
+        if ruonia is not None:
+            return ruonia
+        if key_rate is not None:
+            return key_rate
+        if allow_forecast_fallback:
+            return float(KEY_RATE_FORECAST.get(0, 0.0))
+        return None
     zcyc_rate = pick_zcyc_point(cbr_data.get("zcyc", {}), tenor)
-    return zcyc_rate if zcyc_rate is not None else key_rate
+    if zcyc_rate is not None:
+        return zcyc_rate
+    if key_rate is not None:
+        return key_rate
+    if allow_forecast_fallback:
+        return float(KEY_RATE_FORECAST.get(0, 0.0))
+    return None
+
+
+def _resolve_floater_spread_to_key(index_type: str, tenor: float | None, cbr_data: dict[str, object]) -> float:
+    key_rate = _parse_decimal_value(cbr_data.get("key_rate"))
+    if key_rate is None:
+        key_rate = float(KEY_RATE_FORECAST.get(0, 0.0))
+    reference_rate = _resolve_floater_reference_rate(index_type, tenor, cbr_data, allow_forecast_fallback=True)
+    if reference_rate is None:
+        reference_rate = key_rate
+    return key_rate - reference_rate
 
 
 def _resolve_floater_spread_to_key(index_type: str, tenor: float | None, cbr_data: dict[str, object]) -> float:
@@ -609,9 +631,18 @@ def _calc_result(data: BondData, cbr_data: dict[str, object], logger: logging.Lo
         if not terms:
             raise ValueError("Не удалось распарсить формулу флоатера. Введите формулу вручную.")
         index_type, tenor, premium = terms
-        current_index_rate = _resolve_floater_reference_rate(index_type, tenor, cbr_data)
+        current_index_rate_live = _resolve_floater_reference_rate(index_type, tenor, cbr_data, allow_forecast_fallback=False)
         spread_to_key = _resolve_floater_spread_to_key(index_type, tenor, cbr_data)
-        current_coupon_rate_percent = current_index_rate + premium
+
+        if current_index_rate_live is not None:
+            current_index_rate = current_index_rate_live
+            current_coupon_rate_percent = current_index_rate + premium
+        elif effective_coupon_percent > 0:
+            current_coupon_rate_percent = effective_coupon_percent
+            current_index_rate = current_coupon_rate_percent - premium
+        else:
+            current_index_rate = None
+            current_coupon_rate_percent = 0.0
 
         event_dates = sorted(set(coupon_dates) | set(amort_map.keys()) | {target_date.date()})
         for dt in event_dates:
