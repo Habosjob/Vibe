@@ -380,6 +380,14 @@ def _resolve_floater_spread_to_key(index_type: str, tenor: float | None, cbr_dat
     return key_rate - reference_rate
 
 
+def _resolve_floater_spread_to_key(index_type: str, tenor: float | None, cbr_data: dict[str, object]) -> float:
+    key_rate = _parse_decimal_value(cbr_data.get("key_rate"))
+    if key_rate is None:
+        key_rate = float(KEY_RATE_FORECAST.get(0, 0.0))
+    reference_rate = _resolve_floater_reference_rate(index_type, tenor, cbr_data)
+    return key_rate - reference_rate
+
+
 @dataclass
 class BondData:
     isin: str
